@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8"/>
+<title>xlsx_number_formats</title>
+<meta name="generator" content="Docling HTML Serializer"/>
+<style>
+    html {
+        background-color: #f5f5f5;
+        font-family: Arial, sans-serif;
+        line-height: 1.6;
+    }
+    body {
+        max-width: 800px;
+        margin: 0 auto;
+        padding: 2rem;
+        background-color: white;
+        box-shadow: 0 0 10px rgba(0,0,0,0.1);
+    }
+    h1, h2, h3, h4, h5, h6 {
+        color: #333;
+        margin-top: 1.5em;
+        margin-bottom: 0.5em;
+    }
+    h1 {
+        font-size: 2em;
+        border-bottom: 1px solid #eee;
+        padding-bottom: 0.3em;
+    }
+    table {
+        border-collapse: collapse;
+        margin: 1em 0;
+        width: 100%;
+    }
+    th, td {
+        border: 1px solid #ddd;
+        padding: 8px;
+        text-align: left;
+    }
+    th {
+        background-color: #f2f2f2;
+        font-weight: bold;
+    }
+    figure {
+        margin: 1.5em 0;
+        text-align: center;
+    }
+    figcaption {
+        color: #666;
+        font-style: italic;
+        margin-top: 0.5em;
+    }
+    img {
+        max-width: 100%;
+        height: auto;
+    }
+    pre {
+        background-color: #f6f8fa;
+        border-radius: 3px;
+        padding: 1em;
+        overflow: auto;
+    }
+    code {
+        font-family: monospace;
+        background-color: #f6f8fa;
+        padding: 0.2em 0.4em;
+        border-radius: 3px;
+    }
+    pre code {
+        background-color: transparent;
+        padding: 0;
+    }
+    .formula {
+        text-align: center;
+        padding: 0.5em;
+        margin: 1em 0;
+        background-color: #f9f9f9;
+    }
+    .formula-not-decoded {
+        text-align: center;
+        padding: 0.5em;
+        margin: 1em 0;
+        background: repeating-linear-gradient(
+            45deg,
+            #f0f0f0,
+            #f0f0f0 10px,
+            #f9f9f9 10px,
+            #f9f9f9 20px
+        );
+    }
+    .page-break {
+        page-break-after: always;
+        border-top: 1px dashed #ccc;
+        margin: 2em 0;
+    }
+    .key-value-region {
+        background-color: #f9f9f9;
+        padding: 1em;
+        border-radius: 4px;
+        margin: 1em 0;
+    }
+    .key-value-region dt {
+        font-weight: bold;
+    }
+    .key-value-region dd {
+        margin-left: 1em;
+        margin-bottom: 0.5em;
+    }
+    .form-container {
+        border: 1px solid #ddd;
+        padding: 1em;
+        border-radius: 4px;
+        margin: 1em 0;
+    }
+    .form-item {
+        margin-bottom: 0.5em;
+    }
+    .image-classification {
+        font-size: 0.9em;
+        color: #666;
+        margin-top: 0.5em;
+    }
+    details.docling-meta {
+        margin: 0.5em 0;
+        font-size: 0.9em;
+        text-align: left;
+    }
+    figure details.docling-meta {
+        text-align: left;
+    }
+    details.docling-meta > summary {
+        cursor: pointer;
+        color: #555;
+        font-style: italic;
+        padding: 2px 6px;
+    }
+    .docling-meta-field {
+        background-color: #f0f0f0;
+        border-left: 3px solid #ccc;
+        padding: 6px 10px;
+        margin: 4px 0 4px 1em;
+        border-radius: 3px;
+        text-align: left;
+    }
+    .docling-meta-field-label {
+        font-weight: bold;
+        color: #444;
+    }
+    pre.docling-meta-code {
+        background-color: #1e1e1e;
+        color: #d4d4d4;
+        border-radius: 4px;
+        padding: 10px 12px;
+        margin: 6px 0;
+        overflow-x: auto;
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+        font-size: 0.85em;
+        line-height: 1.45;
+        white-space: pre;
+        tab-size: 4;
+    }
+    pre.docling-meta-code code {
+        background: transparent;
+        border: none;
+        padding: 0;
+        color: inherit;
+        font-family: inherit;
+        font-size: inherit;
+        display: block;
+        white-space: pre;
+    }
+</style>
+</head>
+<body>
+<div class='page'>
+<table><tbody><tr><th>Item</th><th>Qty</th><th>Price</th><th>Line total</th></tr><tr><td>Orange juice</td><td>10</td><td>$12.50</td><td>$125.00</td></tr><tr><td>Tea</td><td>20</td><td>$7.25</td><td>$145.00</td></tr><tr><td></td><td></td><td>Subtotal</td><td>$270.00</td></tr><tr><td></td><td></td><td>Discount</td><td>10%</td></tr><tr><td></td><td></td><td>Order month</td><td>Feb-25</td></tr></tbody></table>
+<table><tbody><tr><th>Format</th><th>Value</th><th>Code</th></tr><tr><td>Date</td><td>2025-02-01</td><td>mm-dd-yy</td></tr><tr><td>Datetime 22</td><td>2025-02-01 13:30:00</td><td>m/d/yy h:mm</td></tr><tr><td>Minutes</td><td>07:45</td><td>mm:ss</td></tr><tr><td>Afternoon</td><td>1:30 PM</td><td>h:mm AM/PM</td></tr><tr><td>Morning</td><td>12:07 AM</td><td>hh:mm AM/PM</td></tr><tr><td>24h</td><td>13:30</td><td>h:mm</td></tr><tr><td>Day month</td><td>1-Feb-25</td><td>d-mmm-yy</td></tr><tr><td>Due</td><td>Due Feb 1</td><td>&quot;Due &quot;mmm d</td></tr><tr><td>Due semicolon</td><td>Due; Feb 1</td><td>&quot;Due; &quot;mmm d</td></tr><tr><td>ISO</td><td>2025-02-01</td><td>yyyy-mm-dd</td></tr><tr><td>Weekday</td><td>Saturday, February 1, 2025</td><td>dddd, mmmm d, yyyy</td></tr><tr><td>Locale currency</td><td>$12.50</td><td>[$$-409]#,##0.00</td></tr><tr><td>Negative parens</td><td>($5.00)</td><td>&quot;$&quot;#,##0.00_);\(&quot;$&quot;#,##0.00\)</td></tr><tr><td>Negative red</td><td>$-5.00</td><td>&quot;$&quot;#,##0.00;[Red]&quot;$&quot;-#,##0.00</td></tr><tr><td>Negative plain</td><td>-$5.00</td><td>&quot;$&quot;#,##0.00</td></tr><tr><td>Percent half up</td><td>13%</td><td>0%</td></tr><tr><td>Percent neg</td><td>-13%</td><td>0%</td></tr><tr><td>Percent 2dp</td><td>1.25%</td><td>0.00%</td></tr><tr><td>Currency half up</td><td>$13</td><td>&quot;$&quot;#,##0</td></tr><tr><td>Currency neg half up</td><td>-$13</td><td>&quot;$&quot;#,##0</td></tr><tr><td>Currency group</td><td>$1,234.57</td><td>&quot;$&quot;#,##0.00</td></tr><tr><td>Zero dash</td><td>-</td><td>&quot;$&quot;0;(&quot;$&quot;0);&quot;-&quot;</td></tr><tr><td>Zero empty</td><td></td><td>&quot;$&quot;0;(&quot;$&quot;0);</td></tr><tr><td>Suffix</td><td>12.50$</td><td>0.00&quot;$&quot;</td></tr><tr><td>Duration</td><td>1 day, 2:07:00</td><td>[h]:mm:ss</td></tr><tr><td>Locale date raw</td><td>2025-02-01 00:00:00</td><td>[$-409]mmmm d, yyyy</td></tr><tr><td>Conditional raw</td><td>0.125</td><td>[&gt;=1]0%;0.0%</td></tr><tr><td>Optional decimals raw</td><td>12.5</td><td>&quot;$&quot;0.##</td></tr><tr><td>Digit literal raw</td><td>12.5</td><td>&quot;$0&quot;0.00</td></tr><tr><td>EUR raw</td><td>1234.5</td><td>&quot;EUR&quot; #,##0.00</td></tr><tr><td>Thousands raw</td><td>1234567.891</td><td>#,##0</td></tr><tr><td>Padded raw</td><td>42</td><td>00000</td></tr><tr><td>Large</td><td>$123,456,789,012.35</td><td>&quot;$&quot;#,##0.00</td></tr><tr><td>Tiny</td><td>0.00%</td><td>0.00%</td></tr><tr><td>Text format</td><td>3.5</td><td>@</td></tr><tr><td>Bool</td><td>True</td><td>0%</td></tr><tr><td>Scientific raw</td><td>12345.678</td><td>0.00E+00</td></tr><tr><td>Seconds</td><td>1:02:03 AM</td><td>h:mm:ss AM/PM</td></tr><tr><td>Timestamp 21</td><td>5:06:07</td><td>h:mm:ss</td></tr><tr><td>Date time text</td><td>2024-01-02 00:00:00</td><td>yyyy\-mm\-dd\ hh:mm:ss</td></tr><tr><td>Date time text h</td><td>2024-01-02 0:00:00</td><td>yyyy\-mm\-dd\ h:mm:ss</td></tr><tr><td>Escaped digits</td><td>1</td><td>\1\.0#</td></tr></tbody></table>
+</div>
+</body>
+</html>

@@ -1,0 +1,9 @@
+Paragraph before AlternateContent
+
+CHOICE_BRANCH_ACTIVE
+
+LEGITIMATE_DUPLICATE_PARAGRAPH
+
+LEGITIMATE_DUPLICATE_PARAGRAPH
+
+Paragraph after AlternateContent

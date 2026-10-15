@@ -7,7 +7,7 @@
 //!   (resvg — pure Rust) and rides the existing image pipeline, so layout +
 //!   OCR see the drawing exactly as a browser renders it and charts/diagrams
 //!   come back with structure (headings, tables, pictures).
-//! - **No ML** (`pdf-text` / wasm), or `--no-ocr` on any build: this backend
+//! - **No ML** (`pdf-text` / wasm), or `--no-ocr` / `--text-layer-only` on any build: this backend
 //!   extracts the `<text>` elements directly — lossless for the words, lossy
 //!   for structure. Labels are grouped into visual lines (top-to-bottom, then
 //!   left-to-right) and each line becomes a flat paragraph; no fonts, no
@@ -339,7 +339,7 @@ pub(crate) fn extract_text(source: &SourceDocument) -> Result<DoclingDocument, C
     if doc.nodes.is_empty() {
         return Err(ConversionError::Parse(
             "SVG contains no text elements; graphical content needs the ML image pipeline \
-             (a build with the `pdf` feature, converting without --no-ocr)"
+             (a build with the `pdf` feature, converting without --no-ocr or --text-layer-only)"
                 .into(),
         ));
     }

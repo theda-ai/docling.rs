@@ -8,13 +8,17 @@
 //!
 //! `calamine` does the heavy lifting (ZIP, shared strings, value typing, date
 //! detection); this backend contributes the region detection and the
-//! openpyxl-compatible value formatting.
+//! openpyxl-compatible value formatting — through the cell's number format
+//! since #634 ([`super::numfmt`]: `$12.50`, `10%`, `Feb-25` as Excel shows
+//! them, docling PR #4628's rules).
 
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::sync::Arc;
 
 use calamine::{Data, Range, Reader, Xlsx};
+
+use super::numfmt::{self, SheetFormats};
 
 /// The most cells a sheet's used area (the bounding box of its non-empty
 /// cells) may span before the sheet is skipped: `DOCLING_RS_SHEET_MAX_CELLS`,
@@ -103,8 +107,8 @@ type RankedItem = (usize, (usize, usize, usize, usize), Node);
 
 /// Load one sheet's merged regions (`<mergeCells>`), absolute coordinates.
 fn sheet_merges<R: std::io::Read + std::io::Seek>(wb: &mut Xlsx<R>, name: &str) -> Merges {
-    wb.worksheet_merge_cells(name)
-        .and_then(|r| r.ok())
+    // A sheet without `<mergeCells>` (or one calamine cannot read) has none.
+    wb.merge_cells_by_sheet_name(name)
         .unwrap_or_default()
         .iter()
         .map(|d| (d.start, d.end))
@@ -153,6 +157,12 @@ impl DeclarativeBackend for XlsxBackend {
             .into_iter()
             .filter_map(|(name, rid)| Some((name, wb_rels.get(&rid)?.clone())))
             .collect();
+        // Number formats (#634): `cellXfs` → code once per workbook, the
+        // cells' style indexes per sheet (below, with the ranges).
+        let xfs = Arc::new(numfmt::xlsx_xf_formats(
+            &pkg.read("xl/styles.xml").unwrap_or_default(),
+        ));
+        let is_1904 = workbook.has_1904_epoch();
 
         // Threaded-comment persons (Excel 365).
         let persons = pkg
@@ -167,15 +177,23 @@ impl DeclarativeBackend for XlsxBackend {
         // any sheet's items assemble: chart series resolve by reference into
         // arbitrary sheets.
         let shared: Arc<[u8]> = Arc::from(source.bytes.as_slice());
-        let mut ranges: HashMap<String, (Range<Data>, Merges)> = metas
+        let mut ranges: HashMap<String, (Range<Data>, Merges, SheetFormats)> = metas
             .par_iter()
             .filter(|(_, typ, _)| matches!(typ, calamine::SheetType::WorkSheet))
             .map_init(
-                || Xlsx::new(Cursor::new(shared.clone())).ok(),
-                |wb, (name, _, _)| {
+                || (Xlsx::new(Cursor::new(shared.clone())).ok(), pkg.clone()),
+                |(wb, pkg), (name, _, _)| {
                     let wb = wb.as_mut()?;
                     let range = bounded_worksheet_range(wb, name)?;
-                    Some((name.clone(), (range, sheet_merges(wb, name))))
+                    let formats = SheetFormats {
+                        xfs: xfs.clone(),
+                        cells: sheet_parts
+                            .get(name)
+                            .and_then(|part| pkg.read(part))
+                            .map(|xml| numfmt::xlsx_cell_styles(&xml))
+                            .unwrap_or_default(),
+                    };
+                    Some((name.clone(), (range, sheet_merges(wb, name), formats)))
                 },
             )
             .flatten()
@@ -186,7 +204,15 @@ impl DeclarativeBackend for XlsxBackend {
             if matches!(typ, calamine::SheetType::WorkSheet) && !ranges.contains_key(name) {
                 if let Some(range) = bounded_worksheet_range(&mut workbook, name) {
                     let merges = sheet_merges(&mut workbook, name);
-                    ranges.insert(name.clone(), (range, merges));
+                    let formats = SheetFormats {
+                        xfs: xfs.clone(),
+                        cells: sheet_parts
+                            .get(name)
+                            .and_then(|part| pkg.read(part))
+                            .map(|xml| numfmt::xlsx_cell_styles(&xml))
+                            .unwrap_or_default(),
+                    };
+                    ranges.insert(name.clone(), (range, merges, formats));
                 }
             }
         }
@@ -197,7 +223,7 @@ impl DeclarativeBackend for XlsxBackend {
                 return Vec::new();
             };
             let sheet: String = sheet.unwrap_or_else(|| own_sheet.to_string());
-            let Some((range, _)) = ranges.get(&sheet) else {
+            let Some((range, _, formats)) = ranges.get(&sheet) else {
                 return Vec::new();
             };
             let (rs_r, rs_c) = range.start().unwrap_or((0, 0));
@@ -207,7 +233,10 @@ impl DeclarativeBackend for XlsxBackend {
                     let rr = (r as u32).wrapping_sub(rs_r) as usize;
                     let cc = (c as u32).wrapping_sub(rs_c) as usize;
                     let v = if r as u32 >= rs_r && c as u32 >= rs_c {
-                        range.get((rr, cc)).map(format_cell).unwrap_or_default()
+                        range
+                            .get((rr, cc))
+                            .map(|d| numfmt::displayed_text(d, formats.at(r, c), is_1904))
+                            .unwrap_or_default()
                     } else {
                         String::new()
                     };
@@ -241,6 +270,7 @@ impl DeclarativeBackend for XlsxBackend {
                     persons: &persons,
                     resolve_ref: &resolve_ref,
                     skip_empty: self.skip_empty,
+                    is_1904,
                 })
             })
             .collect();
@@ -453,7 +483,8 @@ fn convert_xlsb(
         let frame = sheet_frame(&range, &Merges::new());
         let (or, oc) = frame.origin;
         let mut items: Vec<((usize, usize, usize, usize), Node)> = Vec::new();
-        for t in find_tables(&range, &frame, skip_empty) {
+        // The binary styles part is not read: every cell prints raw (#634).
+        for t in find_tables(&range, &frame, skip_empty, &SheetFormats::default(), false) {
             if let Some(label) = t.label {
                 items.push((
                     (
@@ -513,10 +544,11 @@ struct SheetCtx<'a, F: Fn(&str, &str) -> Vec<String> + Sync> {
     page_ix: usize,
     metas: &'a [(String, calamine::SheetType, calamine::SheetVisible)],
     sheet_parts: &'a HashMap<String, String>,
-    ranges: &'a HashMap<String, (Range<Data>, Merges)>,
+    ranges: &'a HashMap<String, (Range<Data>, Merges, SheetFormats)>,
     persons: &'a HashMap<String, String>,
     resolve_ref: &'a F,
     skip_empty: bool,
+    is_1904: bool,
 }
 
 /// Assemble one sheet's `(bbox, node)` items and its comment lines — the
@@ -534,19 +566,20 @@ fn sheet_items<F: Fn(&str, &str) -> Vec<String> + Sync>(ctx: SheetCtx<'_, F>) ->
         persons,
         resolve_ref,
         skip_empty,
+        is_1904,
     } = ctx;
     let mut comments: Vec<SheetComment> = Vec::new();
     // (bbox in cell units, node) items for this sheet/page.
     let mut items: Vec<((usize, usize, usize, usize), Node)> = Vec::new();
 
     if matches!(typ, calamine::SheetType::WorkSheet) {
-        if let Some((range, abs_merges)) = ranges.get(name) {
+        if let Some((range, abs_merges, formats)) = ranges.get(name) {
             let frame = sheet_frame(range, abs_merges);
             // docling's bboxes are in *absolute* cell indices; calamine's
             // range is clipped to its first non-empty row/column, and the
             // frame reaches back over any merge that starts before it.
             let (or, oc) = frame.origin;
-            for t in find_tables(range, &frame, skip_empty) {
+            for t in find_tables(range, &frame, skip_empty, formats, is_1904) {
                 if let Some(label) = t.label {
                     // The label row sits directly above the table's region.
                     items.push((
@@ -600,7 +633,9 @@ fn sheet_items<F: Fn(&str, &str) -> Vec<String> + Sync>(ctx: SheetCtx<'_, F>) ->
                                 caption_href: None,
                                 image: dimages.get(&rid).cloned(),
                                 classification: None,
+                                description: None,
                                 caption_parent: Default::default(),
+                                caption_location: None,
                             },
                         ));
                     }
@@ -652,22 +687,39 @@ fn sheet_items<F: Fn(&str, &str) -> Vec<String> + Sync>(ctx: SheetCtx<'_, F>) ->
                 ))
                 .map(|xml| xlsx_drawings::parse_threaded_comments(&xml, persons))
                 .unwrap_or_default();
-            // Row-major over commented cells (docling scans the grid).
-            let mut cells: Vec<SheetComment> = legacy
+            // Row-major over commented cells (docling scans the grid). A
+            // threaded cell yields one line per message of the thread, in
+            // thread order (docling#4353); the legacy comment (which holds
+            // the thread flattened into one blob) only stands in when the
+            // cell has no threaded messages.
+            let mut cells: Vec<(usize, usize, usize, String, String)> = legacy
                 .iter()
                 .filter_map(|(cell, author, text)| {
                     let (c, r) = cell_ref_pub(cell)?;
-                    let line = match threaded.get(cell) {
-                        Some((a, t, time)) => match time {
-                            Some(ts) => format!("[author: {a}, time: {ts}]: {t}"),
-                            None => format!("[author: {a}]: {t}"),
-                        },
-                        None => format!("[author: {author}]: {text}"),
+                    let lines: Vec<String> = match threaded.get(cell) {
+                        Some(thread) if !thread.is_empty() => thread
+                            .iter()
+                            .map(|(a, t, time)| match time {
+                                Some(ts) => format!("[author: {a}, time: {ts}]: {t}"),
+                                None => format!("[author: {a}]: {t}"),
+                            })
+                            .collect(),
+                        _ => vec![format!("[author: {author}]: {text}")],
                     };
-                    Some((r, c, cell.clone(), line))
+                    Some((r, c, cell.clone(), lines))
+                })
+                .flat_map(|(r, c, cell, lines)| {
+                    lines
+                        .into_iter()
+                        .enumerate()
+                        .map(move |(k, line)| (r, c, k, cell.clone(), line))
                 })
                 .collect();
-            cells.sort_by_key(|(r, c, _, _)| (*r, *c));
+            cells.sort_by_key(|(r, c, k, _, _)| (*r, *c, *k));
+            let cells: Vec<SheetComment> = cells
+                .into_iter()
+                .map(|(r, c, _, cell, line)| (r, c, cell, line))
+                .collect();
             comments.extend(cells);
         }
     }
@@ -850,13 +902,15 @@ pub(crate) fn find_tables(
     range: &Range<Data>,
     frame: &SheetFrame,
     skip_empty: bool,
+    formats: &SheetFormats,
+    is_1904: bool,
 ) -> Vec<FoundTable> {
     let SheetFrame {
         shift,
+        origin,
         height,
         width,
         merge_of,
-        ..
     } = frame;
     let (height, width) = (*height, *width);
     // A frame position rebased onto calamine's clipped range — `None` where the
@@ -868,10 +922,14 @@ pub(crate) fn find_tables(
         |r: usize, c: usize| -> bool { value_at(r, c).is_some_and(|d| !matches!(d, Data::Empty)) };
     let has_content =
         |r: usize, c: usize| -> bool { merge_of.contains_key(&(r, c)) || has_value(r, c) };
-    // A grid position renders the value of its merge's top-left cell, if merged.
+    // A grid position renders the value of its merge's top-left cell, if
+    // merged — through that cell's number format (#634; absolute coordinates
+    // are the frame's origin plus the position).
     let cell_text = |r: usize, c: usize| -> String {
         let (sr, sc) = merge_of.get(&(r, c)).copied().unwrap_or((r, c));
-        value_at(sr, sc).map(format_cell).unwrap_or_default()
+        value_at(sr, sc)
+            .map(|d| numfmt::displayed_text(d, formats.at(origin.0 + sr, origin.1 + sc), is_1904))
+            .unwrap_or_default()
     };
 
     let mut visited: HashSet<(usize, usize)> = HashSet::new();
@@ -910,6 +968,15 @@ pub(crate) fn find_tables(
                 }
             }
             visited.extend(&cells);
+            // The table is the region's full bounding rectangle, gaps and
+            // disconnected non-empty cells included, so the whole rectangle is
+            // visited too — otherwise a stray cell inside it seeds a second,
+            // duplicate fragment table (docling#4302).
+            for vr in min_r..=max_r {
+                for vc in min_c..=max_c {
+                    visited.insert((vr, vc));
+                }
+            }
 
             // Split a leading "section label" off the region (docling's
             // `_split_leading_section_label`, PR #3727): the region is at
@@ -1054,6 +1121,7 @@ pub(crate) fn find_tables(
                     cells,
                     caption: None,
                     caption_parent: Default::default(),
+                    caption_location: None,
                 },
                 label,
                 min_r,
@@ -1064,36 +1132,6 @@ pub(crate) fn find_tables(
         }
     }
     tables
-}
-
-/// Render one cell to match openpyxl's `str(cell.value)`.
-pub(crate) fn format_cell(value: &Data) -> String {
-    match value {
-        Data::Empty => String::new(),
-        // openpyxl reads strings through an XML parser, which normalises line
-        // endings (`\r\n`/`\r` → `\n`); calamine keeps them raw, so do it here.
-        Data::String(s) => s.replace("\r\n", "\n").replace('\r', "\n"),
-        Data::Int(i) => i.to_string(),
-        Data::Float(f) => format_number(*f),
-        Data::Bool(b) => if *b { "True" } else { "False" }.to_string(),
-        Data::DateTime(dt) => dt
-            .as_datetime()
-            .map(|d| d.to_string())
-            .unwrap_or_else(|| format_number(dt.as_f64())),
-        Data::DateTimeIso(s) => s.clone(),
-        Data::DurationIso(s) => s.clone(),
-        Data::Error(e) => format!("{e:?}"),
-    }
-}
-
-/// openpyxl returns an `int` for integer-valued numbers (no trailing `.0`) and a
-/// `float` otherwise; mirror that.
-fn format_number(f: f64) -> String {
-    if f.is_finite() && f.fract() == 0.0 && f.abs() < 1e15 {
-        format!("{}", f as i64)
-    } else {
-        format!("{f}")
-    }
 }
 
 #[cfg(test)]
@@ -1141,7 +1179,7 @@ mod tests {
         // An *empty* merge is not a table of its own: docling seeds a table
         // only from a cell that carries a value, so only the data is found —
         // and it keeps its absolute position in the frame.
-        let found = find_tables(&range, &frame, false);
+        let found = find_tables(&range, &frame, false, &SheetFormats::default(), false);
         assert_eq!(found.len(), 1, "the empty merge seeds nothing");
         assert_eq!(
             found[0].table.rows,
@@ -1178,7 +1216,7 @@ mod tests {
             "the merge's row above, and out to column N"
         );
         // Only the valued cell is a table; the empty merge beside it is not.
-        let found = find_tables(&range, &frame, false);
+        let found = find_tables(&range, &frame, false, &SheetFormats::default(), false);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].table.rows, vec![vec!["data"]]);
         assert_eq!((found[0].min_r, found[0].min_c), (1, 0));
@@ -1221,14 +1259,26 @@ mod tests {
             merge_of,
         };
 
-        let padded = find_tables(&range, &frame(HashMap::new(), 3, 3), false);
+        let padded = find_tables(
+            &range,
+            &frame(HashMap::new(), 3, 3),
+            false,
+            &SheetFormats::default(),
+            false,
+        );
         assert_eq!(
             padded[0].table.rows,
             vec![vec!["a", "b", ""], vec!["", "c", ""], vec!["", "d", "e"]],
             "default: the full bounding box materialises"
         );
 
-        let compact = find_tables(&range, &frame(HashMap::new(), 3, 3), true);
+        let compact = find_tables(
+            &range,
+            &frame(HashMap::new(), 3, 3),
+            true,
+            &SheetFormats::default(),
+            false,
+        );
         assert_eq!(
             compact[0].table.rows,
             vec![vec!["a", "b"], vec!["c"], vec!["d", "e"]],
@@ -1279,7 +1329,13 @@ mod tests {
         range2.set_value((0, 0), Data::String("tall".into()));
         range2.set_value((0, 1), Data::String("a".into()));
         range2.set_value((1, 1), Data::String("b".into()));
-        let dense = find_tables(&range2, &frame(merged, 2, 2), true);
+        let dense = find_tables(
+            &range2,
+            &frame(merged, 2, 2),
+            true,
+            &SheetFormats::default(),
+            false,
+        );
         assert_eq!(
             dense[0].table.rows,
             vec![vec!["tall", "a"], vec!["tall", "b"]],
@@ -1303,7 +1359,13 @@ mod tests {
         range3.set_value((0, 0), Data::String("h0".into()));
         range3.set_value((0, 2), Data::String("h2".into()));
         range3.set_value((1, 0), Data::String("wide".into()));
-        let ragged = find_tables(&range3, &frame(merged, 2, 3), true);
+        let ragged = find_tables(
+            &range3,
+            &frame(merged, 2, 3),
+            true,
+            &SheetFormats::default(),
+            false,
+        );
         assert_eq!(
             ragged[0].table.rows,
             vec![vec!["h0", "h2"], vec!["wide", "wide", "wide"]]
@@ -1405,7 +1467,9 @@ mod tests {
         );
         assert_eq!(children.len(), 3, "the sheet's three tables");
 
-        // The comment sections follow the sheets, in row-major cell order.
+        // The comment sections follow the sheets, in row-major cell order; a
+        // threaded cell contributes one section node per message (the JSON
+        // export folds same-named neighbours into one group, docling#4353).
         let sections: Vec<&str> = doc
             .nodes
             .iter()
@@ -1419,6 +1483,7 @@ mod tests {
             [
                 "comment-Sheet1-A1",
                 "comment-Sheet1-B2",
+                "comment-Sheet1-F7",
                 "comment-Sheet1-F7",
                 "comment-Sheet1-G12"
             ]
@@ -1436,7 +1501,8 @@ mod tests {
                 _ => Vec::new(),
             })
             .collect();
-        assert_eq!(annotated, vec![vec![0], vec![1], vec![2, 3]]);
+        // The third table is annotated by both F7 messages and G12's.
+        assert_eq!(annotated, vec![vec![0], vec![1], vec![2, 3, 4]]);
     }
 
     /// docling PR #3727: a merged full-width cell directly above a real

@@ -8,3 +8,4 @@ mixed_without_h1.md
 nested.md
 signature_stamp_01.md
 wiki.md
+line_breaks.md

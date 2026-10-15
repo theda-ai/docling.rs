@@ -2,4 +2,6 @@
 
 <!-- image -->
 
+Chunking. Llamalndex, LangChain
+
 <!-- image -->

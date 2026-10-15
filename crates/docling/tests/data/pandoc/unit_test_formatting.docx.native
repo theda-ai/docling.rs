@@ -1,0 +1,139 @@
+[ Para [ Emph [ Str "italic" ] ]
+, Para [ Strong [ Str "bold" ] ]
+, Para [ Underline [ Str "underline" ] ]
+, Para
+    [ Link
+        ( "" , [] , [] )
+        [ Str "hyperlink" ]
+        ( "https://github.com/DS4SD/docling" , "" )
+    ]
+, Para
+    [ Link
+        ( "" , [] , [] )
+        [ Emph
+            [ Strong
+                [ Str "italic"
+                , Space
+                , Str "and"
+                , Space
+                , Str "bold"
+                , Space
+                , Str "hyperlink"
+                ]
+            ]
+        ]
+        ( "https://github.com/DS4SD/docling" , "" )
+    ]
+, Para
+    [ Str "Normal"
+    , Space
+    , Emph [ Str "italic" ]
+    , Space
+    , Strong [ Str "bold" ]
+    , Space
+    , Underline [ Str "underline" ]
+    , Space
+    , Str "and"
+    , Space
+    , Link
+        ( "" , [] , [] )
+        [ Str "hyperlink" ]
+        ( "https://github.com/DS4SD/docling" , "" )
+    , Space
+    , Str "on"
+    , Space
+    , Str "the"
+    , Space
+    , Str "same"
+    , Space
+    , Str "line"
+    ]
+, BulletList
+    [ [ Plain
+          [ Emph
+              [ Str "Italic" , Space , Str "bullet" , Space , Str "1" ]
+          ]
+      ]
+    , [ Plain
+          [ Strong
+              [ Str "Bold" , Space , Str "bullet" , Space , Str "2" ]
+          ]
+      ]
+    , [ Plain
+          [ Underline
+              [ Str "Underline"
+              , Space
+              , Str "bullet"
+              , Space
+              , Str "3"
+              ]
+          ]
+      ]
+    , [ Plain
+          [ Str "Some"
+          , Space
+          , Emph [ Str "italic" ]
+          , Space
+          , Strong [ Str "bold" ]
+          , Space
+          , Underline [ Str "underline" ]
+          ]
+      , BulletList
+          [ [ Plain
+                [ Str "Nested"
+                , Space
+                , Emph [ Str "italic" ]
+                , Space
+                , Strong [ Str "bold" ]
+                ]
+            ]
+          ]
+      ]
+    ]
+, Para
+    [ Str "The"
+    , Space
+    , Str "second"
+    , Space
+    , Str "page"
+    , Space
+    , Str "of"
+    , Space
+    , Str "the"
+    , Space
+    , Str "document"
+    , Space
+    , Str "with"
+    , Space
+    , Str "same"
+    , Space
+    , Str "header"
+    , Space
+    , Str "and"
+    , Space
+    , Str "footer"
+    ]
+, Para
+    [ Str "The"
+    , Space
+    , Str "third"
+    , Space
+    , Str "page"
+    , Space
+    , Str "of"
+    , Space
+    , Str "the"
+    , Space
+    , Str "document"
+    , Space
+    , Str "with"
+    , Space
+    , Str "different"
+    , Space
+    , Str "header"
+    , Space
+    , Str "and"
+    , Space
+    , Str "footer"
+    ]
+]

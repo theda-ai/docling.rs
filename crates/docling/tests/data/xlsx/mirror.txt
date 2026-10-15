@@ -11,3 +11,4 @@ xlsx_chart_sheet.xlsx
 xlsx_comments.xlsx
 xlsx_empty_merge_before_data.xlsx
 xlsx_merged_range.xlsx
+xlsx_emf.xlsx

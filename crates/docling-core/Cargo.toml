@@ -18,9 +18,20 @@ rust-version = "1.85"
 # (export_to_json); the model itself stays plain (walked into `Value` by json.rs).
 # `preserve_order` keeps docling's field order (schema_name, version, …).
 serde_json = { version = "1", features = ["preserve_order"] }
+# `Serialize` for the export's typed items (`json::write_json` streams them
+# without building a `Value`).
+serde = "1"
 # Content hash for exported image asset names (assets/image_NNNNNN_<sha256>.png),
 # matching docling's referenced-image naming scheme.
 sha2 = "0.10"
+# Raw PNG samples for that hash: docling hashes the decoded pixels
+# (`PIL img.tobytes()`), not the file bytes (pixel_digest.rs). Pure Rust, the
+# same version the `image` crate already pulls in.
+png = "0.18"
+# The PII redaction pass's pattern detector (#621): e-mail, phone, card,
+# IBAN, IP and national-ID shapes plus the caller's own expressions. Pure
+# Rust, compiles for wasm; the same crate the `docling` backends use.
+regex = "1.11"
 # HuggingFace tokenizer for the HybridChunker (behind the `chunking` feature);
 # same flags as docling-rag's optional embedder to keep one build of the crate.
 tokenizers = { version = "0.20", default-features = false, features = ["onig"], optional = true }

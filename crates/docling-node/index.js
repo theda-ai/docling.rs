@@ -3,7 +3,7 @@
 // Wraps the native N-API binding (loaded by `native.js`, which picks the right
 // prebuilt `.node` for the host platform) with two things:
 //   1. dependency guards — converting a PDF/image/METS input throws a clear
-//      error unless the ML models + pdfium are on disk (see
+//      error unless the ML models are on disk (see
 //      scripts/install/download_dependencies.sh);
 //   2. `streamFileMarkdown` async generators over Markdown chunks (module-level
 //      and on the warm `Pipeline`).
@@ -92,6 +92,27 @@ async function convertAsync(input, options) {
   return native.convertAsync(input, options)
 }
 
+// --- archives (#557) --------------------------------------------------------
+
+// No ML guard: a ZIP may hold anything, and the native side reports a PDF
+// entry that cannot convert (models missing) as that entry's `failed` item,
+// never by throwing — the archive's other documents still convert.
+function convertArchiveFile(path, options) {
+  return native.convertArchiveFile(path, options)
+}
+
+function convertArchive(input, options) {
+  return native.convertArchive(input, options)
+}
+
+async function convertArchiveFileAsync(path, options) {
+  return native.convertArchiveFileAsync(path, options)
+}
+
+async function convertArchiveAsync(input, options) {
+  return native.convertArchiveAsync(input, options)
+}
+
 // --- guarded chunking functions ---------------------------------------------
 
 // For the hybrid chunker with no explicit tokenizer, resolve the default one
@@ -174,6 +195,23 @@ class DocumentConverter {
   convertFileStreaming(path, callback, options) {
     assertMlReady(mlFormatOf(path), undefined, { pipeline: this._pipeline })
     return this._inner.convertFileStreaming(path, callback, options)
+  }
+
+  // Archives (#557): unguarded, see convertArchiveFile above.
+  convertArchiveFile(path, options) {
+    return this._inner.convertArchiveFile(path, options)
+  }
+
+  convertArchive(input, options) {
+    return this._inner.convertArchive(input, options)
+  }
+
+  async convertArchiveFileAsync(path, options) {
+    return this._inner.convertArchiveFileAsync(path, options)
+  }
+
+  async convertArchiveAsync(input, options) {
+    return this._inner.convertArchiveAsync(input, options)
   }
 }
 
@@ -322,6 +360,10 @@ module.exports.convert = convert
 module.exports.convertFile = convertFile
 module.exports.convertAsync = convertAsync
 module.exports.convertFileAsync = convertFileAsync
+module.exports.convertArchive = convertArchive
+module.exports.convertArchiveFile = convertArchiveFile
+module.exports.convertArchiveAsync = convertArchiveAsync
+module.exports.convertArchiveFileAsync = convertArchiveFileAsync
 module.exports.chunk = chunk
 module.exports.chunkFile = chunkFile
 module.exports.chunkAsync = chunkAsync
@@ -338,3 +380,8 @@ module.exports.streamDocumentChunks = streamDocumentChunks
 module.exports.checkDependencies = checkDependencies
 module.exports.supportedFormats = native.supportedFormats
 module.exports.formatFromName = native.formatFromName
+// Email attachment payloads (#561): declarative, no ML guard needed.
+module.exports.emailAttachments = native.emailAttachments
+module.exports.emailAttachmentsFile = native.emailAttachmentsFile
+module.exports.emailAttachmentsAsync = native.emailAttachmentsAsync
+module.exports.emailAttachmentsFileAsync = native.emailAttachmentsFileAsync

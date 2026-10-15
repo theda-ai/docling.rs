@@ -8,21 +8,21 @@ RMSNorm
 
 Attention
 
-RMSNorm Output Hidden 𝐡𝐡 DeepSeekMoE
+RMSNorm
 
 0
+
+Output Hidden 𝐡𝐡
+
+𝑡𝑡 ... ...
 
 1
 
 ...
 
-𝑠𝑠
-
-𝑁𝑁
-
 ′
 
-𝑡𝑡 ... ...
+𝑠𝑠
 
 1
 
@@ -32,41 +32,57 @@ Router
 
 ... 1 ...
 
-Multi-Head Latent Attention (MLA) 0 Output Hidden 𝐮𝐮 𝑡𝑡
+Multi-Head Latent Attention (MLA)
 
-... ...
+0
 
-Multi-Head Attention concatenate
-
-𝑄𝑄
-
-𝐜𝐜 𝑡𝑡 apply RoPE
+Output Hidden
 
 {[ 𝐪𝐪 𝑡𝑡 , 𝑖𝑖 𝐶𝐶 ; 𝐪𝐪 𝑡𝑡 , 𝑖𝑖 𝑅𝑅 ]}
 
-{[ 𝐤𝐤 𝑡𝑡 , 𝑖𝑖 𝐶𝐶 ; 𝐤𝐤 𝑡𝑡 𝑅𝑅 ]}
+... ...
 
-RoPE
+Multi-Head Attention 𝐤𝐤
+
+𝑅𝑅
+
+concatenate apply
 
 { 𝐪𝐪 𝑡𝑡 , 𝑖𝑖 𝐶𝐶 } { 𝐪𝐪 𝑡𝑡 , 𝑖𝑖 𝑅𝑅 }
 
 { 𝐯𝐯
 
+{[ 𝐤𝐤 𝑡𝑡 , 𝑖𝑖 𝐶𝐶 ; 𝐤𝐤 𝑡𝑡 𝑅𝑅 ]}
+
+𝐮𝐮
+
+concatenate
+
 ...
+
+Latent
+
+Input Hidden apply 𝑡𝑡
+
+RoPE
+
+... ...
 
 𝑡𝑡 , 𝑖𝑖 𝐶𝐶 } { 𝐤𝐤 𝑡𝑡 , 𝑖𝑖 𝐶𝐶 }
 
-𝐤𝐤 𝑡𝑡 𝑅𝑅 concatenate apply
-
 Latent
 
 ...
 
-Latent
+𝑡𝑡
 
-Input Hidden 𝐡𝐡 𝑡𝑡
+𝑄𝑄 RoPE
 
-... ...
+𝐜𝐜
+
+𝑡𝑡
+
+𝑁𝑁
 
 3
 

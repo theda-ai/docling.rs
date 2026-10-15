@@ -26,7 +26,9 @@ unit unit unit Standardized Images Encoder BBox Decoder Structure Decoder Struct
 
 1
 
-23
+2
+
+3
 
 BBoxes
 
@@ -50,11 +52,7 @@ L
 
 C C
 
-3
-
-C
-
-C
+C C C 3
 
 C C C
 

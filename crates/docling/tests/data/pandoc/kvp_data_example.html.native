@@ -1,0 +1,180 @@
+[ Header 1 ( "" , [] , [] ) [ Str "HEADER" ]
+, Para
+    [ Str "Order"
+    , Space
+    , Str "Receipt"
+    , Space
+    , Str "Details"
+    ]
+, Para
+    [ Str "Receipt"
+    , Space
+    , Str "documentation"
+    , Space
+    , Str "for"
+    , Space
+    , Str "table"
+    , Space
+    , Str "service:"
+    ]
+, Div
+    ( "" , [ "field-region" ] , [] )
+    [ DefinitionList
+        [ ( [ Str "1" , Space , Str "Restaurant" ]
+          , [ [ Plain [ Str "Docling" ] ] ]
+          )
+        , ( [ Str "2" , Space , Str "Telephone" ]
+          , [ [ Plain [ Str "(123)" , Space , Str "456-7890" ] ] ]
+          )
+        , ( [ Str "3" , Space , Str "Server" ]
+          , [ [ Plain [ Str "Quack" , Space , Str "Quackling" ] ] ]
+          )
+        , ( [ Str "4" , Space , Str "Order" , Space , Str "Number" ]
+          , [ [ Plain [ Str "12345" ] ] ]
+          )
+        , ( [ Str "5" , Space , Str "Seating" ]
+          , [ [ Plain [ Str "13" ] ] ]
+          )
+        , ( [ Str "6" , Space , Str "Dining" , Space , Str "Type" ]
+          , [ [ Plain [ Str "Celebration" ] ] ]
+          )
+        , ( [ Str "7"
+            , Space
+            , Str "Number"
+            , Space
+            , Str "of"
+            , Space
+            , Str "guests"
+            ]
+          , [ [ Plain [ Str "5" ] ] ]
+          )
+        , ( [ Str "8" , Space , Str "Receipt" , Space , Str "date" ]
+          , [ [ Plain [ Str "16/03/2026" ] ] ]
+          )
+        ]
+    ]
+, Para [ Str "Order" , Space , Str "items:" ]
+, Para
+    [ Str "Itemized"
+    , Space
+    , Str "list"
+    , Space
+    , Str "of"
+    , Space
+    , Str "products"
+    , Space
+    , Str "ordered"
+    , Space
+    , Str "with"
+    , Space
+    , Str "quantities."
+    ]
+, Table
+    ( "" , [] , [] )
+    (Caption Nothing [])
+    [ ( AlignDefault , ColWidthDefault )
+    , ( AlignDefault , ColWidthDefault )
+    , ( AlignDefault , ColWidthDefault )
+    ]
+    (TableHead
+       ( "" , [] , [] )
+       [ Row
+           ( "" , [] , [] )
+           [ Cell
+               ( "" , [] , [] )
+               AlignDefault
+               (RowSpan 1)
+               (ColSpan 1)
+               [ Plain [ Str "Nr." ] ]
+           , Cell
+               ( "" , [] , [] )
+               AlignDefault
+               (RowSpan 1)
+               (ColSpan 1)
+               [ Plain [ Str "Item" , Space , Str "Description" ] ]
+           , Cell
+               ( "" , [] , [] )
+               AlignDefault
+               (RowSpan 1)
+               (ColSpan 1)
+               [ Plain [ Str "Quantity" ] ]
+           ]
+       ])
+    [ TableBody
+        ( "" , [] , [] )
+        (RowHeadColumns 0)
+        []
+        [ Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "I" ] ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Coffee" ] ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "1" ] ]
+            ]
+        , Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "II" ] ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Lunch" ] ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "2" ] ]
+            ]
+        , Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "III" ] ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Cake" ] ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "1" ] ]
+            ]
+        ]
+    ]
+    (TableFoot ( "" , [] , [] ) [])
+, Para
+    [ Str "Docling"
+    , Space
+    , Str "Restaurant"
+    , Space
+    , Str "2026"
+    ]
+]

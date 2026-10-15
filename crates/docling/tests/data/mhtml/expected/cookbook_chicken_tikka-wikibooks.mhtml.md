@@ -77,19 +77,29 @@ hide
 
 Text
 
-- Small Standard Large
+- [ ] Small
+
+- [ ] Standard
+
+- [ ] Large
 
 This page always uses small font size
 
 Width
 
-- Standard Wide
+- [ ] Standard
+
+- [ ] Wide
 
 The content is as wide as possible for your browser window.
 
 Color (beta)
 
-- Automatic Light Dark
+- [ ] Automatic
+
+- [ ] Light
+
+- [ ] Dark
 
 This page is always in light mode.
 

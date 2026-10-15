@@ -1,0 +1,139 @@
+# ONNX Runtime for IBM Z (#504), published into the models release next to
+# the docling-parse plugin: pyke's `ort` has no prebuilt runtime for
+# s390x-unknown-linux-gnu and Microsoft publishes no s390x release, so the
+# `ort-load-dynamic` docling.rs build for the target dlopens this library —
+# scripts/install/download_dependencies.sh fetches it into .models/onnxruntime/
+# on an s390x host (or anywhere with --with-onnxruntime).
+#
+# Cross-compiled on the x86_64 runner by scripts/install/build_onnxruntime_s390x.sh
+# with zig as the compiler (`zig cc -target s390x-linux-gnu.2.28 -mcpu=z15`),
+# ~40 min on 4 cores where upstream's own s390x CI compiles natively under
+# QEMU for many hours. zig gives the library a glibc 2.28 floor and a
+# statically linked libc++, so it loads on RHEL 8/9 era mainframe Linux; the
+# distro gcc cross toolchain would pin it to glibc 2.38 and GCC 13's
+# libstdc++. The tarball onnxruntime-linux-s390x.tar.gz unpacks straight into
+# .models/onnxruntime/:
+#   libonnxruntime.so, libonnxruntime.so.1, libonnxruntime.so.<version>
+#   LICENSE, VERSION
+# The smoke test runs the s390x docling-rs CLI under qemu-user against it:
+# a DOCX (no runtime involved) and a one-page PDF through the layout model.
+#
+# Trigger: manual. Re-running with the same tag clobbers the asset;
+# publish-models.yml's prune step leaves it alone.
+#
+#   gh workflow run onnxruntime-s390x.yml                    # tag = models-v1, ORT v1.31.0
+#   gh workflow run onnxruntime-s390x.yml -f ort_tag=v1.29.0
+
+name: ONNX Runtime s390x
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Models release tag to publish into."
+        required: false
+        default: "models-v1"
+      ort_tag:
+        description: "ONNX Runtime tag to build (default: 1.31.0, the version the linked builds carry since #523)."
+        required: false
+        default: "v1.31.0"
+      publish:
+        description: "Upload into the release (off = build + smoke test only)."
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: write # gh release upload
+
+jobs:
+  build:
+    name: build & smoke-test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ inputs.tag }}
+      ORT_TAG: ${{ inputs.ort_tag }}
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v7
+
+      # zig + cargo-zigbuild as wheels (the build script finds zig through the
+      # ziglang module — pinned: the clang source patches in
+      # build_onnxruntime_s390x.sh are checked against its clang, 22 in zig
+      # 0.17; the smoke-test CLI builds with cargo-zigbuild for the
+      # same glibc 2.28 floor the release binaries have); the target's binutils
+      # for strip/objdump; qemu-user to run the result, and libc6-s390x-cross
+      # for the sysroot `qemu-s390x-static -L /usr/s390x-linux-gnu` resolves
+      # the binary's loader (/lib/ld64.so.1) and libc against — zig links
+      # against its own glibc stubs, so nothing else installs that sysroot
+      # (the gcc cross toolchain this job used before pulled it in).
+      - name: zig, cargo-zigbuild, cmake, ninja, binutils, qemu, s390x libc
+        run: |
+          python3 -m pip install --user --break-system-packages ziglang==0.17.0 cargo-zigbuild
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build python3 binutils-s390x-linux-gnu qemu-user-static \
+            libc6-s390x-cross
+          cmake --version | head -1
+          python3 -m ziglang version
+
+      - name: Build ONNX Runtime for s390x
+        run: |
+          OUT_DIR="$PWD/onnxruntime-s390x" JOBS="$(nproc)" \
+            bash scripts/install/build_onnxruntime_s390x.sh
+
+      - name: Stage tarball
+        run: |
+          mkdir -p release-assets .models/onnxruntime
+          cp -a onnxruntime-s390x/lib/. onnxruntime-s390x/LICENSE onnxruntime-s390x/VERSION .models/onnxruntime/
+          tar czf release-assets/onnxruntime-linux-s390x.tar.gz -C .models/onnxruntime .
+          ls -la release-assets/ .models/onnxruntime/
+
+      - name: Install Rust (stable + s390x target)
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add s390x-unknown-linux-gnu
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-ort-s390x-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-ort-s390x-
+
+      # The CLI for the target, the layout model, and the library just built:
+      # under qemu-user a one-page digital PDF goes through the layout model
+      # in a few minutes — enough to prove the runtime loads and infers on
+      # big-endian; a DOCX first, which never touches it.
+      - name: Smoke test under qemu
+        run: |
+          cargo zigbuild --release --locked -p docling-cli --features ort-load-dynamic --target s390x-unknown-linux-gnu.2.28
+          bash scripts/install/download_dependencies.sh --no-asr --no-chunk
+          bin=target/s390x-unknown-linux-gnu/release/docling-rs
+          run="qemu-s390x-static -L /usr/s390x-linux-gnu $bin"
+          $run tests/data/docx/sources/word_tables.docx | grep -q "Header 0.0"
+          DOCLING_RS_DEBUG=1 $run tests/data/pdf/sources/base14_fonts.pdf --to md > out.md 2> err.txt || { cat err.txt; exit 1; }
+          grep -q "ONNX Runtime loaded from .models/onnxruntime/libonnxruntime.so" err.txt
+          test -s out.md && head -n 5 out.md
+          echo "glibc floor of the library: $(s390x-linux-gnu-objdump -T .models/onnxruntime/libonnxruntime.so.*.*.* | grep -o 'GLIBC_2\.[0-9]*' | sort -t. -k2 -n | uniq | tail -1)"
+
+      - name: Publish into the models release
+        if: inputs.publish
+        run: |
+          if ! gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "release $TAG does not exist — run publish-models.yml first" >&2
+            exit 1
+          fi
+          gh release upload "$TAG" release-assets/* --repo "${{ github.repository }}" --clobber
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: onnxruntime-linux-s390x
+          path: release-assets/onnxruntime-linux-s390x.tar.gz
+          if-no-files-found: error

@@ -12,9 +12,12 @@
 //! binary that contains that EP); which provider actually runs is chosen at
 //! startup from `DOCLING_RS_EP`:
 //!
-//! * unset — `auto` in a build that compiled any GPU provider in (you chose
-//!   a GPU build or installed the GPU wheel: use the GPU when one is usable,
-//!   fall back to CPU when not); plain CPU in a default build
+//! * unset — `auto` in a build that compiled a CUDA-class provider (or
+//!   XNNPACK) in (you chose a GPU build or installed the GPU wheel: use the
+//!   GPU when one is usable, fall back to CPU when not); plain CPU in a
+//!   default build. CoreML is opt-in (#602): a `coreml` build stays on CPU,
+//!   and that `auto` leaves CoreML out, until `DOCLING_RS_EP=coreml` (or
+//!   `auto`, by name) asks for it
 //! * `cpu` — force CPU, exactly the pre-#74 behavior
 //! * `cuda` / `tensorrt` (`trt`) / `directml` (`dml`) / `coreml` /
 //!   `xnnpack` — that provider, registered with error-on-failure: an *explicitly requested*
@@ -26,20 +29,23 @@
 //! * `auto` — every compiled-in provider is registered in performance order
 //!   (TensorRT, CUDA, CoreML, DirectML, then XNNPACK) and ONNX Runtime falls
 //!   back down the list — ultimately to CPU — at session creation. The "try GPU if there is
-//!   one" mode for images built once and deployed on mixed fleets.
+//!   one" mode for images built once and deployed on mixed fleets. CoreML
+//!   joins the list only when `auto` was set by name, not as the default.
 //!
-//! CoreML registers with the `MLProgram` model format by default (#324):
-//! the ONNX Runtime default, `NeuralNetwork`, cannot place operators the
-//! layout model carries (`GridSample`, `ScatterND`, dynamic output shapes)
-//! and aborts inference on Apple silicon instead of falling back.
-//! `DOCLING_RS_COREML_FORMAT=neuralnetwork` restores the old format for
-//! pre-macOS-12 systems. Two safety defaults ride along (issue-#324
+//! CoreML registers with the `NeuralNetwork` model format by default (#602):
+//! measured on Apple silicon it reproduces the CPU provider's output byte
+//! for byte, while `MLProgram` (the #324 default, ~1.8× faster on the GPU)
+//! changes the layout detections — `DOCLING_RS_COREML_FORMAT=mlprogram`
+//! opts into it, with a notice. Two safety defaults ride along (issue-#324
 //! testing, M4 Max): only *static-shaped* partitions are handed to CoreML
 //! (`DOCLING_RS_COREML_STATIC_SHAPES=0` opts out) — dynamic partitions under
 //! MLProgram fail an MPSGraph assertion as an uncatchable SIGABRT — and
 //! compute units default to `cpu_and_gpu` rather than `all`
 //! (`DOCLING_RS_COREML_UNITS`: `all`|`cpu_and_gpu`|`cpu_and_ne`|`cpu_only`),
 //! since the fp16 Neural Engine silently corrupts this model's logits.
+//! Static partitions need static graphs, so CoreML also keeps docling-pdf's
+//! layout per-page ([`prefers_batching`]): a batched session leaves the batch
+//! axis free and CoreML is handed nothing.
 //! `DOCLING_RS_XNNPACK_THREADS` sizes XNNPACK's own thread pool.
 //!
 //! The int8 model defaults in docling-pdf are skipped whenever a GPU provider
@@ -53,6 +59,109 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use ort::ep::ExecutionProviderDispatch;
 use ort::session::builder::{GraphOptimizationLevel, SessionBuilder};
 use ort::session::Session;
+
+/// The file name ONNX Runtime's shared library carries on this platform —
+/// what `ort` itself opens when `ORT_DYLIB_PATH` is unset.
+#[cfg(feature = "load-dynamic")]
+const RUNTIME_SONAME: &str = if cfg!(target_os = "windows") {
+    "onnxruntime.dll"
+} else if cfg!(any(target_os = "macos", target_os = "ios")) {
+    "libonnxruntime.dylib"
+} else {
+    "libonnxruntime.so"
+};
+
+/// The ONNX Runtime shared library this process loaded (the `load-dynamic`
+/// feature, #504), resolved and opened once at the first session:
+///
+/// 1. `ORT_DYLIB_PATH` — `ort`'s own override, a path to the library;
+/// 2. `.models/onnxruntime/libonnxruntime.so` (`.dylib` / `onnxruntime.dll`)
+///    through the shared asset chain (`docling_core::assets::resolve`: CWD,
+///    `DOCLING_RS_MODELS_DIR`, the executable's directory) — where a
+///    self-built runtime for a target without prebuilt binaries is dropped
+///    next to the models;
+/// 3. the bare soname, i.e. the dynamic linker's search path (a distro
+///    package, `LD_LIBRARY_PATH`).
+///
+/// `Err` names what was tried: a library that is missing, unloadable or
+/// older than the API this build was compiled against (ONNX Runtime 1.17+).
+/// Callers treat it like a missing model — the stage warns and degrades, a
+/// conversion that cannot proceed without it fails with this message, and
+/// nothing outside the ML stages ever asks.
+#[cfg(feature = "load-dynamic")]
+pub fn runtime_library() -> Result<&'static Path, String> {
+    static LIB: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+    LIB.get_or_init(|| {
+        let candidate = if let Some(p) = docling_core::env::nonempty("ORT_DYLIB_PATH") {
+            PathBuf::from(p)
+        } else {
+            let bundled =
+                docling_core::assets::resolve(&format!(".models/onnxruntime/{RUNTIME_SONAME}"));
+            if Path::new(&bundled).is_file() {
+                PathBuf::from(bundled)
+            } else {
+                PathBuf::from(RUNTIME_SONAME)
+            }
+        };
+        match ort::init_from(&candidate) {
+            Ok(env) => {
+                // The library is loaded by `init_from`; the environment
+                // itself is built once by [`environment`].
+                drop(env);
+                docling_core::debug_log!(
+                    "docling-onnx: ONNX Runtime loaded from {}",
+                    candidate.display()
+                );
+                Ok(candidate)
+            }
+            // `ort`'s error already names the path it tried.
+            Err(e) => Err(format!(
+                "ONNX Runtime library unavailable ({e}) — set ORT_DYLIB_PATH to a libonnxruntime \
+                 (1.17 or newer) built for this platform, or place it under .models/onnxruntime/; \
+                 the ML stages (PDF layout/tables/OCR, ASR, the embedder) need it, every other \
+                 format converts without"
+            )),
+        }
+    })
+    .as_deref()
+    .map_err(Clone::clone)
+}
+
+/// A fresh [`SessionBuilder`] — the one entry point every session in the
+/// workspace starts from. In a `load-dynamic` build it first loads the ONNX
+/// Runtime library ([`runtime_library`]) and returns its error as a plain
+/// message instead of the panic `ort` raises when the library is missing at
+/// the first API call; in a linked build it is `Session::builder()`.
+///
+/// Either way the process environment is committed with ONNX Runtime's
+/// telemetry off. `ort` defaults it *on* (`EnableTelemetryEvents`): a no-op
+/// for pyke's linked builds, which carry no telemetry provider, but
+/// Microsoft's own libraries do — ETW on Windows and, from 1.29, the 1DS SDK
+/// on Linux and macOS, uploading model metadata and run statistics — and a
+/// `load-dynamic` build runs whatever library the machine provides. A
+/// document converter does not report its users' models to anyone.
+pub fn session_builder() -> Result<SessionBuilder, String> {
+    Session::builder(environment()?).map_err(|e| e.to_string())
+}
+
+/// The process's one ONNX Runtime [`Environment`] (ort 2.0.0-rc.14 made
+/// it explicit: every session is created from one), built on first use
+/// with telemetry off — and, in a `load-dynamic` build, after the runtime
+/// library is loaded ([`runtime_library`]).
+pub fn environment() -> Result<&'static ort::environment::Environment, String> {
+    static ENV: OnceLock<Result<ort::environment::Environment, String>> = OnceLock::new();
+    ENV.get_or_init(|| {
+        #[cfg(feature = "load-dynamic")]
+        runtime_library()?;
+        ort::init()
+            .with_name("docling-rs")
+            .with_telemetry(false)
+            .build()
+            .map_err(|e| format!("ONNX Runtime environment: {e}"))
+    })
+    .as_ref()
+    .map_err(Clone::clone)
+}
 
 /// The parsed `DOCLING_RS_EP` choice. Named GPU variants are only ever
 /// *selected* (returned by [`choice`]) when their cargo feature is compiled
@@ -86,6 +195,27 @@ pub fn parse(v: &str) -> Option<Ep> {
     }
 }
 
+/// The providers compiled into this binary, by their `DOCLING_RS_EP` names
+/// (`cpu` first). For the bindings that map a device option onto
+/// `DOCLING_RS_EP` (Python's `AcceleratorDevice.MPS` → `coreml`, #602) and
+/// must only name a provider the build has. Reads no environment and leaves
+/// [`choice`] unresolved, so the caller may still set `DOCLING_RS_EP` after
+/// asking.
+pub fn compiled_providers() -> Vec<&'static str> {
+    [
+        (Ep::Cpu, "cpu"),
+        (Ep::Cuda, "cuda"),
+        (Ep::TensorRt, "tensorrt"),
+        (Ep::DirectMl, "directml"),
+        (Ep::CoreMl, "coreml"),
+        (Ep::Xnnpack, "xnnpack"),
+    ]
+    .into_iter()
+    .filter(|&(ep, _)| compiled(ep))
+    .map(|(_, name)| name)
+    .collect()
+}
+
 /// Is this provider compiled into the binary (cargo feature enabled)?
 fn compiled(ep: Ep) -> bool {
     match ep {
@@ -99,43 +229,95 @@ fn compiled(ep: Ep) -> bool {
     }
 }
 
-fn any_gpu_compiled() -> bool {
+/// Any GPU provider among `members` — the providers `auto` registers
+/// ([`in_auto`]) in production, a stand-in set in the tests (the features
+/// differ per build).
+fn any_gpu(members: impl Fn(Ep) -> bool) -> bool {
     [Ep::Cuda, Ep::TensorRt, Ep::DirectMl, Ep::CoreMl]
         .into_iter()
-        .any(compiled)
+        .any(members)
 }
 
 /// The choice when `DOCLING_RS_EP` is unset (or empty): a build that
-/// compiled a GPU provider in defaults to `auto` — whoever built with
+/// compiled a CUDA-class provider in defaults to `auto` — whoever built with
 /// `--features cuda` (or installed the `docling-rs-cuda` wheel) wants the
 /// GPU used when one is usable, and `auto`'s per-session registration
 /// falls back to CPU when not. A default build has nothing to register and
 /// stays on the exact pre-#74 CPU path.
-fn default_choice() -> Ep {
+///
+/// CoreML does not count (#602): on Apple silicon it is no clear win — with
+/// its CPU-identical defaults it measured ~6% faster than the CPU provider on
+/// a 25-page manual, while session setup costs ~2 s per worker and does not
+/// parallelize, so a short one-shot run is a net loss — and a `coreml` build
+/// that quietly registered it surprised the issue's reporter. A `coreml`
+/// build therefore converts on CPU until `DOCLING_RS_EP=coreml` (or `auto`)
+/// asks for CoreML by name.
+fn default_choice_for(compiled: impl Fn(Ep) -> bool) -> Ep {
     // XNNPACK counts here (whoever built with it wants it used) but not in
     // [`prefers_fp32`] — it runs the same CPU-calibrated graphs as the CPU EP.
-    if any_gpu_compiled() || cfg!(feature = "xnnpack") {
+    if [Ep::Cuda, Ep::TensorRt, Ep::DirectMl, Ep::Xnnpack]
+        .into_iter()
+        .any(compiled)
+    {
         Ep::Auto
     } else {
         Ep::Cpu
     }
 }
 
+/// `DOCLING_RS_EP` resolved once per process: the provider choice, and
+/// whether `auto` may register CoreML — only when `auto` was asked for by
+/// name, never as the unset default ([`default_choice_for`]).
+#[derive(Clone, Copy)]
+struct Resolved {
+    ep: Ep,
+    coreml_in_auto: bool,
+}
+
+/// Is `ep` among the providers `auto` registers? Compiled in, and for
+/// CoreML also requested (`coreml_in_auto`). Pure for the tests;
+/// [`in_auto`] is the production form.
+fn auto_member(ep: Ep, compiled: impl Fn(Ep) -> bool, coreml_in_auto: bool) -> bool {
+    !matches!(ep, Ep::Cpu | Ep::Auto) && compiled(ep) && (ep != Ep::CoreMl || coreml_in_auto)
+}
+
+/// The providers this process's `auto` registers.
+fn in_auto(ep: Ep) -> bool {
+    auto_member(ep, compiled, resolved().coreml_in_auto)
+}
+
 /// The effective provider choice for this process, resolved once. Invalid or
 /// not-compiled-in requests degrade to CPU with a single stderr warning —
 /// same convention as a missing model file.
 pub fn choice() -> Ep {
-    static CHOICE: OnceLock<Ep> = OnceLock::new();
-    *CHOICE.get_or_init(|| {
+    resolved().ep
+}
+
+fn resolved() -> Resolved {
+    static RESOLVED: OnceLock<Resolved> = OnceLock::new();
+    *RESOLVED.get_or_init(|| {
+        let cpu = Resolved {
+            ep: Ep::Cpu,
+            coreml_in_auto: false,
+        };
         let Some(raw) = docling_core::env::nonempty("DOCLING_RS_EP") else {
-            return default_choice();
+            if compiled(Ep::CoreMl) {
+                docling_core::debug_log!(
+                    "docling-rs: CoreML is compiled in but opt-in — set \
+                     DOCLING_RS_EP=coreml to use it"
+                );
+            }
+            return Resolved {
+                ep: default_choice_for(compiled),
+                coreml_in_auto: false,
+            };
         };
         let Some(ep) = parse(&raw) else {
             eprintln!(
                 "docling-rs: DOCLING_RS_EP={raw:?} names no known execution provider \
                  (cpu|cuda|tensorrt|directml|coreml|xnnpack|auto); using CPU"
             );
-            return Ep::Cpu;
+            return cpu;
         };
         if !compiled(ep) {
             eprintln!(
@@ -150,15 +332,18 @@ pub fn choice() -> Ep {
                     Ep::Cpu | Ep::Auto => unreachable!("always compiled"),
                 }
             );
-            return Ep::Cpu;
+            return cpu;
         }
-        ep
+        Resolved {
+            ep,
+            coreml_in_auto: ep == Ep::Auto,
+        }
     })
 }
 
 /// True when the int8 model defaults should be skipped in favor of fp32
 /// because inference is (or may be) leaving the CPU. `Auto` counts as GPU as
-/// soon as any GPU provider is compiled in: whether registration succeeds is
+/// soon as it registers any GPU provider: whether registration succeeds is
 /// only known per-session, and a CPU fall-back running fp32 is merely the
 /// pre-int8 speed, while a GPU running the CPU-calibrated int8 graph is a
 /// conformance risk.
@@ -166,41 +351,111 @@ pub fn choice() -> Ep {
 /// A no-op for ASR: the Whisper exports ship without int8 variants, so there
 /// is no model selection for this to influence on that path.
 pub fn prefers_fp32() -> bool {
-    match choice() {
+    prefers_fp32_for(choice(), in_auto)
+}
+
+/// [`prefers_fp32`] for a given choice; `members` = what `auto` registers.
+fn prefers_fp32_for(ep: Ep, members: impl Fn(Ep) -> bool) -> bool {
+    match ep {
         // XNNPACK is CPU-class: the int8 QDQ graphs were calibrated for CPU
         // kernels and stay valid on it.
         Ep::Cpu | Ep::Xnnpack => false,
         Ep::Cuda | Ep::TensorRt | Ep::DirectMl | Ep::CoreMl => true,
-        Ep::Auto => any_gpu_compiled(),
+        Ep::Auto => any_gpu(members),
     }
 }
 
-/// The CoreML provider, configured from the environment (#324). `MLProgram`
-/// is the default model format: ONNX Runtime's own default, `NeuralNetwork`,
-/// cannot place operators the layout model carries (`GridSample`,
-/// `ScatterND`, dynamic output shapes) and aborts inference with error -1 on
-/// Apple silicon instead of falling back. `MLProgram` needs macOS 12+ —
-/// older systems can restore the old format explicitly.
+/// True when a multi-image batch is the better default for a model that
+/// accepts one (docling-pdf's layout batch, #338): the CUDA-class providers
+/// pay a real per-call dispatch cost that batching amortizes. Not CoreML
+/// (#602): its static-partitions default (#324) only places a graph whose
+/// shapes are all fixed, and a batched session keeps the batch axis free —
+/// so under the old batch-of-4 default CoreML was handed nothing it was
+/// allowed to run (0% GPU; fp32 heron 8.4 s vs 3.7 s on the CPU provider for
+/// the issue's 25-page manual, M4 Max), while per-page mode pins the axis to
+/// 1 and the same model runs on the GPU. Nor the CPU-class providers, where
+/// per-page measured faster (#338). `Auto` batches only when it registers
+/// a CUDA-class provider — a CoreML-only `auto` registers CoreML first and
+/// wants the static graph.
+pub fn prefers_batching() -> bool {
+    prefers_batching_for(choice(), in_auto)
+}
+
+/// [`prefers_batching`] for a given choice; `members` = what `auto` registers.
+fn prefers_batching_for(ep: Ep, members: impl Fn(Ep) -> bool) -> bool {
+    match ep {
+        Ep::Cpu | Ep::Xnnpack | Ep::CoreMl => false,
+        Ep::Cuda | Ep::TensorRt | Ep::DirectMl => true,
+        Ep::Auto => [Ep::Cuda, Ep::TensorRt, Ep::DirectMl]
+            .into_iter()
+            .any(members),
+    }
+}
+
+/// CoreML's model format as `DOCLING_RS_COREML_FORMAT` selects it — kept
+/// apart from `ort`'s `ModelFormat` (compiled only with the `coreml`
+/// feature) so the default is testable on every host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(feature = "coreml"), allow(dead_code))]
+enum CoreMlFormat {
+    NeuralNetwork,
+    MlProgram,
+}
+
+/// Parse `DOCLING_RS_COREML_FORMAT`; `Err` carries an unrecognized value
+/// (the caller warns and uses the default). The default is `NeuralNetwork`
+/// (#602): measured on the issue's 25-page manual (M4 Max, per-page
+/// layout), NeuralNetwork reproduces the CPU provider's Markdown byte for
+/// byte, while MLProgram — ~1.8× faster on the GPU — changes the layout
+/// detections on 14 of 25 pages (neighbouring boxes merge, reading order
+/// shifts; 448 texts vs 489), under `cpu_only` units too, so it is
+/// MLProgram's op lowering, not just GPU fp16. Correct output is the
+/// default; MLProgram stays an opt-in with a notice. (#324 had moved to
+/// MLProgram because NeuralNetwork aborted on the dynamic-shaped layout
+/// graph; the static-partitions default since then keeps such partitions
+/// off CoreML, and per-page mode makes the layout graph static.)
+#[cfg_attr(not(feature = "coreml"), allow(dead_code))]
+fn coreml_format(raw: Option<&str>) -> Result<CoreMlFormat, String> {
+    match raw.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+        None | Some("" | "neuralnetwork" | "nn") => Ok(CoreMlFormat::NeuralNetwork),
+        Some("mlprogram") => Ok(CoreMlFormat::MlProgram),
+        Some(other) => Err(other.to_string()),
+    }
+}
+
+/// The CoreML provider, configured from the environment (#324, #602). The
+/// model format defaults to `NeuralNetwork` — see [`coreml_format`] for why;
+/// `DOCLING_RS_COREML_FORMAT=mlprogram` trades CPU-identical layout output
+/// for speed (macOS 12+).
 #[cfg(feature = "coreml")]
 fn coreml_ep() -> ort::ep::CoreML {
     use ort::ep::coreml::{ComputeUnits, ModelFormat};
     static WARNED: OnceLock<()> = OnceLock::new();
-    let format = match docling_core::env::nonempty("DOCLING_RS_COREML_FORMAT")
-        .map(|v| v.to_ascii_lowercase())
-        .as_deref()
-    {
-        None | Some("mlprogram") => ModelFormat::MLProgram,
-        Some("neuralnetwork") => ModelFormat::NeuralNetwork,
-        Some(other) => {
-            let other = other.to_string();
-            WARNED.get_or_init(|| {
-                eprintln!(
-                    "docling-rs: DOCLING_RS_COREML_FORMAT={other:?} is not                      mlprogram|neuralnetwork; using mlprogram"
-                );
-            });
-            ModelFormat::MLProgram
-        }
-    };
+    static FORMAT_NOTICE: OnceLock<()> = OnceLock::new();
+    let format =
+        match coreml_format(docling_core::env::nonempty("DOCLING_RS_COREML_FORMAT").as_deref()) {
+            Ok(CoreMlFormat::NeuralNetwork) => ModelFormat::NeuralNetwork,
+            Ok(CoreMlFormat::MlProgram) => {
+                FORMAT_NOTICE.get_or_init(|| {
+                    eprintln!(
+                        "docling-rs: DOCLING_RS_COREML_FORMAT=mlprogram is faster on the Apple \
+                     GPU, but its layout detections differ from the CPU provider's \
+                     (neighbouring boxes merge, reading order shifts); the default \
+                     neuralnetwork format matches CPU output"
+                    );
+                });
+                ModelFormat::MLProgram
+            }
+            Err(other) => {
+                WARNED.get_or_init(|| {
+                    eprintln!(
+                        "docling-rs: DOCLING_RS_COREML_FORMAT={other:?} is not \
+                     neuralnetwork|mlprogram; using neuralnetwork"
+                    );
+                });
+                ModelFormat::NeuralNetwork
+            }
+        };
     let mut ep = ort::ep::CoreML::default().with_model_format(format);
     // Static-shaped partitions only, ON by default (#324 follow-up): with the
     // stock dynamic-batch layout model, MLProgram otherwise fails an MPSGraph
@@ -236,7 +491,8 @@ fn coreml_ep() -> ort::ep::CoreML {
             let other = other.to_string();
             WARNED.get_or_init(|| {
                 eprintln!(
-                    "docling-rs: DOCLING_RS_COREML_UNITS={other:?} is not                      all|cpu_and_gpu|cpu_and_ne|cpu_only; using cpu_and_gpu"
+                    "docling-rs: DOCLING_RS_COREML_UNITS={other:?} is not \
+                     all|cpu_and_gpu|cpu_and_ne|cpu_only; using cpu_and_gpu"
                 );
             });
             ComputeUnits::CPUAndGPU
@@ -288,8 +544,11 @@ fn dispatches() -> Option<Vec<ExecutionProviderDispatch>> {
             v.push(ort::ep::TensorRT::default().build());
             #[cfg(feature = "cuda")]
             v.push(ort::ep::CUDA::default().build());
+            // Only when `auto` was set by name (#602 — CoreML is opt-in).
             #[cfg(feature = "coreml")]
-            v.push(coreml_ep().build());
+            if in_auto(Ep::CoreMl) {
+                v.push(coreml_ep().build());
+            }
             #[cfg(feature = "directml")]
             v.push(ort::ep::DirectML::default().build());
             // Last, above only the implicit CPU fallback: a CPU-class
@@ -307,6 +566,69 @@ fn dispatches() -> Option<Vec<ExecutionProviderDispatch>> {
     Some(d)
 }
 
+/// Re-execute the process under an absolute `argv[0]` when a provider-library
+/// execution provider (CUDA, TensorRT) is compiled in (#664).
+///
+/// ONNX Runtime opens `libonnxruntime_providers_shared.so` and the provider
+/// (`…_cuda.so`, `…_tensorrt.so`) by absolute path from its runtime directory:
+/// the directory of the object `dladdr()` finds ORT's own code in, made
+/// absolute against the working directory. Linked statically into an
+/// executable, that object is the main program, which glibc names by
+/// `argv[0]` — so a binary started by bare name from `PATH`
+/// (`docling-serve`, as Kubernetes manifests and the CUDA images' old `CMD`
+/// do) looks for its providers in the working directory, never next to the
+/// binary, and `LD_LIBRARY_PATH` is not consulted. Re-executing through
+/// `/proc/self/exe` with the absolute path as `argv[0]` (same PID, arguments
+/// and environment) makes the lookup land next to the binary, where
+/// `ort`'s `copy-dylibs` and the CUDA images put the providers.
+///
+/// Call first thing in `main`, before any thread starts. A no-op unless on
+/// Linux with ONNX Runtime linked in (not `load-dynamic`, whose library
+/// `dladdr()` names by its own path) and a CUDA/TensorRT feature, and only
+/// when `argv[0]` has no `/`. On failure it warns and returns: the CPU
+/// provider still works.
+pub fn reexec_for_provider_libraries() {
+    #[cfg(all(
+        target_os = "linux",
+        any(feature = "cuda", feature = "tensorrt"),
+        not(feature = "load-dynamic")
+    ))]
+    {
+        use std::os::unix::process::CommandExt;
+        let mut args = std::env::args_os();
+        let Some(arg0) = args.next() else { return };
+        if !needs_absolute_argv0(&arg0) {
+            return;
+        }
+        let Ok(exe) = std::env::current_exe() else {
+            return;
+        };
+        let err = std::process::Command::new(&exe)
+            .arg0(&exe)
+            .args(args)
+            .exec();
+        eprintln!(
+            "docling-rs: warning: re-executing as {} failed ({err}); ONNX Runtime will look \
+             for its GPU provider libraries in the working directory",
+            exe.display()
+        );
+    }
+}
+
+/// Whether ONNX Runtime would resolve its runtime directory against the
+/// working directory: `argv[0]` without a path (#664).
+#[cfg_attr(
+    not(all(
+        target_os = "linux",
+        any(feature = "cuda", feature = "tensorrt"),
+        not(feature = "load-dynamic")
+    )),
+    allow(dead_code)
+)]
+fn needs_absolute_argv0(arg0: &std::ffi::OsStr) -> bool {
+    !arg0.as_encoded_bytes().contains(&b'/')
+}
+
 /// Register the selected execution providers on a session builder. Called by
 /// every ONNX session in the workspace; a no-op (and infallible) in the
 /// default CPU configuration.
@@ -318,7 +640,8 @@ pub fn apply(builder: SessionBuilder) -> Result<SessionBuilder, String> {
     static LOGGED: OnceLock<()> = OnceLock::new();
     LOGGED.get_or_init(|| {
         if docling_core::env::flag("DOCLING_RS_TIMING") {
-            eprintln!("docling-rs: execution providers: {eps:?}");
+            let names: Vec<&str> = eps.iter().map(|e| e.name()).collect();
+            eprintln!("docling-rs: execution providers: {names:?}");
         }
         // CoreML's cost profile is invisible otherwise (#324 follow-up
         // testing): session creation runs ~2 s per worker, does not
@@ -327,7 +650,7 @@ pub fn apply(builder: SessionBuilder) -> Result<SessionBuilder, String> {
         // with correct output and nothing else to hint at why. Say so once at
         // the moment the cost is incurred.
         #[cfg(feature = "coreml")]
-        if matches!(choice(), Ep::CoreMl | Ep::Auto) {
+        if choice() == Ep::CoreMl || (choice() == Ep::Auto && in_auto(Ep::CoreMl)) {
             eprintln!(
                 "docling-rs: CoreML registered; its session setup costs roughly 2 s per \
                  worker and pays off for long-lived processes and large batches — for \
@@ -393,14 +716,114 @@ pub fn creation_guard() -> Option<MutexGuard<'static, ()>> {
     Some(CREATION.lock().unwrap_or_else(|p| p.into_inner()))
 }
 
+/// The ONNX Runtime library's own `(major, minor)` version — its
+/// `OrtApiBase::GetVersionString`, read once. The statically linked runtime
+/// answers through its entry point; a `load-dynamic` build (#504) asks the
+/// library [`runtime_library`] loaded, whatever the machine provided. `None`
+/// when that library is unavailable or the string does not parse. (The
+/// build-info string is no substitute: Microsoft's release builds report
+/// `git-branch=HEAD`, pyke's `rel-1.28.0`.)
+pub fn runtime_version() -> Option<(u32, u32)> {
+    static VERSION: OnceLock<Option<(u32, u32)>> = OnceLock::new();
+    *VERSION.get_or_init(|| parse_version(&version_string()?))
+}
+
+#[cfg(not(feature = "load-dynamic"))]
+fn version_string() -> Option<String> {
+    // SAFETY: the linked runtime's C entry point; it returns a pointer to a
+    // static table whose `GetVersionString` yields a static C string.
+    unsafe { read_version(ort::sys::OrtGetApiBase()) }
+}
+
+#[cfg(feature = "load-dynamic")]
+fn version_string() -> Option<String> {
+    let path = runtime_library().ok()?;
+    // SAFETY: `runtime_library` already opened this library through `ort`;
+    // reopening it only bumps the loader's reference count, and the symbol
+    // is ONNX Runtime's documented C entry point.
+    unsafe {
+        let lib = libloading::Library::new(path).ok()?;
+        let base: libloading::Symbol<unsafe extern "C" fn() -> *const ort::sys::OrtApiBase> =
+            lib.get(b"OrtGetApiBase").ok()?;
+        read_version(base())
+    }
+}
+
+/// # Safety
+/// `base` is null or ONNX Runtime's `OrtApiBase`.
+unsafe fn read_version(base: *const ort::sys::OrtApiBase) -> Option<String> {
+    if base.is_null() {
+        return None;
+    }
+    let s = ((*base).GetVersionString)();
+    (!s.is_null()).then(|| std::ffi::CStr::from_ptr(s).to_string_lossy().into_owned())
+}
+
+/// `"1.28.0"` → `(1, 28)`.
+fn parse_version(s: &str) -> Option<(u32, u32)> {
+    let mut parts = s.trim().split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
+/// Cap `builder` below the layout-level graph optimizations when the runtime
+/// predates ONNX Runtime 1.29 (#517) — the linked builds carry 1.31 since
+/// #523, so this only ever fires for an older `libonnxruntime` under
+/// `load-dynamic`: on x86-64 with AVX2/AVX-512, 1.26–1.28's
+/// `NchwcTransformer` rewrites the picture classifier into a graph that
+/// returns the same logits for every input — every picture came out `table`
+/// 0.091 / `logo` 0.085 / `icon` 0.078. Disabling that one transformer, or
+/// `EXTENDED` (Level2), restores the reference output exactly; 1.29 fixed it
+/// at every level. The cost is the NCHWc speed-up, ~5 ms per picture. An
+/// unknown version is treated as affected — the capped graph is correct on
+/// every runtime, the uncapped one is not. Only the classifier opts in: the
+/// layout, TableFormer and OCR graphs are pinned by the conformance
+/// snapshots at the full level.
+pub fn cap_before_1_29(builder: SessionBuilder) -> Result<SessionBuilder, String> {
+    let version = runtime_version();
+    if version.is_some_and(|v| v >= (1, 29)) {
+        return Ok(builder);
+    }
+    docling_core::debug_log!(
+        "docling-onnx: ONNX Runtime {version:?} predates 1.29 — graph optimization capped at \
+         EXTENDED (#517)"
+    );
+    builder
+        .with_optimization_level(GraphOptimizationLevel::Level2)
+        .map_err(|e| e.to_string())
+}
+
+/// `DOCLING_RS_ORT_PROFILE=<dir>`: have ONNX Runtime write its per-operator
+/// profile of every run of this session to `<dir>/<model stem>_<timestamp>.json`
+/// (ORT's Chrome-trace JSON, one `model_run` event per run and one
+/// `*_kernel_time` event per node). Off unless the variable names a
+/// directory; a session option, so it costs nothing otherwise. Summarize a
+/// file with `scripts/dev/ort_profile_summary.py`. The profile is written when
+/// the session is dropped — a process that is killed loses it.
+fn with_profile(builder: SessionBuilder, model_path: &Path) -> Result<SessionBuilder, String> {
+    let Some(dir) = docling_core::env::nonempty("DOCLING_RS_ORT_PROFILE") else {
+        return Ok(builder);
+    };
+    let stem = model_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("session");
+    builder
+        .with_profiling(Path::new(&dir).join(stem))
+        .map_err(|e| format!("DOCLING_RS_ORT_PROFILE: {e}"))
+}
+
 /// Create the session for `model_path` the plain way (no graph cache) under
 /// the [`creation_guard`] — for the models whose graph is not worth caching
 /// (enrichment, Whisper, the embedder) but which must still serialize their
 /// creation on a GPU (#452).
 pub fn commit_uncached(
-    mut builder: SessionBuilder,
+    builder: SessionBuilder,
     model_path: impl AsRef<Path>,
 ) -> Result<Session, String> {
+    let model_path = model_path.as_ref();
+    let mut builder = with_profile(builder, model_path)?;
     let _guard = creation_guard();
     builder
         .commit_from_file(model_path)
@@ -428,6 +851,7 @@ pub fn commit_uncached(
 /// Every failure on the cached path falls back to the ordinary load, so a
 /// stale or truncated entry costs one rebuild, never a wrong answer.
 pub fn commit(builder: SessionBuilder, model_path: &str, variant: &str) -> Result<Session, String> {
+    let builder = with_profile(builder, Path::new(model_path))?;
     // Every `commit_from_file` below runs under the GPU creation lock (#452);
     // on CPU there is no lock and the workers/lanes still start in parallel.
     let _guard = creation_guard();
@@ -587,6 +1011,10 @@ fn graph_cache_path(model_path: &str, variant: &str) -> Option<PathBuf> {
     }
     variant.hash(&mut h);
     ort::MINOR_VERSION.hash(&mut h);
+    // The runtime's own build string (version, commit, flags): the optimized
+    // graph is that build's output, and with `load-dynamic` (#504) the
+    // library under one API version changes with whatever is on the machine.
+    ort::info().hash(&mut h);
     cpu_features().hash(&mut h);
     let stem = Path::new(model_path)
         .file_stem()
@@ -654,6 +1082,107 @@ fn cpu_features() -> String {
 mod tests {
     use super::*;
 
+    /// #602: the provider-dependent defaults, per provider and per
+    /// compiled-in set (the closures stand in for the builds — the real
+    /// features differ per host).
+    #[test]
+    fn bare_program_names_need_an_absolute_argv0() {
+        use std::ffi::OsStr;
+        assert!(needs_absolute_argv0(OsStr::new("docling-serve")));
+        assert!(!needs_absolute_argv0(OsStr::new(
+            "/usr/local/bin/docling-serve"
+        )));
+        assert!(!needs_absolute_argv0(OsStr::new("./docling-rs")));
+        assert!(!needs_absolute_argv0(OsStr::new(
+            "target/release/docling-rs"
+        )));
+    }
+
+    #[test]
+    fn provider_defaults_follow_the_provider() {
+        let cpu_only = |ep: Ep| matches!(ep, Ep::Cpu | Ep::Auto);
+        let mac = |ep: Ep| matches!(ep, Ep::Cpu | Ep::Auto | Ep::CoreMl);
+        let cuda = |ep: Ep| matches!(ep, Ep::Cpu | Ep::Auto | Ep::Cuda);
+        // fp32 under every GPU provider, CoreML included; int8 on CPU-class.
+        for ep in [Ep::Cuda, Ep::TensorRt, Ep::DirectMl, Ep::CoreMl] {
+            assert!(prefers_fp32_for(ep, mac), "{ep:?}");
+        }
+        assert!(!prefers_fp32_for(Ep::Cpu, mac));
+        assert!(!prefers_fp32_for(Ep::Xnnpack, mac));
+        assert!(prefers_fp32_for(Ep::Auto, mac));
+        assert!(!prefers_fp32_for(Ep::Auto, cpu_only));
+        // An implicit `auto` (DOCLING_RS_EP unset) leaves CoreML out, so a
+        // macOS build's default stays on the int8 CPU path.
+        let mac_default = |ep: Ep| auto_member(ep, mac, false);
+        assert!(!prefers_fp32_for(Ep::Auto, mac_default));
+        assert!(prefers_fp32_for(Ep::Auto, |ep| auto_member(ep, mac, true)));
+        // Batched layout only for the CUDA class: CoreML needs the static,
+        // per-page graph to be handed anything at all.
+        assert!(!prefers_batching_for(Ep::CoreMl, mac));
+        assert!(!prefers_batching_for(Ep::Auto, mac));
+        assert!(!prefers_batching_for(Ep::Auto, cpu_only));
+        assert!(!prefers_batching_for(Ep::Cpu, cuda));
+        assert!(!prefers_batching_for(Ep::Xnnpack, cuda));
+        assert!(prefers_batching_for(Ep::Auto, cuda));
+        for ep in [Ep::Cuda, Ep::TensorRt, Ep::DirectMl] {
+            assert!(prefers_batching_for(ep, cuda), "{ep:?}");
+        }
+    }
+
+    /// #602: CoreML is opt-in. With `DOCLING_RS_EP` unset a CoreML build
+    /// stays on CPU, while CUDA-class (and XNNPACK) builds keep defaulting
+    /// to `auto`; a named `auto` registers CoreML, the implicit one does not.
+    #[test]
+    fn coreml_is_opt_in() {
+        let cpu_only = |ep: Ep| matches!(ep, Ep::Cpu | Ep::Auto);
+        let mac = |ep: Ep| matches!(ep, Ep::Cpu | Ep::Auto | Ep::CoreMl);
+        let mac_xnn = |ep: Ep| matches!(ep, Ep::Cpu | Ep::Auto | Ep::CoreMl | Ep::Xnnpack);
+        let cuda = |ep: Ep| matches!(ep, Ep::Cpu | Ep::Auto | Ep::Cuda);
+        assert_eq!(default_choice_for(cpu_only), Ep::Cpu);
+        assert_eq!(default_choice_for(mac), Ep::Cpu);
+        assert_eq!(default_choice_for(cuda), Ep::Auto);
+        assert_eq!(default_choice_for(mac_xnn), Ep::Auto);
+        assert!(!auto_member(Ep::CoreMl, mac_xnn, false));
+        assert!(auto_member(Ep::Xnnpack, mac_xnn, false));
+        assert!(auto_member(Ep::CoreMl, mac, true));
+        assert!(auto_member(Ep::Cuda, cuda, false));
+        assert!(!auto_member(Ep::Cuda, mac, true));
+        assert!(!auto_member(Ep::Cpu, mac, true));
+        assert!(!auto_member(Ep::Auto, mac, true));
+    }
+
+    /// The binding-facing list names exactly the compiled-in providers, by
+    /// the names [`parse`] reads back.
+    #[test]
+    fn compiled_providers_round_trip_through_parse() {
+        let names = compiled_providers();
+        assert_eq!(names.first(), Some(&"cpu"));
+        for name in &names {
+            assert!(
+                compiled(parse(name).expect("a DOCLING_RS_EP name")),
+                "{name}"
+            );
+        }
+        assert_eq!(names.contains(&"coreml"), cfg!(feature = "coreml"));
+        assert_eq!(names.contains(&"cuda"), cfg!(feature = "cuda"));
+    }
+
+    /// #602: NeuralNetwork is the CoreML default (CPU-identical output);
+    /// MLProgram is an explicit opt-in; anything else is reported.
+    #[test]
+    fn coreml_format_defaults_to_neuralnetwork() {
+        assert_eq!(coreml_format(None), Ok(CoreMlFormat::NeuralNetwork));
+        assert_eq!(
+            coreml_format(Some(" NeuralNetwork ")),
+            Ok(CoreMlFormat::NeuralNetwork)
+        );
+        assert_eq!(
+            coreml_format(Some("MLProgram")),
+            Ok(CoreMlFormat::MlProgram)
+        );
+        assert_eq!(coreml_format(Some("onnx")), Err("onnx".into()));
+    }
+
     /// #452: the creation lock exists only for GPU providers. A CPU-only build
     /// has nothing to serialize (the OCR lanes keep their parallel start-up);
     /// with a GPU feature compiled in, the guard is a real lock — taken and
@@ -667,6 +1196,27 @@ mod tests {
         // would turn every later model load into a hang.
         let g = creation_guard();
         assert_eq!(g.is_some(), dispatches().is_some());
+    }
+
+    #[test]
+    fn version_strings_parse() {
+        assert_eq!(parse_version("1.28.0"), Some((1, 28)));
+        assert_eq!(parse_version(" 1.30.1\n"), Some((1, 30)));
+        assert_eq!(parse_version("1"), None);
+        assert_eq!(parse_version("dev"), None);
+    }
+
+    /// The linked runtime reports a version, and it is one `ort` accepts.
+    #[test]
+    #[cfg(not(feature = "load-dynamic"))]
+    fn linked_runtime_reports_its_version() {
+        let (major, minor) = runtime_version().expect("version string");
+        assert_eq!(major, 1);
+        assert!(
+            minor >= ort::MINOR_VERSION,
+            "1.{minor} < 1.{}",
+            ort::MINOR_VERSION
+        );
     }
 
     #[test]
@@ -701,23 +1251,22 @@ mod tests {
     #[test]
     fn unset_defaults_to_auto_exactly_in_gpu_builds() {
         // CI's ep-features matrix runs this with each GPU feature on, the
-        // plain test job with none — both arms get exercised.
+        // plain test job with none — both arms get exercised. CoreML alone
+        // is no GPU build for this purpose: it is opt-in (#602).
         #[cfg(any(
             feature = "cuda",
             feature = "tensorrt",
             feature = "directml",
-            feature = "coreml",
             feature = "xnnpack"
         ))]
-        assert_eq!(default_choice(), Ep::Auto);
+        assert_eq!(default_choice_for(compiled), Ep::Auto);
         #[cfg(not(any(
             feature = "cuda",
             feature = "tensorrt",
             feature = "directml",
-            feature = "coreml",
             feature = "xnnpack"
         )))]
-        assert_eq!(default_choice(), Ep::Cpu);
+        assert_eq!(default_choice_for(compiled), Ep::Cpu);
     }
 }
 
@@ -773,5 +1322,29 @@ mod cache_guard_tests {
                 assert!(onnx_file_complete(&p), "{}", p.display());
             }
         }
+    }
+
+    /// `load-dynamic` with no library on the machine: a plain error naming
+    /// the lookup, never `ort`'s panic — what every ML stage degrades on
+    /// (#504). The first call pins the process-wide result, so this is the
+    /// only test that touches `runtime_library`.
+    #[cfg(feature = "load-dynamic")]
+    #[test]
+    fn missing_runtime_library_is_an_error_not_a_panic() {
+        std::env::set_var(
+            "ORT_DYLIB_PATH",
+            "/nonexistent/docling-rs/libonnxruntime.so",
+        );
+        let err = super::runtime_library().expect_err("no library at that path");
+        assert!(err.contains("ONNX Runtime library unavailable"), "{err}");
+        assert!(
+            err.contains("/nonexistent/docling-rs/libonnxruntime.so"),
+            "{err}"
+        );
+        assert!(err.contains("ORT_DYLIB_PATH"), "{err}");
+        let err2 = super::session_builder()
+            .err()
+            .expect("builder goes through the loader");
+        assert_eq!(err, err2);
     }
 }

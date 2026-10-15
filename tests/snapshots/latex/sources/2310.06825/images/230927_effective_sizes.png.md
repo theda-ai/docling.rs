@@ -1,399 +1,159 @@
-W
+%
 
-0
+70
 
-D
+72
 
-S
+65
 
-2
-
-D
-
-0
+60
 
 U
 
-0
+L 55
+
+M
+
+M
+
+50
+
+45
+
+70
+
+%
+
+65
+
+e 60
+
+g
 
 e
-
-e
-
-0
-
-D
-
-D
-
-J
-
-S
 
 W
 
 0
 
-D
+n
+
+55
+
+50
+
+45
+
+70
+
+%
+
+g n 68
+
+n
+
+0
 
 S
 
-2
-
-D
-
-0
-
-U
-
-0
-
 e
 
-e
+R
 
-0
+Effective LLaMA
 
-D
+66
 
-D
+64
 
-J
+Effective LLaMA
 
-S
+size 23B (3.3x)
 
-L
+size 38B (5.4x)
 
-L
+LLaMA 2
+
+LLaMA 2
+
+Mistral Mistral
 
 7
 
-7
+13
 
-L
+34
 
-0
-
-L
+70
 
 7
 
-S
+13
 
-0
+34
 
-MMLU (%)
+70
 
-S
+Model size (billion parameters)
 
-g
+Model size (billion parameters)
 
-0
+LLaMA 2
 
-S
+LLaMA 2
 
-+
+Mistral
 
-h
+Effective LLaMA
 
-P
+size 13B (1.9x)
 
-D
+Effective LLaMA
 
-C
-
-2
-
-w
-
-0
-
-x
-
-L
-
-0
-
-L1
-
-L
+size 21B (3x)
 
 7
 
-7
+13
 
-L
+34
 
-0
+70
 
-L
+Mistral
 
-0
+13
 
-P
+34
 
-Knowledge (%)
+70
 
-7
+Model size (billion parameters)
 
-S
+Model size (billion parameters)
 
-S
+68
 
-g
+% 66
 
-0
-
-S
-
-+
-
-h
-
-D
-
-2
-
-10
-
-e
-
-6
-
-X
-
-N
-
-0
-
-g
-
-W
-
-S
-
-H
-
-e
-
-Comprehension (%)
-
-Reasoning (%)
-
-g
+n
 
 0
 
 S
 
-+
-
-h
-
-P D
-
-2
-
-Ｚ
-
-L
-
-P
+n
 
 e
 
-N
-
-V
-
-g
-
-C
-
-g
-
-7
-
-g
-
-9
-
-W
-
-S
-
-H
-
 e
 
-g
-
-g
-
-9
-
-8
+p
 
 0
 
-C
+64
 
-W
+62
 
-S
-
-H
-
-e
-
-e
-
-W
-
-V
-
-C
-
-0
-
-e
-
-W
-
-V
-
-C
-
-e
-
-W
-
-V
-
-C
-
-6
-
-Y
-
-g
-
-8
-
-W
-
-0
-
-D
-
-S
-
-2
-
-D
-
-0
-
-U
-
-0
-
-e
-
-e
-
-0
-
-D
-
-D
-
-J
-
-S
-
-W
-
-0
-
-D
-
-S
-
-2
-
-D
-
-0
-
-U
-
-0
-
-e
-
-e
-
-0
-
-D
-
-D
-
-J
-
-S
-
-S
-
-e
-
-N
-
-V
-
-g
-
-7
-
-+
-
-h
-
-P
-
-D
-
-w
-
-2
-
-8
-
-0
-
-e
-
-X
-
-N
-
-g
-
-W
-
-S
-
-H
-
-e
-
-e
-
-W
-
-V
-
-C
-
-0
+60

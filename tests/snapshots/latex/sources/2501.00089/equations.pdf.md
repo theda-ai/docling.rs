@@ -34,22 +34,14 @@ log(NII/H )
 
 <!-- image -->
 
-A
-
-SL 138
-
-A
-
-SL 138
-
-A
-
-SL 157
+<!-- image -->
 
 <!-- image -->
 
-A
+<!-- image -->
 
-SL 322
+<!-- image -->
+
+<!-- image -->
 
 <!-- image -->

@@ -64,10 +64,10 @@
           "page_no": 1,
           "bbox": {
             "l": 4608786.0,
-            "t": 1600200.0,
+            "t": 641515.0,
             "r": 7583214.0,
-            "b": 641515.0,
-            "coord_origin": "BOTTOMLEFT"
+            "b": 1600200.0,
+            "coord_origin": "TOPLEFT"
           },
           "charspan": [
             0,
@@ -91,10 +91,10 @@
           "page_no": 1,
           "bbox": {
             "l": 5286703.0,
-            "t": 2354317.0,
+            "t": 1920383.0,
             "r": 6905296.0,
-            "b": 1920383.0,
-            "coord_origin": "BOTTOMLEFT"
+            "b": 2354317.0,
+            "coord_origin": "TOPLEFT"
           },
           "charspan": [
             0,
@@ -118,10 +118,10 @@
           "page_no": 1,
           "bbox": {
             "l": 4965460.0,
-            "t": 4937617.0,
+            "t": 4503683.0,
             "r": 7612655.0,
-            "b": 4503683.0,
-            "coord_origin": "BOTTOMLEFT"
+            "b": 4937617.0,
+            "coord_origin": "TOPLEFT"
           },
           "charspan": [
             0,
@@ -147,10 +147,10 @@
           "page_no": 1,
           "bbox": {
             "l": 5689599.0,
-            "t": 3835400.0,
+            "t": 3022600.0,
             "r": 6502399.0,
-            "b": 3022600.0,
-            "coord_origin": "BOTTOMLEFT"
+            "b": 3835400.0,
+            "coord_origin": "TOPLEFT"
           },
           "charspan": [
             0,

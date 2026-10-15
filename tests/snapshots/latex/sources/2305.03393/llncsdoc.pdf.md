@@ -28,6 +28,8 @@ The llncs class is invoked by replacing article by llncs in the first line of yo
 \begin{document} <Your contribution> \end{document} If your file is already coded with LATEX, you can easily adapt it to the llncs document class by replacing \documentclass{article} with \documentclass{llncs}
 ```
 
+\thanks
+
 \fnmsep
 
 \titlerunning
@@ -42,7 +44,7 @@ Please code the title of your contribution as follows: \title
 
 All words in titles should be capitalized except for conjunctions, prepositions (e.g. on, of, by, and, or, but, from, with, without, under), and definite/indefinite articles (the, a, an), unless they appear at the beginning. Formula letters are typeset as in the text. Long titles that run over multiple lines can be wrapped explicitly with \\ . Titles have no end punctuation.
 
-Acknowledgements should generally be placed in an unnumbered subsection at the end of the paper. If you still need to refer to a support or funding program in a note to the title, you can use the \thanks macro inside the title: \thanks
+Acknowledgements should generally be placed in an unnumbered subsection at the end of the paper. If you still need to refer to a support or funding program in a note to the title, you can use the \thanks macro inside the title:
 
 \title{&lt;Your contribution title&gt;\thanks{&lt;granted by x&gt;}}
 
@@ -72,7 +74,9 @@ ORCID identifiers can be included with \orcidID
 
 \orcidID{&lt;ORCID identifier&gt;}
 
-\authorrunning The ORCID (Open Researcher and Contributor ID) registry provides authors with unique digital identifiers that distinguish them from other researchers and help them link their research activities to these identifiers. Authors who are not yet registered with ORCID are encouraged to apply for an individual ORCID id at https://www.orcid.org and to include it in their papers. In the final publication, the ORCID id will be replaced by an ORCID icon, which will link from the eBook to the actual ID in the ORCID database. The ORCID icon will also replace the number in the printed book.
+\authorrunning
+
+\institute \and The ORCID (Open Researcher and Contributor ID) registry provides authors with unique digital identifiers that distinguish them from other researchers and help them link their research activities to these identifiers. Authors who are not yet registered with ORCID are encouraged to apply for an individual ORCID id at https://www.orcid.org and to include it in their papers. In the final publication, the ORCID id will be replaced by an ORCID icon, which will link from the eBook to the actual ID in the ORCID database. The ORCID icon will also replace the number in the printed book.
 
 If you have done this correctly, the author line now reads, for example:
 
@@ -84,25 +88,19 @@ The given name(s) should always be followed by the family name(s). Authors who h
 
 As given name(s) are to be shortened to initials in the running heads, specifying an abbreviated author list with the optional command:
 
-```
-\authorrunning{<abbreviated author list>}
-```
+\authorrunning{&lt;abbreviated author list&gt;}
 
 might add some clarity about the correct representation of author names, in the running-heads as well as in the author index.
 
 ## 3.3 Affiliations
 
-Addresses of institutes, companies, etc. should be given in \institute . \institute
+Addresses of institutes, companies, etc. should be given in \institute .
 
-\and Multiple affiliations are separated by \and , which automatically assures correct numbering:
-
-Inside you can use \email
+Multiple affiliations are separated by \and , which automatically assures correct numbering:
 
 ```
-\institute{<name of an institute> \and <name of the next institute> \and <name of the next institute>} Inside \institute you can use\email \email{<email address>} and\url
+\institute{<name of an institute> \and <name of the next institute> \and <name of the next institute>} Inside \institute you can use\email \email{<email address>} and\url \url{<url>}
 ```
-
-\url{&lt;url&gt;}
 
 to provide author email addresses and Web pages. If you need to typeset the tilde character - e.g. for your Web page in your unix system's home directory - the \homedir command will do this. If multiple authors have the same affiliation, please check that the order of email addresses matches the sequence of (affiliated) author names.
 
@@ -161,6 +159,8 @@ Please note that all these characters are only available in math mode.
 
 Several theorem-like environments are predefined in the llncs document class. corollary ( env. ) definition ( env. ) lemma ( env. ) The following environments have a bold run-in heading, while the following text is in italics:
 
+proposition
+
 ```
 proposition(env.) \begin{corollary} <text> \end{corollary} \begin{definition} <text> \end{definition} \begin{lemma} <text> \end{lemma} \begin{proposition} <text> \end{proposition} \begin{theorem} <text> \end{theorem}
 ```
@@ -209,9 +209,9 @@ If you wish to add an unnumbered environment, please use the syntax
 
 There are three options for citing references:
 
-- - arabic numbers, i.e. [1], [3-5], [4-6,9],
-- - labels, i.e. [CE1], [AB1,XY2],
-- - author/year system, (Smith et al. 2000), (Miller 1999a, 12; Brown 2018).
+```
+- arabic numbers, i.e. [1], [3-5], [4-6,9], - labels, i.e. [CE1], [AB1,XY2], - author/year system,(Smith et al. 2000),(Miller 1999a, 12; Brown 2018).
+```
 
 We prefer citations with arabic numbers, i.e. the usage of \bibitem without an optional parameter. If you want to use the author/year system, you can use the class option citeauthoryear , i.e.
 
@@ -235,15 +235,15 @@ The DOI will be expanded to the URL https://doi.org/&lt;DOI&gt; in accordance wi
 
 The llncs document class contains several class options that have become obsolete over the years. We only mention them for completeness:
 
-- - The llncs document class changes the formatting of vectors coded with orivec \vec to boldface italics. If you absolutely need the original L A T E X design for vectors, i.e. an arrow above the related variable, you can restore it with the orivec option.
+- The llncs document class changes the formatting of vectors coded with orivec \vec to boldface italics. If you absolutely need the original L A T E X design for vectors, i.e. an arrow above the related variable, you can restore it with the orivec option.
 
 envcountsame
 
-- - All theorem-like environments share one counter, i.e. Theorem 1, Lemma 2, Corollary 3, etc.
+- All theorem-like environments share one counter, i.e. Theorem 1, Lemma 2, Corollary 3, etc.
 
 envcountreset envcountsect openbib oribibl
 
-- - All theorem-like environments are numbered per section, i.e. the related counters are reset to 1 in every section.
-- - All theorem-like environments are numbered per section, and the section number added to the individual counter, i.e. Theorem 1.2, Lemma 2.2, etc.
-- - This option produces the 'open' bibliography style, in which each block starts on a new line, and succeeding lines in a block are indented by \bibindent .
-- - This option restores the original L A T E X definitions for the bibliography and the \cite mechanism that some Bib T E X applications rely on.
+- All theorem-like environments are numbered per section, i.e. the related counters are reset to 1 in every section.
+- All theorem-like environments are numbered per section, and the section number added to the individual counter, i.e. Theorem 1.2, Lemma 2.2, etc.
+- This option produces the 'open' bibliography style, in which each block starts on a new line, and succeeding lines in a block are indented by \bibindent .
+- This option restores the original L A T E X definitions for the bibliography and the \cite mechanism that some Bib T E X applications rely on.

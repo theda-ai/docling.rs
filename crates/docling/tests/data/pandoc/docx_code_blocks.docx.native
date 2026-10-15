@@ -1,0 +1,283 @@
+[ Header
+    2
+    ( "" , [] , [] )
+    [ Str "Code-detection" , Space , Str "fixture" ]
+, Header
+    3
+    ( "" , [] , [] )
+    [ Str "Case"
+    , Space
+    , Str "A"
+    , Space
+    , Str "-"
+    , Space
+    , Str "normal"
+    , Space
+    , Str "prose"
+    ]
+, Para
+    [ Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "an"
+    , Space
+    , Str "ordinary"
+    , Space
+    , Str "paragraph"
+    , Space
+    , Str "of"
+    , Space
+    , Str "prose"
+    , Space
+    , Str "describing"
+    , Space
+    , Str "how"
+    , Space
+    , Str "the"
+    , Space
+    , Str "parser"
+    , Space
+    , Str "works."
+    , Space
+    , Str "It"
+    , Space
+    , Str "uses"
+    , Space
+    , Str "the"
+    , Space
+    , Str "default"
+    , Space
+    , Str "body"
+    , Space
+    , Str "font"
+    , Space
+    , Str "and"
+    , Space
+    , Str "must"
+    , Space
+    , Str "remain"
+    , Space
+    , Str "a"
+    , Space
+    , Str "plain"
+    , Space
+    , Str "text"
+    , Space
+    , Str "item."
+    ]
+, Header
+    3
+    ( "" , [] , [] )
+    [ Str "Case"
+    , Space
+    , Str "B"
+    , Space
+    , Str "-"
+    , Space
+    , Str "prose"
+    , Space
+    , Str "with"
+    , Space
+    , Str "one"
+    , Space
+    , Str "inline"
+    , Space
+    , Str "monospaced"
+    , Space
+    , Str "word"
+    ]
+, Para
+    [ Str "Call"
+    , Space
+    , Str "the"
+    , Space
+    , Str "printf"
+    , Space
+    , Str "function"
+    , Space
+    , Str "to"
+    , Space
+    , Str "print"
+    , Space
+    , Str "formatted"
+    , Space
+    , Str "output"
+    , Space
+    , Str "to"
+    , Space
+    , Str "standard"
+    , Space
+    , Str "out."
+    ]
+, Header
+    3
+    ( "" , [] , [] )
+    [ Str "Case"
+    , Space
+    , Str "C"
+    , Space
+    , Str "-"
+    , Space
+    , Str "paragraph"
+    , Space
+    , Str "in"
+    , Space
+    , Str "'Source"
+    , Space
+    , Str "Code'"
+    , Space
+    , Str "style"
+    ]
+, CodeBlock ( "" , [] , [] ) "import sys\nprint(sys.argv)"
+, Header
+    3
+    ( "" , [] , [] )
+    [ Str "Case"
+    , Space
+    , Str "D"
+    , Space
+    , Str "-"
+    , Space
+    , Str "fully"
+    , Space
+    , Str "monospaced"
+    , Space
+    , Str "paragraph,"
+    , Space
+    , Str "no"
+    , Space
+    , Str "code"
+    , Space
+    , Str "style"
+    ]
+, CodeBlock
+    ( "" , [ "sql" ] , [] )
+    "SELECT * FROM users WHERE active = 1;"
+, Header
+    3
+    ( "" , [] , [] )
+    [ Str "Case"
+    , Space
+    , Str "E"
+    , Space
+    , Str "-"
+    , Space
+    , Str "multi-line"
+    , Space
+    , Str "monospaced"
+    , Space
+    , Str "block"
+    ]
+, CodeBlock
+    ( "" , [ "python" ] , [] )
+    "def fib(n):\n    a, b = 0, 1\n    for _ in range(n):\n        a, b = b, a + b\n    return a"
+, Header
+    3
+    ( "" , [] , [] )
+    [ Str "Case"
+    , Space
+    , Str "F"
+    , Space
+    , Str "-"
+    , Space
+    , Str "'Source"
+    , Space
+    , Str "Reference'"
+    , Space
+    , Str "style"
+    , Space
+    , Str "(substring"
+    , Space
+    , Str "trap)"
+    ]
+, Para
+    [ Str "See"
+    , Space
+    , Str "the"
+    , Space
+    , Str "original"
+    , Space
+    , Str "source"
+    , Space
+    , Str "for"
+    , Space
+    , Str "details."
+    ]
+, Header
+    3
+    ( "" , [] , [] )
+    [ Str "Case"
+    , Space
+    , Str "G"
+    , Space
+    , Str "-"
+    , Space
+    , Str "'Listing"
+    , Space
+    , Str "Number'"
+    , Space
+    , Str "style,"
+    , Space
+    , Str "no"
+    , Space
+    , Str "code"
+    , Space
+    , Str "chars"
+    , Space
+    , Str "(substring"
+    , Space
+    , Str "trap)"
+    ]
+, Para [ Str "Listing" , Space , Str "3.2" ]
+, Header
+    3
+    ( "" , [] , [] )
+    [ Str "Case"
+    , Space
+    , Str "H"
+    , Space
+    , Str "-"
+    , Space
+    , Str "pure-Courier"
+    , Space
+    , Str "prose,"
+    , Space
+    , Str "no"
+    , Space
+    , Str "code-indicative"
+    , Space
+    , Str "characters"
+    ]
+, Para
+    [ Str "This"
+    , Space
+    , Str "memo"
+    , Space
+    , Str "is"
+    , Space
+    , Str "set"
+    , Space
+    , Str "in"
+    , Space
+    , Str "a"
+    , Space
+    , Str "typewriter"
+    , Space
+    , Str "face"
+    , Space
+    , Str "for"
+    , Space
+    , Str "a"
+    , Space
+    , Str "vintage"
+    , Space
+    , Str "look"
+    , Space
+    , Str "and"
+    , Space
+    , Str "feel"
+    , Space
+    , Str "throughout."
+    ]
+]

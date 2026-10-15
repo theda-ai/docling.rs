@@ -168,3 +168,33 @@ fn xml_sniff_tolerates_a_non_utf8_document() {
         latin1,
     ));
 }
+
+// --- Unreadable PDFs ---------------------------------------------------------
+
+/// A `.pdf` no reader here can parse — not a PDF, truncated, empty — fails
+/// with an error about the file, once prefixed, never with a pointer at the
+/// optional pdfium library (which this build does not have and which would
+/// not have read the file either).
+#[cfg(all(feature = "pdf", not(feature = "pdfium")))]
+#[test]
+fn an_unreadable_pdf_says_so_not_pdfium() {
+    let real = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/data/pdf/sources/multi_page.pdf"),
+    )
+    .unwrap();
+    for (name, bytes) in [
+        ("garbage.pdf", b"garbage".to_vec()),
+        ("empty.pdf", Vec::new()),
+        ("header_only.pdf", b"%PDF-1.7\n%%EOF\n".to_vec()),
+        ("truncated.pdf", real[..3000].to_vec()),
+    ] {
+        let err = DocumentConverter::new()
+            .convert(SourceDocument::from_bytes(name, InputFormat::Pdf, bytes))
+            .expect_err(name)
+            .to_string();
+        assert!(err.contains("not a readable PDF"), "{name}: {err}");
+        assert!(!err.contains("pdfium"), "{name}: {err}");
+        assert!(!err.contains("pdf: pdf:"), "{name}: {err}");
+    }
+}

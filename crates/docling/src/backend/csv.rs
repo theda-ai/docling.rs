@@ -54,6 +54,7 @@ impl DeclarativeBackend for CsvBackend {
                 cells: None,
                 caption: None,
                 caption_parent: Default::default(),
+                caption_location: None,
             }));
         }
         Ok(doc)

@@ -38,7 +38,7 @@ pub const CODE_FORMULA_EXPANSION: f32 = 0.18;
 
 /// The 26 classes of DocumentFigureClassifier-v2.5, indexed by model class id
 /// (`config.json` `id2label`).
-const PICTURE_CLASSES: [&str; 26] = [
+pub const PICTURE_CLASSES: [&str; 26] = [
     "logo",
     "photograph",
     "icon",
@@ -93,8 +93,13 @@ impl PictureClassifier {
             );
             return None;
         }
-        let builder = Session::builder().ok()?.with_intra_threads(intra).ok()?;
+        let builder = docling_onnx::session_builder()
+            .map_err(|e| eprintln!("docling-pdf: picture classifier: {e}"))
+            .ok()?
+            .with_intra_threads(intra)
+            .ok()?;
         let builder = docling_onnx::apply(builder)
+            .and_then(docling_onnx::cap_before_1_29)
             .map_err(|e| eprintln!("docling-pdf: picture classifier: {e}"))
             .ok()?;
         let session = docling_onnx::commit_uncached(builder, &path)
@@ -212,7 +217,11 @@ impl CodeFormula {
             }
         }
         let load = |p: String| {
-            let builder = Session::builder().ok()?.with_intra_threads(intra).ok()?;
+            let builder = docling_onnx::session_builder()
+                .map_err(|e| eprintln!("docling-pdf: CodeFormula: {e}"))
+                .ok()?
+                .with_intra_threads(intra)
+                .ok()?;
             let builder = docling_onnx::apply(builder)
                 .map_err(|e| eprintln!("docling-pdf: CodeFormula: {e}"))
                 .ok()?;

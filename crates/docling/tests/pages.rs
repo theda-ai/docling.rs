@@ -1,9 +1,10 @@
 //! e2e for issue #80: the `--pages A-B` window and memory-bounded
 //! referenced-image streaming.
 //!
-//! The PDF tests use the `no_ocr` path (text layer only), so they need pdfium
-//! but no ONNX models; they skip cleanly when the pdfium library isn't around
-//! (e.g. a contributor checkout before `download_dependencies.sh`).
+//! The PDF tests use the `text_layer_only` path (text layer only), so they need no
+//! native library and no ONNX models; the OCR/TableFormer ones skip cleanly
+//! when the models aren't around (e.g. a contributor checkout before
+//! `download_dependencies.sh`).
 
 use std::path::{Path, PathBuf};
 
@@ -12,21 +13,6 @@ use docling::{parse_page_range, DocumentConverter, ImageMode, SourceDocument};
 /// Workspace root (this crate lives at `crates/docling`).
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
-/// Point pdfium resolution at the workspace-root `.pdfium/lib` (the backend's
-/// default is CWD-relative, and tests run from the crate dir). Returns whether
-/// the library is actually present.
-fn pdfium_ready() -> bool {
-    let lib = repo_root().join(".pdfium/lib");
-    if lib.join("libpdfium.so").exists()
-        || lib.join("libpdfium.dylib").exists()
-        || lib.join("pdfium.dll").exists()
-    {
-        std::env::set_var("PDFIUM_DYNAMIC_LIB_PATH", &lib);
-        return true;
-    }
-    std::env::var("PDFIUM_DYNAMIC_LIB_PATH").is_ok()
 }
 
 fn pdf_source() -> SourceDocument {
@@ -47,17 +33,13 @@ fn parse_page_range_accepts_ranges_and_single_pages() {
 
 #[test]
 fn pdf_page_window_converts_only_that_window() {
-    if !pdfium_ready() {
-        eprintln!("skipping: pdfium library not found");
-        return;
-    }
     let full = DocumentConverter::new()
-        .no_ocr(true)
+        .text_layer_only(true)
         .convert(pdf_source())
         .expect("full convert")
         .document;
     let windowed = DocumentConverter::new()
-        .no_ocr(true)
+        .text_layer_only(true)
         .page_range(2, 3)
         .convert(pdf_source())
         .expect("windowed convert")
@@ -72,7 +54,7 @@ fn pdf_page_window_converts_only_that_window() {
     // A window covering the whole document is exactly the full conversion
     // (`last` clamps past the end).
     let all = DocumentConverter::new()
-        .no_ocr(true)
+        .text_layer_only(true)
         .page_range(1, 999)
         .convert(pdf_source())
         .expect("clamped convert")
@@ -82,12 +64,8 @@ fn pdf_page_window_converts_only_that_window() {
 
 #[test]
 fn pdf_page_window_outside_document_is_an_error() {
-    if !pdfium_ready() {
-        eprintln!("skipping: pdfium library not found");
-        return;
-    }
     let err = DocumentConverter::new()
-        .no_ocr(true)
+        .text_layer_only(true)
         .page_range(50, 60)
         .convert(pdf_source())
         .expect_err("window past the last page");
@@ -141,10 +119,10 @@ fn referenced_images_stream_to_the_artifacts_dir() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The layout + OCR models the force-OCR test needs, beyond pdfium. Model
+/// The layout + OCR models the force-OCR test needs. Model
 /// resolution is CWD-relative (tests run from the crate dir) so, when the
 /// repo-root copies exist, point the env overrides at them; skips cleanly on
-/// a model-free checkout, same as the pdfium gate.
+/// a model-free checkout.
 fn ocr_models_ready() -> bool {
     let m = repo_root().join(".models");
     let layout = ["layout_heron_int8.onnx", "layout_heron.onnx"]
@@ -208,13 +186,16 @@ fn text_detector_reads_labels_outside_layout_regions() {
 /// discard the text layer: converting a digital PDF page with it produces
 /// OCR-recognized text, not the embedded cells. The fixture's text layer
 /// spells "JavaScript Code Example" — OCR of the rendered page reads the same
-/// heading, so the words prove the page converted *some* way; the differing
-/// glyph geometry (OCR boxes never byte-match the text layer's) proves it was
-/// not the text-layer path: the two outputs must differ.
+/// heading, so the words prove the page converted *some* way; the
+/// confidence report proves which way: an OCR score exists only when OCR
+/// produced the page's text. (Comparing the two Markdown outputs proved
+/// nothing: with the text detector — `DOCLING_OCR_DET_ONNX`, which another
+/// test in this process sets — OCR reads the page exactly as the text layer
+/// spells it, and the test failed whenever that test ran first.)
 #[test]
 fn force_full_page_ocr_discards_the_text_layer() {
-    if !pdfium_ready() || !ocr_models_ready() {
-        eprintln!("skipping: pdfium or the OCR models are not present");
+    if !ocr_models_ready() {
+        eprintln!("skipping: the OCR models are not present");
         return;
     }
     let src = || {
@@ -225,23 +206,65 @@ fn force_full_page_ocr_discards_the_text_layer() {
         .page_range(1, 1)
         .convert(src())
         .expect("normal convert")
-        .document
-        .export_to_markdown();
+        .document;
     let forced = DocumentConverter::new()
         .page_range(1, 1)
         .force_full_page_ocr(true)
         .convert(src())
         .expect("forced convert")
-        .document
-        .export_to_markdown();
+        .document;
+    let md = forced.export_to_markdown();
     assert!(
-        forced.contains("JavaScript"),
-        "OCR should still read the page's heading: {forced:?}"
+        md.contains("JavaScript"),
+        "OCR should still read the page's heading: {md:?}"
     );
-    assert_ne!(
-        normal, forced,
+    let ocr_score = |doc: &docling_core::DoclingDocument| {
+        doc.confidence
+            .as_ref()
+            .expect("pipeline sets confidence")
+            .ocr_score()
+    };
+    assert_eq!(ocr_score(&normal), None, "digital page: nothing OCR'd");
+    assert!(
+        ocr_score(&forced).is_some(),
         "forced output must come from OCR, not the embedded text layer"
     );
+}
+
+/// `no_ocr` (#244 / #611, docling's `do_ocr=False`) never runs OCR — proven
+/// with the OCR models *present*: a scanned page, whose only text is pixels,
+/// converts to an empty document without an OCR score, while the same page
+/// without the switch is read by OCR.
+#[test]
+fn no_ocr_never_runs_ocr_on_a_scan() {
+    if !ocr_models_ready() {
+        eprintln!("skipping: the OCR models are not present");
+        return;
+    }
+    let src = || {
+        SourceDocument::from_file(
+            repo_root().join("tests/data/scanned/sources/ocr_test_raster.pdf"),
+        )
+        .expect("scanned fixture")
+    };
+    let ocr_score =
+        |doc: &docling_core::DoclingDocument| doc.confidence.as_ref().and_then(|r| r.ocr_score());
+    let read = DocumentConverter::new()
+        .convert(src())
+        .expect("default convert")
+        .document;
+    assert!(
+        !read.export_to_markdown().trim().is_empty(),
+        "OCR reads the scan"
+    );
+    assert!(ocr_score(&read).is_some());
+    let skipped = DocumentConverter::new()
+        .no_ocr(true)
+        .convert(src())
+        .expect("no_ocr on a scan must not error")
+        .document;
+    assert!(skipped.export_to_markdown().trim().is_empty());
+    assert_eq!(ocr_score(&skipped), None, "no_ocr ran OCR");
 }
 
 /// #183: the PDF pipeline attaches a per-page confidence report to the
@@ -251,8 +274,8 @@ fn force_full_page_ocr_discards_the_text_layer() {
 /// and table_score is always unset (docling never assigns it either).
 #[test]
 fn pdf_pipeline_reports_confidence() {
-    if !pdfium_ready() || !ocr_models_ready() {
-        eprintln!("skipping: pdfium or the OCR models are not present");
+    if !ocr_models_ready() {
+        eprintln!("skipping: the OCR models are not present");
         return;
     }
     let src =
@@ -289,15 +312,11 @@ fn pdf_pipeline_reports_confidence() {
 
 /// #183 on the no-OCR text-layer path: parse quality still scores (the cells
 /// are the same extraction the pipeline sees), layout is the orphan-rescue
-/// set (cell confidence 1.0), and OCR never ran. Needs pdfium only.
+/// set (cell confidence 1.0), and OCR never ran. Needs no models.
 #[test]
-fn no_ocr_conversion_reports_parse_confidence() {
-    if !pdfium_ready() {
-        eprintln!("skipping: pdfium library not found");
-        return;
-    }
+fn text_layer_only_conversion_reports_parse_confidence() {
     let doc = DocumentConverter::new()
-        .no_ocr(true)
+        .text_layer_only(true)
         .page_range(1, 2)
         .convert(pdf_source())
         .expect("convert")
@@ -307,7 +326,7 @@ fn no_ocr_conversion_reports_parse_confidence() {
     assert!(report.pages.contains_key(&1) && report.pages.contains_key(&2));
     let parse = report.parse_score().expect("text layer parsed");
     assert!(parse > 0.5, "clean text layer, got {parse}");
-    assert_eq!(report.ocr_score(), None, "no OCR on the no_ocr path");
+    assert_eq!(report.ocr_score(), None, "no OCR on the text-layer path");
 }
 
 /// TableFormer models present too (encoder/decoder/bbox next to the layout
@@ -337,8 +356,8 @@ fn tableformer_ready() -> bool {
 /// into the re-export.
 #[test]
 fn table_cells_are_first_class_and_support_bbox_repair() {
-    if !pdfium_ready() || !ocr_models_ready() || !tableformer_ready() {
-        eprintln!("skipping: pdfium or the ML models are not present");
+    if !ocr_models_ready() || !tableformer_ready() {
+        eprintln!("skipping: the ML models are not present");
         return;
     }
     let src =
@@ -397,11 +416,11 @@ fn table_cells_are_first_class_and_support_bbox_repair() {
 /// PDF outline, so its major sections take bookmark level 1 (rendered `##`)
 /// while unbookmarked front-matter headings fall to the style signal and land
 /// deeper. The fixture pages are digital (no OCR runs), so the test needs
-/// pdfium + the layout model.
+/// the layout model.
 #[test]
 fn heading_hierarchy_differentiates_levels_when_enabled() {
-    if !pdfium_ready() || !ocr_models_ready() {
-        eprintln!("skipping: pdfium/layout assets not found");
+    if !ocr_models_ready() {
+        eprintln!("skipping: the layout/OCR assets are not present");
         return;
     }
     let base = DocumentConverter::new()

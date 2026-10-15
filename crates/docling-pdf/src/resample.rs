@@ -106,8 +106,9 @@ fn round_u8(v: f64) -> u8 {
 
 // ---------------------------------------------------------------------------
 // Pixel-exact reimplementation of Pillow's `Image.resize` for 8-bit RGB —
-// the kernels docling's layout input passes through (`get_page_image`'s
-// default-BICUBIC downsample, then the RT-DETR processor's BILINEAR stretch
+// the kernels docling's layout input passes through with its pypdfium2 backend
+// (`get_page_image`'s default-BICUBIC downsample — docling 2.123+'s default
+// docling-parse backend renders instead, #478 — then the RT-DETR processor's BILINEAR stretch
 // to 640×640). Ported from Pillow `src/libImaging/Resample.c`: per-axis
 // coefficient tables quantized to fixed point (`PRECISION_BITS`), a
 // horizontal pass then a vertical pass, each rounding through uint8 — that

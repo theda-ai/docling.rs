@@ -53,22 +53,6 @@ fn repo_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// Skip-gate for tests that render PDFs: point pdfium resolution at the
-/// repo-root `.pdfium/lib` when present (same pattern as
-/// `crates/docling/tests/pages.rs`) — CI without the runtime assets stays
-/// green.
-fn pdfium_ready() -> bool {
-    let lib = repo_root().join(".pdfium/lib");
-    if lib.join("libpdfium.so").exists()
-        || lib.join("libpdfium.dylib").exists()
-        || lib.join("pdfium.dll").exists()
-    {
-        std::env::set_var("PDFIUM_DYNAMIC_LIB_PATH", &lib);
-        return true;
-    }
-    std::env::var("PDFIUM_DYNAMIC_LIB_PATH").is_ok()
-}
-
 /// The layout/OCR/TableFormer model files, resolved from the repo-root
 /// `.models` into the env overrides (tests run with CWD = the crate dir, so
 /// CWD-relative resolution can't find them) — same pattern as
@@ -154,6 +138,14 @@ async fn serves_its_logo_and_openapi_description() {
         "/v1/config",
         "/health",
         "/ready",
+        // #615: upstream docling-serve's routes.
+        "/v1/convert/file",
+        "/v1/convert/source",
+        "/v1/convert/file/async",
+        "/v1/convert/source/async",
+        "/v1/status/poll/{id}",
+        "ConvertDocumentResponse",
+        "UpstreamOptions",
     ] {
         assert!(spec.contains(path), "{path} missing from openapi.yaml");
     }
@@ -161,29 +153,15 @@ async fn serves_its_logo_and_openapi_description() {
     for schema in ["TaskStatus", "ConfidenceReport", "X-Docling-Confidence"] {
         assert!(spec.contains(schema), "{schema} missing from openapi.yaml");
     }
-    for opt in [
-        "to:",
-        "strict:",
-        "images:",
-        "no_ocr:",
-        "skip_ocr:",
-        "force_full_page_ocr:",
-        "no_table_former:",
-        "fetch_images:",
-        "skip_empty_cells:",
-        "compact_tables:",
-        "list_attachments:",
-        "ebcdic_layout:",
-        "pages:",
-        "ocr_lang:",
-        "ocr_mode:",
-        "ocr_scale:",
-        "scale:",
-        "asr_model:",
-        "encoding:",
-        "video_frames:",
-    ] {
-        assert!(spec.contains(opt), "option {opt} missing from openapi.yaml");
+    // The options only this server has; every shared `ConvertOptions` field
+    // is checked (query parameter and multipart key) by
+    // `crates/docling/tests/options_inventory.rs`. Anchored on the
+    // parameter definition, so `scale` is not satisfied by `ocr_scale`.
+    for opt in ["to", "images", "scale", "pandoc_api_version"] {
+        assert!(
+            spec.contains(&format!("\n    {opt}:\n")),
+            "parameter {opt} missing from openapi.yaml"
+        );
     }
 }
 
@@ -194,6 +172,84 @@ async fn ready_without_warmup_is_immediate() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+    // Ready at once, and honest that the models load on first use (#548).
+    let v: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
+    assert_eq!(v["models"], "lazy", "{v}");
+}
+
+/// #548: `--warmup` really loads the models before `/ready` turns 200, and a
+/// failed load keeps it 503 with the reason instead of reporting ready over
+/// an empty pipeline. With the models present the warmup must succeed; on a
+/// runner without them it must fail loudly — either way it must settle.
+#[tokio::test(flavor = "multi_thread")]
+async fn warmup_settles_ready_or_failed() {
+    let models = ml_models_ready();
+    let app = router(ServeConfig {
+        warmup: true,
+        ..ServeConfig::default()
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    let (status, v) = loop {
+        let response = app
+            .clone()
+            .oneshot(Request::get("/ready").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let v: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
+        if v["status"] != "warming_up" {
+            break (status, v);
+        }
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{v}");
+        assert!(std::time::Instant::now() < deadline, "warmup never settled");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+    if status == StatusCode::OK {
+        assert_eq!(v, serde_json::json!({"status": "ready", "models": "warm"}));
+    } else {
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{v}");
+        assert_eq!(v["status"], "warmup_failed", "{v}");
+        assert!(v["error"].as_str().is_some_and(|e| !e.is_empty()), "{v}");
+        assert!(!models, "the models are present, yet warmup failed: {v}");
+    }
+}
+
+/// #547: `compact_tables` reaches PDF (and image) input too — those convert
+/// on the warm pipeline, which used to skip the document settings the
+/// declarative converter applies, so a compact request came back padded.
+#[tokio::test]
+async fn compact_tables_applies_to_pdf_input() {
+    if !ml_models_ready() {
+        eprintln!("skipping: the ML models are not present");
+        return;
+    }
+    let pdf = std::fs::read(repo_root().join("tests/data/pdf/sources/2305.03393v1-pg9.pdf"))
+        .expect("fixture");
+    let mut out = Vec::new();
+    for compact in ["true", "false"] {
+        let (ct, body) = multipart(
+            "table.pdf",
+            &pdf,
+            &[("to", "md"), ("compact_tables", compact)],
+        );
+        let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        out.push(body_string(response).await);
+    }
+    let separator = |md: &str| {
+        md.lines()
+            .find(|l| l.starts_with('|') && l.trim_matches(|c| "|-: ".contains(c)).is_empty())
+            .map(str::to_string)
+    };
+    let (compact, padded) = (separator(&out[0]), separator(&out[1]));
+    assert!(
+        compact.as_deref().is_some_and(|l| l.starts_with("| - |")),
+        "compact table expected: {compact:?}"
+    );
+    assert!(
+        padded.as_deref().is_some_and(|l| l.starts_with("|--")),
+        "padded table expected by default: {padded:?}"
+    );
 }
 
 #[tokio::test]
@@ -214,8 +270,12 @@ async fn converts_csv_to_docling_json() {
     let (ct, body) = multipart("t.csv", b"a,b\n1,2\n", &[("to", "json")]);
     let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+    // A declarative conversion carries no confidence report (#183): no
+    // header, no `confidence` key.
+    assert!(response.headers().get("x-docling-confidence").is_none());
     let v: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
     assert_eq!(v["schema_name"], "DoclingDocument");
+    assert!(v.get("confidence").is_none());
 }
 
 #[tokio::test]
@@ -276,9 +336,188 @@ async fn dclx_download_has_attachment_headers() {
 
 #[tokio::test]
 async fn unknown_format_is_422() {
-    let (ct, body) = multipart("data.xyz", b"?", &[]);
+    // Binary bytes under an unknown extension (text ones are plain text
+    // since #671).
+    let (ct, body) = multipart("data.xyz", b"\x00\x01\x02\xff\xfe\x00", &[]);
     let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+/// #624: an encrypted Office file is a 422 naming the encryption — the
+/// `.ppt` used to stream an empty 200, the `.pptx` failed as "bad zip".
+#[tokio::test]
+async fn encrypted_office_files_are_422() {
+    for name in ["min_encrypted.ppt", "min_encrypted.pptx"] {
+        let bytes = std::fs::read(
+            repo_root()
+                .join("crates/docling/tests/data/encrypted")
+                .join(name),
+        )
+        .unwrap();
+        for query in ["", "?to=json"] {
+            let (ct, body) = multipart(name, &bytes, &[]);
+            let response = app()
+                .oneshot(convert_request(&ct, body, query))
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{name}{query}"
+            );
+            let text = body_string(response).await;
+            assert!(
+                text.contains("document is encrypted"),
+                "{name}{query}: {text}"
+            );
+            // #636: the body names the case, so a client prompts for a
+            // password instead of matching the message.
+            let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(v["code"], "password_required", "{name}{query}: {text}");
+        }
+    }
+}
+
+/// #636: an encrypted PDF carries the `code` too, on the pipeline route the
+/// Office formats never take (it used to answer 500 there), with docling's
+/// message; the password opens it. Text-layer only: no models needed.
+#[tokio::test]
+async fn an_encrypted_pdf_is_a_422_with_a_code() {
+    let bytes =
+        std::fs::read(repo_root().join("tests/data/pdf_password/sources/2206.01062_pg3.pdf"))
+            .unwrap();
+    for (fields, code, text) in [
+        (
+            vec![("text_layer_only", "true")],
+            "password_required",
+            "the PDF is encrypted: a password is required",
+        ),
+        (
+            vec![("text_layer_only", "true"), ("password", "nope")],
+            "wrong_password",
+            "the PDF is encrypted and the password is wrong",
+        ),
+    ] {
+        let (ct, body) = multipart("locked.pdf", &bytes, &fields);
+        let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{code}"
+        );
+        let v: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
+        assert_eq!(v["code"], code, "{v}");
+        assert!(v["error"].as_str().unwrap().contains(text), "{v}");
+    }
+    let (ct, body) = multipart(
+        "locked.pdf",
+        &bytes,
+        &[("text_layer_only", "true"), ("password", "1234")],
+    );
+    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(body_string(response).await.contains("DocLayNet"));
+}
+
+/// #636: a damaged upload is a 422 *without* a `code` — only an encrypted
+/// document carries one — and an async job's status and result carry the
+/// same `code` as the sync endpoint.
+#[tokio::test]
+async fn the_encryption_code_is_only_on_encrypted_documents() {
+    let (ct, body) = multipart("junk.docx", b"PK\x03\x04 not a zip", &[]);
+    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let v: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
+    assert!(v["error"].is_string());
+    assert!(v.get("code").is_none(), "{v}");
+
+    let app = app();
+    let bytes =
+        std::fs::read(repo_root().join("crates/docling/tests/data/encrypted/min_encrypted.docx"))
+            .unwrap();
+    let (ct, body) = multipart("min_encrypted.docx", &bytes, &[("password", "4321")]);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/convert/async")
+                .header(header::CONTENT_TYPE, ct)
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let v: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
+    let id = v["task_id"].as_str().expect("task id").to_string();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let status = loop {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/v1/status/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
+        match v["task_status"].as_str().unwrap() {
+            "failure" => break v,
+            "success" => panic!("an encrypted file converted without its password: {v}"),
+            _ if std::time::Instant::now() > deadline => panic!("job never finished"),
+            _ => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+        }
+    };
+    assert_eq!(status["code"], "wrong_password", "{status}");
+    assert!(
+        status["error"]
+            .as_str()
+            .unwrap()
+            .contains("the password is wrong"),
+        "{status}"
+    );
+    let response = app
+        .oneshot(
+            Request::get(format!("/v1/result/{id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let v: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
+    assert_eq!(v["code"], "wrong_password", "{v}");
+}
+
+/// #625: the request's `password` opens an encrypted Office file too (and
+/// `pdf_password`, its earlier name, still reads);
+/// a wrong one is a 422 saying so.
+#[tokio::test]
+async fn password_opens_an_encrypted_office_file() {
+    let bytes =
+        std::fs::read(repo_root().join("crates/docling/tests/data/encrypted/min_encrypted.pptx"))
+            .unwrap();
+    for field in ["password", "pdf_password"] {
+        let (ct, body) = multipart("deck.pptx", &bytes, &[(field, "1234")]);
+        let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{field}");
+        assert!(body_string(response).await.contains("Hello"), "{field}");
+    }
+    let (ct, body) = multipart("deck.pptx", &bytes, &[]);
+    let response = app()
+        .oneshot(convert_request(&ct, body, "?password=1234"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "query parameter");
+    let (ct, body) = multipart("deck.pptx", &bytes, &[("password", "4321")]);
+    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let text = body_string(response).await;
+    assert!(text.contains("the password is wrong"), "{text}");
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v["code"], "wrong_password", "{text}");
 }
 
 #[tokio::test]
@@ -303,7 +542,7 @@ async fn bad_to_value_is_400() {
 }
 
 /// `to=images` (#243) is PDF-only — a non-PDF upload answers 422 before any
-/// pdfium work, so this runs in plain CI.
+/// render work, so this runs in plain CI.
 #[tokio::test]
 async fn images_output_requires_a_pdf_input() {
     let (ct, body) = multipart("x.md", b"# hi", &[("to", "images")]);
@@ -317,16 +556,8 @@ async fn images_output_requires_a_pdf_input() {
 /// neither.
 #[tokio::test]
 async fn ocr_engine_and_lang_are_validated_together() {
-    let (ct, body) = multipart("x.md", b"# hi", &[("ocr_engine", "easyocr")]);
-    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert!(body_string(response).await.contains("ocr_engine"));
-
-    let (ct, body) = multipart("x.md", b"# hi", &[("ocr_lang", "deu")]);
-    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert!(body_string(response).await.contains("ocr_lang"));
-
+    // The rules are `ConvertOptions::validate`'s (options.rs); here: the
+    // cross-field check reaches the request as a 400 naming the field…
     let (ct, body) = multipart(
         "x.md",
         b"# hi",
@@ -371,23 +602,51 @@ async fn ocr_mode_and_scale_are_validated() {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
-/// A `scale` outside 0.1–4.0 is rejected before pdfium is touched.
+/// #497: `document_timeout` must be a positive number of seconds; it is
+/// validated by the shared converter builder, so a plain Markdown upload
+/// exercises it without any model work. A valid value passes through (the
+/// budget only ever acts on the PDF pipeline).
 #[tokio::test]
-async fn images_scale_is_validated() {
+async fn document_timeout_is_validated() {
+    let (ct, body) = multipart("x.md", b"# hi", &[("document_timeout", "0")]);
+    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(body_string(response).await.contains("document_timeout"));
+
+    let (ct, body) = multipart("x.md", b"# hi", &[("document_timeout", "soon")]);
+    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(body_string(response).await.contains("document_timeout"));
+
+    let (ct, body) = multipart("x.md", b"# hi", &[("document_timeout", "90")]);
+    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    // A whole conversion carries no partial-status header.
+    assert!(response.headers().get("x-docling-status").is_none());
+}
+
+/// `--to images`' `scale` outside 0.1–4.0 is rejected before any page is rendered.
+#[tokio::test]
+async fn to_images_scale_is_validated() {
     let (ct, body) = multipart("x.pdf", b"%PDF-1.4", &[("to", "images"), ("scale", "9")]);
     let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert!(body_string(response).await.contains("scale"));
 }
 
-/// End-to-end rasterization over a real one-page fixture — runs only where
-/// `.pdfium/lib` is installed (`pdfium_ready` gate).
+/// `images_scale` (#520) outside 0.1–4.0 is a 400 before any page renders.
+#[tokio::test]
+async fn images_scale_option_is_validated() {
+    let (ct, body) = multipart("x.pdf", b"%PDF-1.4", &[("images_scale", "9")]);
+    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(body_string(response).await.contains("images_scale"));
+}
+
+/// End-to-end rasterization over a real one-page fixture — the pure-Rust
+/// renderer, so it runs in plain CI.
 #[tokio::test]
 async fn rasterizes_pdf_pages_to_png() {
-    if !pdfium_ready() {
-        eprintln!("skipping: pdfium not installed");
-        return;
-    }
     let pdf = std::fs::read(repo_root().join("tests/data/pdf/sources/base14_fonts.pdf")).unwrap();
     let (ct, body) = multipart(
         "base14_fonts.pdf",
@@ -408,22 +667,28 @@ async fn rasterizes_pdf_pages_to_png() {
     assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
 }
 
-/// #246 end-to-end: a `no_ocr=true` request must not degrade the shared warm
-/// pipeline for later default requests. The table fixture makes the difference
-/// decisive — the full pipeline emits a Markdown table (pipes), the no-OCR
-/// text-layer path emits flat paragraphs. Needs pdfium + the layout/OCR/
-/// TableFormer models, so it gates like the rasterization test.
+/// #246 end-to-end: a `text_layer_only=true` request (`no_ocr` before 2.0,
+/// #611) must not degrade the shared warm pipeline for later default
+/// requests. The table fixture makes the difference decisive — the full
+/// pipeline emits a Markdown table (pipes), the text-layer path emits flat
+/// paragraphs — and `no_ocr=true`, docling's `--no-ocr` since 2.0, keeps the
+/// table. Needs the layout/OCR/TableFormer models, so it skips on a
+/// model-free checkout.
 #[tokio::test]
 async fn no_ocr_request_does_not_stick_to_the_warm_pipeline() {
-    if !pdfium_ready() || !ml_models_ready() {
-        eprintln!("skipping: pdfium or the ML models are not present");
+    if !ml_models_ready() {
+        eprintln!("skipping: the ML models are not present");
         return;
     }
     let pdf =
         std::fs::read(repo_root().join("tests/data/pdf/sources/2305.03393v1-pg9.pdf")).unwrap();
     let app = app();
-    let run = |no_ocr: &'static str, app: axum::Router| {
-        let (ct, body) = multipart("t.pdf", &pdf, &[("to", "md"), ("no_ocr", no_ocr)]);
+    let run = |text_layer_only: &'static str, app: axum::Router| {
+        let (ct, body) = multipart(
+            "t.pdf",
+            &pdf,
+            &[("to", "md"), ("text_layer_only", text_layer_only)],
+        );
         async move {
             let response = app.oneshot(convert_request(&ct, body, "")).await.unwrap();
             assert_eq!(response.status(), StatusCode::OK);
@@ -433,14 +698,41 @@ async fn no_ocr_request_does_not_stick_to_the_warm_pipeline() {
     let full1 = run("false", app.clone()).await;
     assert!(full1.contains('|'), "full pipeline must emit the table");
     let reduced = run("true", app.clone()).await;
-    assert!(!reduced.contains('|'), "no_ocr path has no TableFormer");
+    assert!(
+        !reduced.contains('|'),
+        "the text-layer path has no TableFormer"
+    );
     // The bug: this third request reused the degraded pipeline and returned
-    // the flat no_ocr output until the server restarted.
-    let full2 = run("false", app).await;
+    // the flat text-layer output until the server restarted.
+    let full2 = run("false", app.clone()).await;
     assert_eq!(
         full1, full2,
-        "default request after no_ocr must fully recover"
+        "default request after text_layer_only must fully recover"
     );
+    // docling's `--no-ocr`: layout and TableFormer still run.
+    let (ct, body) = multipart("t.pdf", &pdf, &[("to", "md"), ("no_ocr", "true")]);
+    let response = app.oneshot(convert_request(&ct, body, "")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        body_string(response).await.contains('|'),
+        "no_ocr keeps the table (docling's do_ocr=False)"
+    );
+}
+
+/// #611: `skip_ocr` is `no_ocr`'s pre-2.0 name, still read — and a JSON body
+/// carrying both spellings (a pre-2.0 client that sent both switches) is a
+/// conversion, not a duplicate-field 400.
+#[tokio::test]
+async fn both_ocr_spellings_in_one_json_body_convert() {
+    let b64 = docling::base64::encode(b"a,b\n1,2\n");
+    let body = format!(
+        r#"{{"no_ocr": false, "skip_ocr": true, "text_layer_only": false,
+            "sources": [{{"kind": "file", "base64_string": "{b64}", "filename": "t.csv"}}]}}"#
+    );
+    let response = app().oneshot(json_convert(&body)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let text = body_string(response).await;
+    assert!(text.contains("|   1 |   2 |"), "{text}");
 }
 
 /// #263: with the RSS already past the watermark of a tiny ceiling, both
@@ -539,16 +831,16 @@ async fn strict_field_changes_markdown_dialect() {
     assert_ne!(legacy, strict, "strict flag had no effect");
 }
 
-/// `fetch_images` is outbound fetch (SSRF surface), so it's gated behind the
-/// same `--allow-url-fetch` as URL inputs: honored only when the flag is on,
-/// silently ignored otherwise. Proven against a local image server that counts
-/// the requests it receives — the gate must let *zero* through when off.
 /// Serializes the tests that toggle `DOCLING_RS_ALLOW_PRIVATE_IP_FETCH`
 /// (process-global): without it, one test's `remove_var` can strip the escape
 /// hatch out from under another's in-flight loopback fetch/PUT. Tokio's mutex
 /// because the guard is held across the tests' awaits.
 static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// `fetch_images` is outbound fetch (SSRF surface), so it's gated behind the
+/// same `--allow-url-fetch` as URL inputs: honored only when the flag is on,
+/// silently ignored otherwise. Proven against a local image server that counts
+/// the requests it receives — the gate must let *zero* through when off.
 #[tokio::test]
 async fn fetch_images_is_gated_behind_allow_url_fetch() {
     use std::io::{Read, Write};
@@ -669,7 +961,9 @@ async fn batch_upload_returns_results_array() {
         &[
             ("a.md", b"# A\n"),
             ("b.csv", b"x,y\n1,2\n"),
-            ("broken.xyz", b"?"),
+            // Binary under an unknown extension: text would read as plain
+            // text since #671.
+            ("broken.xyz", b"\x00\x01\x02\xff\xfe\x00"),
         ],
         &[("to", "md")],
     );
@@ -810,20 +1104,6 @@ async fn async_rejects_bad_requests_and_full_queue() {
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
 }
 
-/// Declarative conversions have no ML stages, so no confidence surfaces
-/// (#183): no `X-Docling-Confidence` header, no `confidence` key in JSON.
-/// (The positive case — real scores from the PDF pipeline — is covered by the
-/// docling-pdf tests; here the router-level suite stays model-free.)
-#[tokio::test]
-async fn declarative_conversions_carry_no_confidence() {
-    let (ct, body) = multipart("t.csv", b"a,b\n1,2\n", &[("to", "json")]);
-    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert!(response.headers().get("x-docling-confidence").is_none());
-    let v: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
-    assert!(v.get("confidence").is_none());
-}
-
 #[tokio::test]
 async fn index_serves_docs_and_form() {
     let response = app()
@@ -832,7 +1112,8 @@ async fn index_serves_docs_and_form() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body = body_string(response).await;
-    assert!(body.contains("/v1/convert") && body.contains("<form") || body.contains("Convert"));
+    assert!(body.contains(r#"<input type="file""#), "the test form");
+    assert!(body.contains("/v1/convert"), "the API docs");
 }
 
 #[tokio::test]
@@ -877,6 +1158,17 @@ async fn chunk_tokenizer_path_escape_is_a_400() {
 }
 
 #[tokio::test]
+async fn xbrl_taxonomy_path_escape_is_a_400() {
+    // #466: the taxonomy directory is a server-local relative path, held to
+    // the `chunk_tokenizer` rule — no traversal, no absolute paths.
+    for bad in ["../taxonomies", "/etc"] {
+        let (ct, body) = multipart("t.csv", b"a,b\n1,2\n", &[("xbrl_taxonomy", bad)]);
+        let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "for {bad:?}");
+    }
+}
+
+#[tokio::test]
 async fn explicit_hybrid_without_tokenizer_is_a_400() {
     // Legacy both-chunkers mode silently skips hybrid when no tokenizer is
     // installed; asking for hybrid outright must fail loudly instead. (The
@@ -900,8 +1192,7 @@ async fn explicit_hybrid_without_tokenizer_is_a_400() {
 
 // --- #139: docling sources/target passthrough ------------------------------
 
-fn json_convert(body: &str, allow_fetch: bool) -> Request<Body> {
-    let _ = allow_fetch;
+fn json_convert(body: &str) -> Request<Body> {
     convert_request("application/json", body.as_bytes().to_vec(), "")
 }
 
@@ -915,7 +1206,7 @@ async fn file_sources_convert_without_any_gate() {
             {{"kind": "file", "base64_string": "{b64}", "filename": "two.csv"}}
         ], "to": "json"}}"#
     );
-    let response = app().oneshot(json_convert(&body, false)).await.unwrap();
+    let response = app().oneshot(json_convert(&body)).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let v: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
     let results = v["results"].as_array().expect("batch shape");
@@ -924,31 +1215,7 @@ async fn file_sources_convert_without_any_gate() {
 }
 
 fn docling_b64(text: &str) -> String {
-    // Tiny local base64 (no test dep): RFC 4648 standard alphabet.
-    const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let bytes = text.as_bytes();
-    let mut out = String::new();
-    for chunk in bytes.chunks(3) {
-        let b = [
-            chunk[0],
-            *chunk.get(1).unwrap_or(&0),
-            *chunk.get(2).unwrap_or(&0),
-        ];
-        let n = u32::from_be_bytes([0, b[0], b[1], b[2]]);
-        out.push(A[(n >> 18) as usize & 63] as char);
-        out.push(A[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 {
-            A[(n >> 6) as usize & 63] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            A[n as usize & 63] as char
-        } else {
-            '='
-        });
-    }
-    out
+    docling::base64::encode(text.as_bytes())
 }
 
 #[tokio::test]
@@ -958,14 +1225,14 @@ async fn url_and_sources_together_is_a_400() {
         r#"{{"url": "https://example.com/a.md",
             "sources": [{{"kind": "file", "base64_string": "{b64}", "filename": "a.csv"}}]}}"#
     );
-    let response = app().oneshot(json_convert(&body, false)).await.unwrap();
+    let response = app().oneshot(json_convert(&body)).await.unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
 async fn unknown_source_kind_is_a_400() {
     let body = r#"{"sources": [{"kind": "google_drive", "document_id": "x"}]}"#;
-    let response = app().oneshot(json_convert(body, false)).await.unwrap();
+    let response = app().oneshot(json_convert(body)).await.unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let msg = body_string(response).await;
     assert!(
@@ -980,7 +1247,7 @@ async fn cloud_source_and_target_are_gated_behind_allow_url_fetch() {
     let s3 = r#"{"kind": "s3", "endpoint": "s3.us-east-2.amazonaws.com",
                  "access_key": "k", "secret_key": "s", "bucket": "b"}"#;
     let body = format!(r#"{{"sources": [{s3}]}}"#);
-    let response = app().oneshot(json_convert(&body, false)).await.unwrap();
+    let response = app().oneshot(json_convert(&body)).await.unwrap();
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
 
     let b64 = docling_b64("a,b\n1,2\n");
@@ -988,7 +1255,7 @@ async fn cloud_source_and_target_are_gated_behind_allow_url_fetch() {
         r#"{{"sources": [{{"kind": "file", "base64_string": "{b64}", "filename": "a.csv"}}],
             "target": {s3}}}"#
     );
-    let response = app().oneshot(json_convert(&body, false)).await.unwrap();
+    let response = app().oneshot(json_convert(&body)).await.unwrap();
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
 
@@ -1003,7 +1270,7 @@ async fn cloud_kind_without_the_feature_names_the_rebuild() {
     };
     let body = r#"{"sources": [{"kind": "s3", "endpoint": "s3.us-east-2.amazonaws.com",
                    "access_key": "k", "secret_key": "s", "bucket": "b"}]}"#;
-    let response = router(cfg).oneshot(json_convert(body, true)).await.unwrap();
+    let response = router(cfg).oneshot(json_convert(body)).await.unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let msg = body_string(response).await;
     assert!(msg.contains("--features cloud"), "{msg}");
@@ -1016,7 +1283,7 @@ async fn explicit_inbody_target_answers_in_the_body() {
         r#"{{"sources": [{{"kind": "file", "base64_string": "{b64}", "filename": "a.csv"}}],
             "target": {{"kind": "inbody"}}, "to": "json"}}"#
     );
-    let response = app().oneshot(json_convert(&body, false)).await.unwrap();
+    let response = app().oneshot(json_convert(&body)).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let v: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
     assert_eq!(v["schema_name"], "DoclingDocument");
@@ -1095,7 +1362,7 @@ async fn requests_and_conversions_are_counted() {
 // --- #304: remote VLM pipeline ---------------------------------------------
 
 /// 1×1 red PNG (the same bytes as the fetch_images test) — the VLM image leg
-/// needs no pdfium and no models, so these tests run in plain CI.
+/// needs no models, so these tests run in plain CI.
 const VLM_PNG: &[u8] = &[
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
     0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,
@@ -1294,10 +1561,7 @@ async fn vlm_options_ride_the_json_body_and_zero_max_tokens_is_a_400() {
         allow_url_fetch: true,
         ..ServeConfig::default()
     };
-    let response = router(cfg)
-        .oneshot(json_convert(&body, true))
-        .await
-        .unwrap();
+    let response = router(cfg).oneshot(json_convert(&body)).await.unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert!(body_string(response).await.contains("vlm_max_tokens"));
 }
@@ -1315,7 +1579,7 @@ async fn zip_target_answers_with_an_archive_of_rendered_outputs() {
             {{"kind": "file", "base64_string": "{b64}", "filename": "two.csv"}}
         ], "target": {{"kind": "zip"}}, "to": "md"}}"#
     );
-    let response = app().oneshot(json_convert(&body, false)).await.unwrap();
+    let response = app().oneshot(json_convert(&body)).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let content_type = response
         .headers()
@@ -1349,7 +1613,7 @@ async fn zip_target_single_source_names_the_archive_and_propagates_errors() {
         r#"{{"sources": [{{"kind": "file", "base64_string": "{b64}", "filename": "sheet.csv"}}],
             "target": {{"kind": "zip"}}, "to": "json"}}"#
     );
-    let response = app().oneshot(json_convert(&body, false)).await.unwrap();
+    let response = app().oneshot(json_convert(&body)).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let disposition = response
         .headers()
@@ -1361,25 +1625,28 @@ async fn zip_target_single_source_names_the_archive_and_propagates_errors() {
 
     // …and a single failing input propagates its error instead of answering
     // with an archive of one error file (matching the inbody semantics).
-    let b64 = docling_b64("x");
+    // Binary bytes: text under an unknown extension is plain text since #671.
+    let b64 = docling::base64::encode(b"\x00\x01\x02\xff\xfe\x00");
     let body = format!(
         r#"{{"sources": [{{"kind": "file", "base64_string": "{b64}", "filename": "wat.unknown"}}],
             "target": {{"kind": "zip"}}, "to": "md"}}"#
     );
-    let response = app().oneshot(json_convert(&body, false)).await.unwrap();
+    let response = app().oneshot(json_convert(&body)).await.unwrap();
     assert!(response.status().is_client_error(), "{}", response.status());
 }
 
 #[tokio::test]
 async fn zip_target_batch_converts_around_a_bad_item() {
     let b64 = docling_b64("a,b\n1,2\n");
+    // Binary bytes: text under an unknown extension is plain text since #671.
+    let bad = docling::base64::encode(b"\x00\x01\x02\xff\xfe\x00");
     let body = format!(
         r#"{{"sources": [
             {{"kind": "file", "base64_string": "{b64}", "filename": "good.csv"}},
-            {{"kind": "file", "base64_string": "{b64}", "filename": "bad.unknown"}}
+            {{"kind": "file", "base64_string": "{bad}", "filename": "bad.unknown"}}
         ], "target": {{"kind": "zip"}}, "to": "md"}}"#
     );
-    let response = app().oneshot(json_convert(&body, false)).await.unwrap();
+    let response = app().oneshot(json_convert(&body)).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     let has = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
@@ -1394,7 +1661,7 @@ async fn zip_target_does_not_combine_with_to_images() {
         r#"{{"sources": [{{"kind": "file", "base64_string": "{b64}", "filename": "s.csv"}}],
             "target": {{"kind": "zip"}}, "to": "images"}}"#
     );
-    let response = app().oneshot(json_convert(&body, false)).await.unwrap();
+    let response = app().oneshot(json_convert(&body)).await.unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert!(body_string(response).await.contains("output target"));
 }
@@ -1406,7 +1673,7 @@ async fn put_target_is_gated_behind_allow_url_fetch() {
         r#"{{"sources": [{{"kind": "file", "base64_string": "{b64}", "filename": "s.csv"}}],
             "target": {{"kind": "put", "url": "http://127.0.0.1:9/up"}}, "to": "md"}}"#
     );
-    let response = app().oneshot(json_convert(&body, false)).await.unwrap();
+    let response = app().oneshot(json_convert(&body)).await.unwrap();
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     assert!(body_string(response).await.contains("--allow-url-fetch"));
 }
@@ -1461,10 +1728,7 @@ async fn put_target_uploads_each_output_and_acknowledges() {
         allow_url_fetch: true,
         ..ServeConfig::default()
     };
-    let response = router(cfg)
-        .oneshot(json_convert(&body, true))
-        .await
-        .unwrap();
+    let response = router(cfg).oneshot(json_convert(&body)).await.unwrap();
     let status = response.status();
     let out = body_string(response).await;
     std::env::remove_var("DOCLING_RS_ALLOW_PRIVATE_IP_FETCH");
@@ -1497,12 +1761,89 @@ async fn put_target_refuses_a_private_address_without_the_escape_hatch() {
         allow_url_fetch: true,
         ..ServeConfig::default()
     };
-    let response = router(cfg)
-        .oneshot(json_convert(&body, true))
-        .await
-        .unwrap();
+    let response = router(cfg).oneshot(json_convert(&body)).await.unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert!(body_string(response).await.contains("private/loopback"));
+}
+
+// --- #515: Pandoc AST output ----------------------------------------------
+
+#[tokio::test]
+async fn pandoc_output_is_the_ast_as_json() {
+    let (ct, body) = multipart(
+        "note.md",
+        b"# Title\n\nHello **world**.\n\n- one\n- two\n",
+        &[("to", "pandoc")],
+    );
+    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+    let v: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
+    assert_eq!(v["pandoc-api-version"], serde_json::json!([1, 23, 1, 1]));
+    let kinds: Vec<&str> = v["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["t"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["Header", "Para", "BulletList"], "{v}");
+}
+
+#[tokio::test]
+async fn pandoc_batch_items_and_api_version_check() {
+    // Batch: the AST inline as an object per item.
+    let (ct, body) = multipart_files(
+        &[("a.md", b"# A\n"), ("b.md", b"# B\n")],
+        &[("to", "pandoc"), ("pandoc_api_version", "1.23")],
+    );
+    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
+    let results = v["results"].as_array().expect("batch shape");
+    assert_eq!(results[1]["pandoc"]["blocks"][0]["t"], "Header", "{v}");
+
+    // An API version this export does not write is refused up front.
+    let (ct, body) = multipart(
+        "note.md",
+        b"# A\n",
+        &[("to", "pandoc"), ("pandoc_api_version", "1.22")],
+    );
+    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let msg = body_string(response).await;
+    assert!(
+        msg.contains("unsupported Pandoc API version '1.22'"),
+        "{msg}"
+    );
+}
+
+// --- #614: WebVTT output -------------------------------------------------
+
+#[tokio::test]
+async fn vtt_output_round_trips_cues_and_batches_inline() {
+    let vtt = b"WEBVTT\n\n00:00:01.000 --> 00:00:02.500\n<v Ann>Hello & welcome\n";
+    let (ct, body) = multipart("talk.vtt", vtt, &[("to", "vtt")]);
+    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[header::CONTENT_TYPE],
+        "text/vtt; charset=utf-8"
+    );
+    assert_eq!(
+        body_string(response).await,
+        "WEBVTT\n\n00:00:01.000 --> 00:00:02.500\n<v Ann>Hello &amp; welcome"
+    );
+    // A document without timed text is the bare header; batch items carry
+    // the file inline under `vtt`.
+    let (ct, body) = multipart_files(&[("a.vtt", vtt), ("b.md", b"# B\n")], &[("to", "vtt")]);
+    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
+    assert!(
+        v["results"][0]["vtt"].as_str().unwrap().contains("<v Ann>"),
+        "{v}"
+    );
+    assert_eq!(v["results"][1]["vtt"], "WEBVTT B", "{v}");
 }
 
 // --- #317: LaTeX output --------------------------------------------------
@@ -1550,11 +1891,413 @@ async fn latex_batch_items_and_zip_target_carry_tex() {
         r#"{{"sources": [{{"kind": "file", "base64_string": "{b64}", "filename": "one.csv"}}],
             "target": {{"kind": "zip"}}, "to": "latex"}}"#
     );
-    let response = app().oneshot(json_convert(&body, false)).await.unwrap();
+    let response = app().oneshot(json_convert(&body)).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     assert!(
         bytes.windows(7).any(|w| w == b"one.tex"),
         "tex entry missing"
     );
+}
+
+// --- #613: plain-text output --------------------------------------------
+
+#[tokio::test]
+async fn text_output_is_undecorated_plain_text() {
+    let (ct, body) = multipart(
+        "note.md",
+        b"# Title\n\nSome **bold** and [a link](https://example.com)\n\n- one\n- two\n",
+        &[("to", "text")],
+    );
+    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[header::CONTENT_TYPE],
+        "text/plain; charset=utf-8"
+    );
+    let out = body_string(response).await;
+    assert_eq!(out, "Title\n\nSome bold and a link\n\n- one\n- two");
+
+    // Batch items carry it under `text`; a zip target names it `<stem>.txt`.
+    let (ct, body) = multipart_files(&[("a.md", b"# A\n"), ("b.md", b"*B*\n")], &[("to", "text")]);
+    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+    let v: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
+    assert_eq!(v["results"][0]["text"], "A", "{v}");
+    assert_eq!(v["results"][1]["text"], "B", "{v}");
+    let b64 = docling_b64("a,b\n1,2\n");
+    let body = format!(
+        r#"{{"sources": [{{"kind": "file", "base64_string": "{b64}", "filename": "one.csv"}}],
+            "target": {{"kind": "zip"}}, "to": "text"}}"#
+    );
+    let response = app().oneshot(json_convert(&body)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    assert!(
+        bytes.windows(7).any(|w| w == b"one.txt"),
+        "txt entry missing"
+    );
+}
+
+/// A `.zip` upload converts every document inside as a batch (#557): one
+/// results item per convertible entry, a broken one failing only itself, an
+/// unsupported one left out.
+#[tokio::test]
+async fn zip_upload_converts_each_document() {
+    let zip = docling::dclx::zip_bytes(vec![
+        ("docs/a.md", b"# A\n\nalpha".as_slice()),
+        ("b.csv", b"x,y\n1,2\n".as_slice()),
+        ("tool.exe", b"MZ".as_slice()),
+        ("broken.docx", b"not a zip".as_slice()),
+    ]);
+    let (ct, body) = multipart_files(&[("bundle.zip", &zip)], &[("to", "md")]);
+    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
+    let results = v["results"].as_array().expect("results array");
+    assert_eq!(results.len(), 3, "{v}");
+    assert_eq!(results[0]["status"], "success");
+    assert!(results[0]["md"].as_str().unwrap().contains("# A"));
+    assert_eq!(results[1]["status"], "success");
+    assert_eq!(results[2]["status"], "failure");
+
+    // Nothing convertible inside: a client error, not an empty success.
+    let only_exe = docling::dclx::zip_bytes(vec![("tool.exe", b"MZ".as_slice())]);
+    let (ct, body) = multipart("bundle.zip", &only_exe, &[]);
+    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+// --- #615: upstream docling-serve's API ----------------------------------
+
+/// A multipart body the way upstream's clients send it: every upload as a
+/// `files` part, options as repeated text parts.
+fn upload(files: &[(&str, &[u8])], fields: &[(&str, &str)]) -> (String, Vec<u8>) {
+    let boundary = "docling-serve-compat-boundary";
+    let mut body = Vec::new();
+    for (file_name, content) in files {
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"files\"; filename=\"{file_name}\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(content);
+        body.extend_from_slice(b"\r\n");
+    }
+    for (k, v) in fields {
+        body.extend_from_slice(
+            format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n")
+                .as_bytes(),
+        );
+    }
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    (format!("multipart/form-data; boundary={boundary}"), body)
+}
+
+fn post(uri: &str, content_type: &str, body: Vec<u8>) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header(header::CONTENT_TYPE, content_type)
+        .body(Body::from(body))
+        .unwrap()
+}
+
+async fn json_body(response: axum::response::Response) -> serde_json::Value {
+    serde_json::from_str(&body_string(response).await).unwrap()
+}
+
+/// Open WebUI's `DoclingLoader` request, replayed: `files` named after the
+/// upload's path, `image_export_mode=placeholder`, a form-feed page-break
+/// marker and a `DOCLING_PARAMS` full of upstream-only knobs. The answer is
+/// docling's `ConvertDocumentResponse` with the pages split on `\f`.
+#[tokio::test]
+async fn open_webui_request_gets_a_convert_document_response() {
+    let pptx =
+        std::fs::read(repo_root().join("tests/data/pptx/sources/powerpoint_sample.pptx")).unwrap();
+    let (ct, body) = upload(
+        &[(
+            "/app/backend/data/uploads/1b2c_powerpoint_sample.pptx",
+            &pptx,
+        )],
+        &[
+            ("image_export_mode", "placeholder"),
+            ("md_page_break_placeholder", "\u{c}"),
+            ("do_ocr", "true"),
+            ("ocr_engine", "easyocr"),
+            ("ocr_lang", "en"),
+            ("pdf_backend", "dlparse_v4"),
+            ("table_mode", "accurate"),
+            ("do_picture_description", "false"),
+        ],
+    );
+    let response = app()
+        .oneshot(post("/v1/convert/file", &ct, body))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+    let v = json_body(response).await;
+    assert_eq!(v["status"], "success", "{v}");
+    assert_eq!(v["errors"], serde_json::json!([]), "{v}");
+    assert!(v["processing_time"].as_f64().is_some(), "{v}");
+    let doc = &v["document"];
+    assert_eq!(doc["filename"], "1b2c_powerpoint_sample.pptx");
+    let md = doc["md_content"].as_str().expect("md_content");
+    assert!(md.split('\u{c}').count() >= 2, "pages split on \\f: {md:?}");
+    assert!(!md.contains("data:image"), "placeholder images: {md}");
+    assert!(doc["json_content"].is_null() && doc["text_content"].is_null());
+}
+
+#[tokio::test]
+async fn to_formats_fill_their_content_fields() {
+    let (ct, body) = upload(
+        &[("note.md", b"# Title\n\nSome **bold** text.\n")],
+        &[
+            ("to_formats", "md"),
+            ("to_formats", "json"),
+            ("to_formats", "text"),
+        ],
+    );
+    let response = app()
+        .oneshot(post("/v1/convert/file", &ct, body))
+        .await
+        .unwrap();
+    let v = json_body(response).await;
+    let doc = &v["document"];
+    assert_eq!(doc["json_content"]["schema_name"], "DoclingDocument", "{v}");
+    assert_eq!(doc["text_content"], "Title\n\nSome bold text.");
+    assert!(doc["md_content"].as_str().unwrap().contains("# Title"));
+    assert!(doc["html_content"].is_null());
+}
+
+/// A document that does not convert is a `200` envelope with `status:
+/// "failure"` and the reason in `errors[0].error_message` — upstream's
+/// clients read failures there, not from the HTTP status.
+#[tokio::test]
+async fn a_corrupt_upload_is_a_failure_envelope() {
+    let (ct, body) = upload(&[("broken.docx", b"not a zip at all")], &[]);
+    let response = app()
+        .oneshot(post("/v1/convert/file", &ct, body))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let v = json_body(response).await;
+    assert_eq!(v["status"], "failure", "{v}");
+    assert!(
+        !v["errors"][0]["error_message"].as_str().unwrap().is_empty(),
+        "{v}"
+    );
+    assert!(v["document"]["md_content"].is_null());
+    assert_eq!(v["document"]["filename"], "broken.docx");
+}
+
+/// Several documents answer docling-serve's zip of `<stem>.<ext>` outputs.
+#[tokio::test]
+async fn several_files_answer_a_zip() {
+    let (ct, body) = upload(
+        &[("a.md", b"# A\n"), ("b.csv", b"x,y\n1,2\n")],
+        &[("to_formats", "md"), ("to_formats", "json")],
+    );
+    let response = app()
+        .oneshot(post("/v1/convert/file", &ct, body))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "application/zip");
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    for name in ["a.md", "a.json", "b.md", "b.json"] {
+        assert!(
+            bytes.windows(name.len()).any(|w| w == name.as_bytes()),
+            "{name} missing"
+        );
+    }
+}
+
+#[tokio::test]
+async fn convert_source_takes_base64_files_and_gates_http() {
+    let b64 = docling_b64("# From base64\n");
+    let body = format!(
+        r#"{{"sources": [{{"kind": "file", "base64_string": "{b64}", "filename": "doc.md"}}],
+            "options": {{"to_formats": ["md", "text"], "do_ocr": false, "page_range": [1, 9223372036854775807]}}}}"#
+    );
+    let response = app()
+        .oneshot(post(
+            "/v1/convert/source",
+            "application/json",
+            body.into_bytes(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let v = json_body(response).await;
+    assert_eq!(v["status"], "success", "{v}");
+    assert_eq!(v["document"]["filename"], "doc.md");
+    assert_eq!(v["document"]["md_content"], "# From base64\n");
+    assert_eq!(v["document"]["text_content"], "From base64");
+
+    // docling-serve 0.x's `file_sources`, on the `/v1alpha` alias.
+    let body =
+        format!(r#"{{"file_sources": [{{"base64_string": "{b64}", "filename": "old.md"}}]}}"#);
+    let response = app()
+        .oneshot(post(
+            "/v1alpha/convert/source",
+            "application/json",
+            body.into_bytes(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(json_body(response).await["status"], "success");
+
+    // A URL source needs --allow-url-fetch; nothing is fetched without it.
+    let body = r#"{"sources": [{"kind": "http", "url": "https://example.com/a.pdf"}]}"#;
+    let response = app()
+        .oneshot(post(
+            "/v1/convert/source",
+            "application/json",
+            body.as_bytes().to_vec(),
+        ))
+        .await
+        .unwrap();
+    assert!(response.status().is_client_error(), "{}", response.status());
+    assert!(body_string(response).await.contains("--allow-url-fetch"));
+}
+
+/// The async variants: a `TaskStatusResponse`, `/v1/status/poll/{id}` until
+/// `success`, then the `ConvertDocumentResponse` from `/v1/result/{id}`.
+#[tokio::test]
+async fn async_file_conversion_polls_to_a_result() {
+    let app = app();
+    let (ct, body) = upload(&[("note.md", b"# Async\n")], &[]);
+    let response = app
+        .clone()
+        .oneshot(post("/v1/convert/file/async", &ct, body))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let task = json_body(response).await;
+    assert_eq!(task["task_type"], "convert", "{task}");
+    let id = task["task_id"].as_str().unwrap().to_string();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/v1/status/poll/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = json_body(response).await;
+        match status["task_status"].as_str().unwrap() {
+            "success" => break,
+            "pending" | "started" => {}
+            other => panic!("task {other}: {status}"),
+        }
+        assert!(std::time::Instant::now() < deadline, "task never finished");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get(format!("/v1/result/{id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let v = json_body(response).await;
+    assert_eq!(v["status"], "success", "{v}");
+    assert_eq!(v["document"]["md_content"], "# Async\n");
+
+    let response = app
+        .oneshot(
+            Request::get("/v1/status/poll/no-such-task")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+/// `X-Api-Key` (docling-serve's `DOCLING_SERVE_API_KEY`): every `/v1` route
+/// needs it once a key is configured; health and the docs page stay open.
+#[tokio::test]
+async fn api_key_guards_the_v1_routes() {
+    let app = router(ServeConfig {
+        api_key: Some("s3cret".into()),
+        ..ServeConfig::default()
+    });
+    let (ct, body) = upload(&[("note.md", b"# Key\n")], &[]);
+    let response = app
+        .clone()
+        .oneshot(post("/v1/convert/file", &ct, body.clone()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let mut request = post("/v1/convert/file", &ct, body);
+    request
+        .headers_mut()
+        .insert("x-api-key", "s3cret".parse().unwrap());
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+// --- #619: the request body cap -------------------------------------------
+
+/// A body over `--max-body-mb` is refused before conversion with 413 on
+/// both the native and the upstream-compatible routes (docs/SECURITY.md's
+/// resource-limit table names the status).
+#[tokio::test]
+async fn an_oversized_body_is_refused_with_413() {
+    let app = router(ServeConfig {
+        max_body_bytes: 1024,
+        ..ServeConfig::default()
+    });
+    let big = vec![b'a'; 4096];
+    for (uri, field) in [("/v1/convert", "file"), ("/v1/convert/file", "files")] {
+        let boundary = "body-limit-boundary";
+        let mut body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"{field}\"; filename=\"a.md\"\r\n\r\n"
+        )
+        .into_bytes();
+        body.extend_from_slice(&big);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        let request = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(
+                header::CONTENT_TYPE,
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .body(Body::from(body))
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE, "{uri}");
+    }
+    // JSON bodies (URL / base64 sources) hit the same cap.
+    let json = format!(r#"{{"url": "https://example.com/{}"}}"#, "a".repeat(4096));
+    for uri in ["/v1/convert", "/v1/convert/source"] {
+        let request = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(json.clone()))
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "{uri} (JSON)"
+        );
+    }
 }

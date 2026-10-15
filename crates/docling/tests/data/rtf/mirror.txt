@@ -1,3 +1,6 @@
 legacy_sample.rtf
 unit_test_headers.rtf
 word_tables.rtf
+omml_frac_superscript.rtf
+omml_multi_equation_paragraph.rtf
+table_with_equations.rtf

@@ -1,0 +1,84 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc} % allow utf-8 input
+\usepackage[T1]{fontenc}    % use 8-bit T1 fonts
+\usepackage{hyperref}       % hyperlinks
+\usepackage{url}            % simple URL typesetting
+\usepackage{booktabs}       % professional-quality tables
+\usepackage{amsfonts}       % blackboard math symbols
+\usepackage{nicefrac}       % compact symbols for 1/2, etc.
+\usepackage{microtype}      % microtypography
+\usepackage{xcolor}         % colors
+\usepackage{graphicx}       % graphics
+\usepackage[normalem]{ulem} % strikethrough
+\title{Line breaks}
+
+\begin{document}
+
+\maketitle
+
+\section{Soft break (bare newline)}
+
+Author Affiliation
+
+\section{Hard break (two trailing spaces)}
+
+Author
+Affiliation
+
+\section{Hard break (backslash)}
+
+Author
+Affiliation
+
+\section{Paragraph break (blank line)}
+
+Author
+
+Affiliation
+
+\section{Soft break between formatted runs}
+
+\textbf{Bold A Bold B}
+
+\section{Hard break between formatted runs (different formatting)}
+
+Author \textbf{John} 
+University XYZ
+
+\section{Multiple hard breaks in one paragraph}
+
+Line 1
+Line 2
+Line 3
+
+\section{Mixed hard and soft breaks in one paragraph}
+
+Line 1
+Line 2 Line 3
+
+\section{Soft break in a list item}
+
+\begin{itemize}
+\item First Second
+\item Item 2
+\end{itemize}
+
+\section{Hard break in a list item}
+
+\begin{itemize}
+\item First line
+Second line
+\item Item 2
+\end{itemize}
+
+\section{Multiple hard breaks in a list item}
+
+\begin{itemize}
+\item Line A
+Line B
+Line C
+\item Item 2
+\end{itemize}
+
+\end{document}

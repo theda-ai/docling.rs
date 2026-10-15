@@ -1,0 +1,3236 @@
+{
+  "schema_name": "DoclingDocument",
+  "version": "1.10.0",
+  "name": "word2_heading_styles",
+  "origin": {
+    "mimetype": "text/plain",
+    "binary_hash": 13998838240582514079,
+    "filename": "word2_heading_styles"
+  },
+  "furniture": {
+    "self_ref": "#/furniture",
+    "children": [],
+    "content_layer": "furniture",
+    "name": "_root_",
+    "label": "unspecified"
+  },
+  "body": {
+    "self_ref": "#/body",
+    "children": [
+      {
+        "$ref": "#/tables/0"
+      },
+      {
+        "$ref": "#/texts/0"
+      },
+      {
+        "$ref": "#/texts/1"
+      },
+      {
+        "$ref": "#/texts/2"
+      },
+      {
+        "$ref": "#/tables/1"
+      },
+      {
+        "$ref": "#/texts/3"
+      },
+      {
+        "$ref": "#/tables/2"
+      },
+      {
+        "$ref": "#/texts/4"
+      },
+      {
+        "$ref": "#/tables/3"
+      },
+      {
+        "$ref": "#/texts/5"
+      },
+      {
+        "$ref": "#/texts/6"
+      },
+      {
+        "$ref": "#/texts/7"
+      },
+      {
+        "$ref": "#/texts/8"
+      },
+      {
+        "$ref": "#/texts/9"
+      },
+      {
+        "$ref": "#/texts/10"
+      },
+      {
+        "$ref": "#/texts/11"
+      },
+      {
+        "$ref": "#/texts/12"
+      },
+      {
+        "$ref": "#/texts/13"
+      },
+      {
+        "$ref": "#/tables/4"
+      },
+      {
+        "$ref": "#/texts/14"
+      },
+      {
+        "$ref": "#/texts/15"
+      },
+      {
+        "$ref": "#/texts/16"
+      },
+      {
+        "$ref": "#/texts/17"
+      },
+      {
+        "$ref": "#/texts/18"
+      },
+      {
+        "$ref": "#/texts/19"
+      },
+      {
+        "$ref": "#/texts/20"
+      },
+      {
+        "$ref": "#/texts/21"
+      },
+      {
+        "$ref": "#/texts/22"
+      },
+      {
+        "$ref": "#/texts/23"
+      },
+      {
+        "$ref": "#/texts/24"
+      },
+      {
+        "$ref": "#/texts/25"
+      },
+      {
+        "$ref": "#/texts/26"
+      },
+      {
+        "$ref": "#/texts/27"
+      },
+      {
+        "$ref": "#/texts/28"
+      },
+      {
+        "$ref": "#/texts/29"
+      },
+      {
+        "$ref": "#/texts/30"
+      },
+      {
+        "$ref": "#/texts/31"
+      },
+      {
+        "$ref": "#/texts/32"
+      },
+      {
+        "$ref": "#/texts/33"
+      },
+      {
+        "$ref": "#/texts/34"
+      },
+      {
+        "$ref": "#/texts/35"
+      },
+      {
+        "$ref": "#/texts/36"
+      },
+      {
+        "$ref": "#/texts/37"
+      },
+      {
+        "$ref": "#/texts/38"
+      },
+      {
+        "$ref": "#/texts/39"
+      },
+      {
+        "$ref": "#/texts/40"
+      },
+      {
+        "$ref": "#/texts/41"
+      },
+      {
+        "$ref": "#/texts/42"
+      },
+      {
+        "$ref": "#/texts/43"
+      },
+      {
+        "$ref": "#/texts/44"
+      },
+      {
+        "$ref": "#/texts/45"
+      },
+      {
+        "$ref": "#/texts/46"
+      },
+      {
+        "$ref": "#/texts/47"
+      },
+      {
+        "$ref": "#/texts/48"
+      },
+      {
+        "$ref": "#/texts/49"
+      },
+      {
+        "$ref": "#/texts/50"
+      },
+      {
+        "$ref": "#/texts/51"
+      },
+      {
+        "$ref": "#/texts/52"
+      },
+      {
+        "$ref": "#/texts/53"
+      },
+      {
+        "$ref": "#/texts/54"
+      },
+      {
+        "$ref": "#/texts/55"
+      },
+      {
+        "$ref": "#/texts/56"
+      },
+      {
+        "$ref": "#/texts/57"
+      },
+      {
+        "$ref": "#/texts/58"
+      },
+      {
+        "$ref": "#/texts/59"
+      },
+      {
+        "$ref": "#/texts/60"
+      },
+      {
+        "$ref": "#/texts/61"
+      },
+      {
+        "$ref": "#/texts/62"
+      },
+      {
+        "$ref": "#/texts/63"
+      },
+      {
+        "$ref": "#/texts/64"
+      },
+      {
+        "$ref": "#/texts/65"
+      },
+      {
+        "$ref": "#/texts/66"
+      },
+      {
+        "$ref": "#/texts/67"
+      },
+      {
+        "$ref": "#/texts/68"
+      },
+      {
+        "$ref": "#/texts/69"
+      },
+      {
+        "$ref": "#/texts/70"
+      },
+      {
+        "$ref": "#/texts/71"
+      },
+      {
+        "$ref": "#/texts/72"
+      },
+      {
+        "$ref": "#/texts/73"
+      },
+      {
+        "$ref": "#/texts/74"
+      },
+      {
+        "$ref": "#/texts/75"
+      },
+      {
+        "$ref": "#/texts/76"
+      },
+      {
+        "$ref": "#/texts/77"
+      },
+      {
+        "$ref": "#/texts/78"
+      },
+      {
+        "$ref": "#/texts/79"
+      },
+      {
+        "$ref": "#/texts/80"
+      },
+      {
+        "$ref": "#/texts/81"
+      },
+      {
+        "$ref": "#/texts/82"
+      },
+      {
+        "$ref": "#/texts/83"
+      },
+      {
+        "$ref": "#/texts/84"
+      },
+      {
+        "$ref": "#/texts/85"
+      },
+      {
+        "$ref": "#/texts/86"
+      },
+      {
+        "$ref": "#/texts/87"
+      },
+      {
+        "$ref": "#/texts/88"
+      },
+      {
+        "$ref": "#/texts/89"
+      },
+      {
+        "$ref": "#/texts/90"
+      },
+      {
+        "$ref": "#/texts/91"
+      },
+      {
+        "$ref": "#/texts/92"
+      },
+      {
+        "$ref": "#/texts/93"
+      },
+      {
+        "$ref": "#/texts/94"
+      },
+      {
+        "$ref": "#/texts/95"
+      },
+      {
+        "$ref": "#/texts/96"
+      },
+      {
+        "$ref": "#/texts/97"
+      },
+      {
+        "$ref": "#/texts/98"
+      },
+      {
+        "$ref": "#/texts/99"
+      },
+      {
+        "$ref": "#/texts/100"
+      },
+      {
+        "$ref": "#/texts/101"
+      },
+      {
+        "$ref": "#/texts/102"
+      },
+      {
+        "$ref": "#/texts/103"
+      },
+      {
+        "$ref": "#/texts/104"
+      },
+      {
+        "$ref": "#/texts/105"
+      },
+      {
+        "$ref": "#/texts/106"
+      },
+      {
+        "$ref": "#/texts/107"
+      },
+      {
+        "$ref": "#/texts/108"
+      },
+      {
+        "$ref": "#/texts/109"
+      },
+      {
+        "$ref": "#/texts/110"
+      },
+      {
+        "$ref": "#/texts/111"
+      },
+      {
+        "$ref": "#/texts/112"
+      },
+      {
+        "$ref": "#/texts/113"
+      },
+      {
+        "$ref": "#/texts/114"
+      },
+      {
+        "$ref": "#/texts/115"
+      },
+      {
+        "$ref": "#/texts/116"
+      },
+      {
+        "$ref": "#/texts/117"
+      },
+      {
+        "$ref": "#/texts/118"
+      },
+      {
+        "$ref": "#/texts/119"
+      },
+      {
+        "$ref": "#/texts/120"
+      },
+      {
+        "$ref": "#/texts/121"
+      },
+      {
+        "$ref": "#/texts/122"
+      },
+      {
+        "$ref": "#/texts/123"
+      },
+      {
+        "$ref": "#/texts/124"
+      },
+      {
+        "$ref": "#/texts/125"
+      },
+      {
+        "$ref": "#/texts/126"
+      },
+      {
+        "$ref": "#/texts/127"
+      },
+      {
+        "$ref": "#/texts/128"
+      },
+      {
+        "$ref": "#/texts/129"
+      },
+      {
+        "$ref": "#/texts/130"
+      },
+      {
+        "$ref": "#/texts/131"
+      },
+      {
+        "$ref": "#/texts/132"
+      },
+      {
+        "$ref": "#/texts/133"
+      },
+      {
+        "$ref": "#/texts/134"
+      },
+      {
+        "$ref": "#/texts/135"
+      },
+      {
+        "$ref": "#/texts/136"
+      },
+      {
+        "$ref": "#/texts/137"
+      },
+      {
+        "$ref": "#/texts/138"
+      },
+      {
+        "$ref": "#/texts/139"
+      },
+      {
+        "$ref": "#/texts/140"
+      },
+      {
+        "$ref": "#/texts/141"
+      },
+      {
+        "$ref": "#/texts/142"
+      },
+      {
+        "$ref": "#/texts/143"
+      },
+      {
+        "$ref": "#/texts/144"
+      },
+      {
+        "$ref": "#/texts/145"
+      },
+      {
+        "$ref": "#/texts/146"
+      },
+      {
+        "$ref": "#/texts/147"
+      },
+      {
+        "$ref": "#/texts/148"
+      },
+      {
+        "$ref": "#/texts/149"
+      },
+      {
+        "$ref": "#/texts/150"
+      },
+      {
+        "$ref": "#/texts/151"
+      },
+      {
+        "$ref": "#/texts/152"
+      },
+      {
+        "$ref": "#/texts/153"
+      },
+      {
+        "$ref": "#/texts/154"
+      },
+      {
+        "$ref": "#/texts/155"
+      },
+      {
+        "$ref": "#/texts/156"
+      },
+      {
+        "$ref": "#/texts/157"
+      },
+      {
+        "$ref": "#/texts/158"
+      },
+      {
+        "$ref": "#/texts/159"
+      },
+      {
+        "$ref": "#/texts/160"
+      },
+      {
+        "$ref": "#/texts/161"
+      },
+      {
+        "$ref": "#/texts/162"
+      },
+      {
+        "$ref": "#/texts/163"
+      },
+      {
+        "$ref": "#/texts/164"
+      },
+      {
+        "$ref": "#/texts/165"
+      },
+      {
+        "$ref": "#/texts/166"
+      },
+      {
+        "$ref": "#/texts/167"
+      },
+      {
+        "$ref": "#/texts/168"
+      },
+      {
+        "$ref": "#/texts/169"
+      },
+      {
+        "$ref": "#/texts/170"
+      },
+      {
+        "$ref": "#/texts/171"
+      },
+      {
+        "$ref": "#/texts/172"
+      },
+      {
+        "$ref": "#/texts/173"
+      },
+      {
+        "$ref": "#/texts/174"
+      },
+      {
+        "$ref": "#/texts/175"
+      },
+      {
+        "$ref": "#/texts/176"
+      },
+      {
+        "$ref": "#/texts/177"
+      },
+      {
+        "$ref": "#/texts/178"
+      },
+      {
+        "$ref": "#/texts/179"
+      },
+      {
+        "$ref": "#/texts/180"
+      },
+      {
+        "$ref": "#/texts/181"
+      },
+      {
+        "$ref": "#/texts/182"
+      },
+      {
+        "$ref": "#/texts/183"
+      },
+      {
+        "$ref": "#/texts/184"
+      },
+      {
+        "$ref": "#/texts/185"
+      },
+      {
+        "$ref": "#/texts/186"
+      },
+      {
+        "$ref": "#/texts/187"
+      },
+      {
+        "$ref": "#/texts/188"
+      },
+      {
+        "$ref": "#/texts/189"
+      }
+    ],
+    "content_layer": "body",
+    "name": "_root_",
+    "label": "unspecified"
+  },
+  "groups": [],
+  "texts": [
+    {
+      "self_ref": "#/texts/0",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxxxxxxx",
+      "text": "xxxxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/1",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xx xxxxxxx xxxxxxxxx xx xxxxxxxxxxx xxx xx xx xx xxxx xxxxxxx xx xxxx xxxxxxxxx xxx x xxxxxxxxx xxxxxxxx",
+      "text": "xx xxxxxxx xxxxxxxxx xx xxxxxxxxxxx xxx xx xx xx xxxx xxxxxxx xx xxxx xxxxxxxxx xxx x xxxxxxxxx xxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/2",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xx xxxxxxx xxxxxxxxx xxx xxxxxx x xx xxxxxxxx xxxxxxxxxxxx xxxxxxxxx xxx xxxxxxxx x xx xxxxxxx xx xxxxxxxx xxx xxxxxxxx xx xxxxxxxx xxx xxxxxxxxxxx xxx xxxxxxxxxx xxxxxxx xxx xxxxxxxx xxx xxxxx xx xxxxxxx xxxx xx xxxx xx xxx xxxxx xx xxxx xxxxxxxxxxxxxx x xx xxxxxxx xxx xx xxxxxxx xx xxxxx xxxx xx xx xx xxxx xxxxxx xxxxxx xxxx xx xxxxx xxxxxxxxx",
+      "text": "xx xxxxxxx xxxxxxxxx xxx xxxxxx x xx xxxxxxxx xxxxxxxxxxxx xxxxxxxxx xxx xxxxxxxx x xx xxxxxxx xx xxxxxxxx xxx xxxxxxxx xx xxxxxxxx xxx xxxxxxxxxxx xxx xxxxxxxxxx xxxxxxx xxx xxxxxxxx xxx xxxxx xx xxxxxxx xxxx xx xxxx xx xxx xxxxx xx xxxx xxxxxxxxxxxxxx x xx xxxxxxx xxx xx xxxxxxx xx xxxxx xxxx xx xx xx xxxx xxxxxx xxxxxx xxxx xx xxxxx xxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/3",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxx xx xxxxxxx xxxx",
+      "text": "xxxxxx xx xxxxxxx xxxx"
+    },
+    {
+      "self_ref": "#/texts/4",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxxxxxx xxxxxxx",
+      "text": "xxxxxxxxxx xxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/5",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxx xx xxx",
+      "text": "xxxxx xx xxx"
+    },
+    {
+      "self_ref": "#/texts/6",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xx xx xxxxxxx xxxx xxxxxxx xxxxxxxxxxxxxxx xxxxxxx xxxxxxxxx xxxxxx xx xxxxxxxxx",
+      "text": "xx xx xxxxxxx xxxx xxxxxxx xxxxxxxxxxxxxxx xxxxxxx xxxxxxxxx xxxxxx xx xxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/7",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xx xx xxx xxxx xxxxxx xxxxxxxxxx xxxxxxxxxxx",
+      "text": "xx xx xxx xxxx xxxxxx xxxxxxxxxx xxxxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/8",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xx xxx xxxxxxx xxxx xxxxxxxx xx xxxxxx xxxxxxxxxx",
+      "text": "xx xxx xxxxxxx xxxx xxxxxxxx xx xxxxxx xxxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/9",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xx xxxx xxxxx xxxx xxxxxxx xxxxxxxxxx",
+      "text": "xx xxxx xxxxx xxxx xxxxxxx xxxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/10",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "x xxxxxx x xxxxxx x",
+      "text": "x xxxxxx x xxxxxx x"
+    },
+    {
+      "self_ref": "#/texts/11",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxxx x",
+      "text": "xxxxxxx x"
+    },
+    {
+      "self_ref": "#/texts/12",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxxx x",
+      "text": "xxxxxxx x"
+    },
+    {
+      "self_ref": "#/texts/13",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "x xxxxxx x",
+      "text": "x xxxxxx x"
+    },
+    {
+      "self_ref": "#/texts/14",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "section_header",
+      "prov": [],
+      "orig": "HEADING NUMBER ONE TITLE",
+      "text": "HEADING NUMBER ONE TITLE",
+      "level": 1
+    },
+    {
+      "self_ref": "#/texts/15",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxxxxx xxxxxxx xxxxx xxxxxxxx xx xxxx",
+      "text": "xxxxxxxxx xxxxxxx xxxxx xxxxxxxx xx xxxx"
+    },
+    {
+      "self_ref": "#/texts/16",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "***xxxxxxxxxxxxxxxxx xxxxxxxxxx***",
+      "text": "***xxxxxxxxxxxxxxxxx xxxxxxxxxx***"
+    },
+    {
+      "self_ref": "#/texts/17",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxx**",
+      "text": "**xxxxxx**"
+    },
+    {
+      "self_ref": "#/texts/18",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxx xxxxxxx xx xxxxxxx xxxxxxxxx xx xxxxx xx xx xxxxx xxxxxxxxx xxxxxxxx xx xxxxxxx xx xx xxxxxx xxxxxxx xxxxxxx xxx xxxxxxxx",
+      "text": "xxxxxx xxxxxxx xx xxxxxxx xxxxxxxxx xx xxxxx xx xx xxxxx xxxxxxxxx xxxxxxxx xx xxxxxxx xx xx xxxxxx xxxxxxx xxxxxxx xxx xxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/19",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxx**",
+      "text": "**xxxxxxxxx**"
+    },
+    {
+      "self_ref": "#/texts/20",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxx xxxxxxxxxxx xx xxxxxxx xxxxxx x xxxxxx xxxxx xxxxx xxxxx xx xxxxxxxxx xx xxxxxx xx xxxxxx xxx xxxxxxxxxx xxxx xxxxxxxxxxxxxxxxxx",
+      "text": "xxxxxx xxxxxxxxxxx xx xxxxxxx xxxxxx x xxxxxx xxxxx xxxxx xxxxx xx xxxxxxxxx xx xxxxxx xx xxxxxx xxx xxxxxxxxxx xxxx xxxxxxxxxxxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/21",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxx**",
+      "text": "**xxxxxxxxx**"
+    },
+    {
+      "self_ref": "#/texts/22",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxx xx xx xxxxx xx xxxxxxx xxx  xx xxxxxx x xxxxxxxxx xx xxxxxx xxxxxxxxx xx xxxxxxxx",
+      "text": "xxxx xx xx xxxxx xx xxxxxxx xxx  xx xxxxxx x xxxxxxxxx xx xxxxxx xxxxxxxxx xx xxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/23",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxx xxxxxxxx xxx xxxxxxxxxxxx xxxxx xxx xxxxxxxxxxxxx xx xxxxxxxxxxx",
+      "text": "xxx xxxxxxxx xxx xxxxxxxxxxxx xxxxx xxx xxxxxxxxxxxxx xx xxxxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/24",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxxxxx xxx xxxxxx xxx xx xxxxxxx",
+      "text": "xxxxxxxxx xxx xxxxxx xxx xx xxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/25",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxx**",
+      "text": "**xxxxxx**"
+    },
+    {
+      "self_ref": "#/texts/26",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxx xx xxxxxxxx xx xxxxxx xxxxxxxxx xx xxxxxxx xxxxxx xxxx xx xxxxx xxxxxxxx",
+      "text": "xxxxxx xx xxxxxxxx xx xxxxxx xxxxxxxxx xx xxxxxxx xxxxxx xxxx xx xxxxx xxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/27",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxx**",
+      "text": "**xxxxxxxxx**"
+    },
+    {
+      "self_ref": "#/texts/28",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxxx xxxxxxxxx xxxxxxx xxxxxxxx xxx xxxxxxxx xxx xxxxxxxxxxx",
+      "text": "xxxxxxx xxxxxxxxx xxxxxxx xxxxxxxx xxx xxxxxxxx xxx xxxxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/29",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxx xxxxxxxxx xxxxxxxxx xx xxxxxxx xxxx xx xxxxxxxxxxxxx",
+      "text": "xxxx xxxxxxxxx xxxxxxxxx xx xxxxxxx xxxx xx xxxxxxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/30",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxx**",
+      "text": "**xxxxxx**"
+    },
+    {
+      "self_ref": "#/texts/31",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxxx xxxxxxx",
+      "text": "xxxxxxx xxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/32",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxx\txx xxxxxxxx xx**",
+      "text": "**xxxxxxxxx\txx xxxxxxxx xx**"
+    },
+    {
+      "self_ref": "#/texts/33",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxxx xxxxxxx xxxxxxx xxxxxxx xx xxxx xxxxxxxxxxxx",
+      "text": "xxxxxxx xxxxxxx xxxxxxx xxxxxxx xx xxxx xxxxxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/34",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxx  \txx x xxxxxxxxx xx**",
+      "text": "**xxxxxxxxx  \txx x xxxxxxxxx xx**"
+    },
+    {
+      "self_ref": "#/texts/35",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxxxxxx xx xxxxxx xx xxxxxxx x",
+      "text": "xxxxxxxxxx xx xxxxxx xx xxxxxxx x"
+    },
+    {
+      "self_ref": "#/texts/36",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xx xxx xxxxxxxxxxxxx xx**",
+      "text": "**xx xxx xxxxxxxxxxxxx xx**"
+    },
+    {
+      "self_ref": "#/texts/37",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "x xx xxxxxxx\t              x xx xxx",
+      "text": "x xx xxxxxxx\t              x xx xxx"
+    },
+    {
+      "self_ref": "#/texts/38",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "x xxx xxxxxxx                     x xxxx xxxxx",
+      "text": "x xxx xxxxxxx                     x xxxx xxxxx"
+    },
+    {
+      "self_ref": "#/texts/39",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxx xxxxxxxx xxx xxxxxxxxxxx xxxxxxxxxxx xxxx xxx xxxxxxxxxxxxx xx xxx xxxxxxxxxxxxxxx xxxxxxxxx xx xxxxxxx xx xxxxxxx xxxxxxxxx xx xx xxxxx xxxxxxxxx xxx xx xxxxxxxxx xx xx xxxxxxxx xxxxxxx xxxxxxxxx xxxxxxx",
+      "text": "xxx xxxxxxxx xxx xxxxxxxxxxx xxxxxxxxxxx xxxx xxx xxxxxxxxxxxxx xx xxx xxxxxxxxxxxxxxx xxxxxxxxx xx xxxxxxx xx xxxxxxx xxxxxxxxx xx xx xxxxx xxxxxxxxx xxx xx xxxxxxxxx xx xx xxxxxxxx xxxxxxx xxxxxxxxx xxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/40",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xx xxx xxxxxxxxxxxxx xx**",
+      "text": "**xx xxx xxxxxxxxxxxxx xx**"
+    },
+    {
+      "self_ref": "#/texts/41",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xx xx xxxx",
+      "text": "xx xx xxxx"
+    },
+    {
+      "self_ref": "#/texts/42",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xx xxxxxx",
+      "text": "xx xxxxxx"
+    },
+    {
+      "self_ref": "#/texts/43",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxxx xxxxxxxxxxx xxxxxxxxxxxxxxxxxx xxxx xxxxxxxxxxxxxxxxx xx**",
+      "text": "**xxxxxxxxxx xxxxxxxxxxx xxxxxxxxxxxxxxxxxx xxxx xxxxxxxxxxxxxxxxx xx**"
+    },
+    {
+      "self_ref": "#/texts/44",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "***xxxxxx xxxxxxxxxxxxx xx xxxxxxxx***",
+      "text": "***xxxxxx xxxxxxxxxxxxx xx xxxxxxxx***"
+    },
+    {
+      "self_ref": "#/texts/45",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxx**",
+      "text": "**xxxxxxxxx**"
+    },
+    {
+      "self_ref": "#/texts/46",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxx xxxxxxx xx xxxxxxx",
+      "text": "xxxx xxxxxxx xx xxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/47",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxx xxxxxxxx xxx xxxxxxxxxxx xx xxxxxxxxxx x xx xxx xxxxx xx xxxxxx xx xx xxxxxxxx xx xxxxxxxx",
+      "text": "xxx xxxxxxxx xxx xxxxxxxxxxx xx xxxxxxxxxx x xx xxx xxxxx xx xxxxxx xx xx xxxxxxxx xx xxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/48",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxx**",
+      "text": "**xxxxxxxxx**"
+    },
+    {
+      "self_ref": "#/texts/49",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxx xxxxxxxxxx xxxxxxxxxx xx xxxxxxx xx xxxxxxxxxx",
+      "text": "xxxx xxxxxxxxxx xxxxxxxxxx xx xxxxxxx xx xxxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/50",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxx xxxxxxxx xxx xxxxxxxxxx xxx xxxxxx x xx xxxx xxxxxxx xx xxxxxxx xxxxxxxxx xx xxx xxxxxxxxxx xxx xxxxxxxxxxxxxx",
+      "text": "xxx xxxxxxxx xxx xxxxxxxxxx xxx xxxxxx x xx xxxx xxxxxxx xx xxxxxxx xxxxxxxxx xx xxx xxxxxxxxxx xxx xxxxxxxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/51",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxx xxxx xxxxxxxxxx x xx xxxx xxxxxxxxxx xxx xxxxxx xx xxxxxxxxxxx xxx x xxxxxxxxx xx xxxxxxxxx xx xxxxx xxx xx xxxxxxxxxxxxxx xxxxxxx xxxx xx xxxxxxxxxxx xx xxxxxxxx xxxxxxxxxxxxxxxxxxx",
+      "text": "xxxxx xxxx xxxxxxxxxx x xx xxxx xxxxxxxxxx xxx xxxxxx xx xxxxxxxxxxx xxx x xxxxxxxxx xx xxxxxxxxx xx xxxxx xxx xx xxxxxxxxxxxxxx xxxxxxx xxxx xx xxxxxxxxxxx xx xxxxxxxx xxxxxxxxxxxxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/52",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxxx x x",
+      "text": "xxxxxxx x x"
+    },
+    {
+      "self_ref": "#/texts/53",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxxxxx x xxxxxxxxx x xxxxxxxx",
+      "text": "xxxxxxxxx x xxxxxxxxx x xxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/54",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxxxxx x xxxxxxxxx",
+      "text": "xxxxxxxxx x xxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/55",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxx xxxxxxxxxx x xxxxxx xxxxxx xxxxxx xxxxxxxx",
+      "text": "xxxxx xxxxxxxxxx x xxxxxx xxxxxx xxxxxx xxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/56",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxxx x x",
+      "text": "xxxxxxx x x"
+    },
+    {
+      "self_ref": "#/texts/57",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxxxxx x xxxxxxxx",
+      "text": "xxxxxxxxx x xxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/58",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxxxxx x xxxxxxxx",
+      "text": "xxxxxxxxx x xxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/59",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxxxxx x xxxxxxxxx",
+      "text": "xxxxxxxxx x xxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/60",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxx xxxxxxxxxx x xx xxxxx xx xxxxxx xxxxxx xxxxxxxx",
+      "text": "xxxxx xxxxxxxxxx x xx xxxxx xx xxxxxx xxxxxx xxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/61",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxx**",
+      "text": "**xxxxxxxxx**"
+    },
+    {
+      "self_ref": "#/texts/62",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxx xx xxx xxxxxxxxxxxxxx xx xxxxxxx",
+      "text": "xxxx xx xxx xxxxxxxxxxxxxx xx xxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/63",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxx xxxxxxxx xxx xxxxxxxxxx x xx xxx xxxxx xx xxxxxx xx xx xxxxxxxx xx xxxxxxxx",
+      "text": "xxx xxxxxxxx xxx xxxxxxxxxx x xx xxx xxxxx xx xxxxxx xx xx xxxxxxxx xx xxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/64",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxx xxxxx xxx xxxxxxxxxx xx xxx xxxxxxxxxx x x xxxxxxxxx",
+      "text": "xxxx xxxxx xxx xxxxxxxxxx xx xxx xxxxxxxxxx x x xxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/65",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxx**",
+      "text": "**xxxxxxxxx**"
+    },
+    {
+      "self_ref": "#/texts/66",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxx xx xxx xx xxxxxxx",
+      "text": "xxxx xx xxx xx xxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/67",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxx xxxx xxxx xxxx x xx x x xxxxxxxxxx",
+      "text": "xxxxx xxxx xxxx xxxx x xx x x xxxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/68",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxx xxxxxxxx xxx xxxxx xx xxxxxx xx xx xxxxxxxx xx xxxxxxxx",
+      "text": "xxx xxxxxxxx xxx xxxxx xx xxxxxx xx xx xxxxxxxx xx xxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/69",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxx xxxxx xxx xxxxxxxxxx xx xxx xxxxxxxxxx x x xxxxxxxxx",
+      "text": "xxxx xxxxx xxx xxxxxxxxxx xx xxx xxxxxxxxxx x x xxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/70",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxx**",
+      "text": "**xxxxxxxxx**"
+    },
+    {
+      "self_ref": "#/texts/71",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxx xxxxx xx xxx xx xxxxxxx",
+      "text": "xxxx xxxxx xx xxx xx xxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/72",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxx xxxxxxxx xxx xxxxxxxxxxx xx xxxxxxxxx xxx xxxxxx xxx xxxxxxxx xxx xxx xxxx  xxxxxxxxx xxxxxxx xxxxxxxxx x xx xxxxx xxxxxx",
+      "text": "xxx xxxxxxxx xxx xxxxxxxxxxx xx xxxxxxxxx xxx xxxxxx xxx xxxxxxxx xxx xxx xxxx  xxxxxxxxx xxxxxxx xxxxxxxxx x xx xxxxx xxxxxx"
+    },
+    {
+      "self_ref": "#/texts/73",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxx xxxxxxxx xxx xxxxx xx xxxxxx xx xx xxxxxxxx xx xxxxxxxx",
+      "text": "xxx xxxxxxxx xxx xxxxx xx xxxxxx xx xx xxxxxxxx xx xxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/74",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "***xxxxxxxxxx xxxxxxx xxx xxxxxxxxxxxxxx***",
+      "text": "***xxxxxxxxxx xxxxxxx xxx xxxxxxxxxxxxxx***"
+    },
+    {
+      "self_ref": "#/texts/75",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxx**",
+      "text": "**xxxxxxxxx**"
+    },
+    {
+      "self_ref": "#/texts/76",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxx xx xxxxxxxxxxxx xxxxxxxxx xxx xxxxxxx xxxxxx xxxxxxxx",
+      "text": "xxxxxx xx xxxxxxxxxxxx xxxxxxxxx xxx xxxxxxx xxxxxx xxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/77",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxx xxxxxxxxxx xxx xxxxxxxxxxx xx xxx xxxxxxxxxxx",
+      "text": "xxx xxxxxxxxxx xxx xxxxxxxxxxx xx xxx xxxxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/78",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxx**",
+      "text": "**xxxxxxxxx**"
+    },
+    {
+      "self_ref": "#/texts/79",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxx xxxxxxx xx xxxxxxxxx xx xxxxxxxxxxxx xxxx xx xxxxxxxxxxxxxx",
+      "text": "xxxxxx xxxxxxx xx xxxxxxxxx xx xxxxxxxxxxxx xxxx xx xxxxxxxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/80",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxx xxxxxxxxxx xxx xxxxxxxxxxx xx xxx xxxxxxxxxx",
+      "text": "xxx xxxxxxxxxx xxx xxxxxxxxxxx xx xxx xxxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/81",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxx**",
+      "text": "**xxxxxxxxx**"
+    },
+    {
+      "self_ref": "#/texts/82",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxx xx xxxxxxx xx xxxxxxxxxxxx",
+      "text": "xxxx xx xxxxxxx xx xxxxxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/83",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxx xxxxxxxx xxx xxxxxxxxxx xx xxxxxxxxxx",
+      "text": "xxx xxxxxxxx xxx xxxxxxxxxx xx xxxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/84",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "***xxxxxxxxxxx xxxxxxxx xxxxx xx xxxxxxx xxxxxxx x xxxxxxxx***",
+      "text": "***xxxxxxxxxxx xxxxxxxx xxxxx xx xxxxxxx xxxxxxx x xxxxxxxx***"
+    },
+    {
+      "self_ref": "#/texts/85",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxx**",
+      "text": "**xxxxxxxxx**"
+    },
+    {
+      "self_ref": "#/texts/86",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxx xx xxxxxxx xxxxxxxxxx",
+      "text": "xxxxxx xx xxxxxxx xxxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/87",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxx xxxxxxxx xxx xxxxxxxxxxxx xxxxxxxxxx xxxx xxx xxxxxxxxxxxx",
+      "text": "xxx xxxxxxxx xxx xxxxxxxxxxxx xxxxxxxxxx xxxx xxx xxxxxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/88",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxx xxxxxxxx xxx xxxxxxxxxxxxxxx xxxxxxxxxx xxx xxxxxxxxxxxxxxxxxx",
+      "text": "xxx xxxxxxxx xxx xxxxxxxxxxxxxxx xxxxxxxxxx xxx xxxxxxxxxxxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/89",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxx**",
+      "text": "**xxxxxxxxx**"
+    },
+    {
+      "self_ref": "#/texts/90",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxx xx xxxxxxx xxxxxxxxxxxx",
+      "text": "xxxxxx xx xxxxxxx xxxxxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/91",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxx xxxxxxxx xxx xxxxxxxxxxx xxxx xxx xxxxxxxxxx",
+      "text": "xxx xxxxxxxx xxx xxxxxxxxxxx xxxx xxx xxxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/92",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxx xxxxxxxx xxx xxxxxxxxxxxxxxx xxxxxxxxxx xxx xxxxxxxxxxxxxxxxxx",
+      "text": "xxx xxxxxxxx xxx xxxxxxxxxxxxxxx xxxxxxxxxx xxx xxxxxxxxxxxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/93",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "***xxxxxxxxxxxx xx xxxxxxx xxxxxxxx xxxx xxx xxxxxxxxxxx xxxxxxxxxxxx***",
+      "text": "***xxxxxxxxxxxx xx xxxxxxx xxxxxxxx xxxx xxx xxxxxxxxxxx xxxxxxxxxxxx***"
+    },
+    {
+      "self_ref": "#/texts/94",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxx xxxxxxxxxxx xx xxxx xxx xxxxxxx xx xxxxxx xx xx xxxxxxxx xx xxxxxxxx**",
+      "text": "**xxx xxxxxxxxxxx xx xxxx xxx xxxxxxx xx xxxxxx xx xx xxxxxxxx xx xxxxxxxx**"
+    },
+    {
+      "self_ref": "#/texts/95",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxx**",
+      "text": "**xxxxxxxxx**"
+    },
+    {
+      "self_ref": "#/texts/96",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxxxxxx xx xxxxxxx xxx xxxxxxxxxxx x",
+      "text": "xxxxxxxxxx xx xxxxxxx xxx xxxxxxxxxxx x"
+    },
+    {
+      "self_ref": "#/texts/97",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "x x xxx xx xxxxxxx",
+      "text": "x x xxx xx xxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/98",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "x x xxxxxxx",
+      "text": "x x xxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/99",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxx xxxxxxxxxx xxx xxxxxxxxx x xx xx xxx xxxxxxxxxx xx xxxxxxxxxx xx xxxxxx",
+      "text": "xxx xxxxxxxxxx xxx xxxxxxxxx x xx xx xxx xxxxxxxxxx xx xxxxxxxxxx xx xxxxxx"
+    },
+    {
+      "self_ref": "#/texts/100",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxx**",
+      "text": "**xxxxxxxxx**"
+    },
+    {
+      "self_ref": "#/texts/101",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxx xxxxx xx xxxxxxx xxx xxxxxxxxxxx",
+      "text": "xxxx xxxxx xx xxxxxxx xxx xxxxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/102",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xx xxxxxxxxx x x",
+      "text": "xx xxxxxxxxx x x"
+    },
+    {
+      "self_ref": "#/texts/103",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxx xxxxxxxx xxx xxxxxxxxxxx xx xxxxx xx xxxx xxxxxxxxx x xx xxxxx xxxxx",
+      "text": "xxx xxxxxxxx xxx xxxxxxxxxxx xx xxxxx xx xxxx xxxxxxxxx x xx xxxxx xxxxx"
+    },
+    {
+      "self_ref": "#/texts/104",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxx**",
+      "text": "**xxxxxxxxx**"
+    },
+    {
+      "self_ref": "#/texts/105",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxxxxxx xx xxxxxxx xxx xxxxxxxxxxx x",
+      "text": "xxxxxxxxxx xx xxxxxxx xxx xxxxxxxxxxx x"
+    },
+    {
+      "self_ref": "#/texts/106",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "x x xxx xx xxxxxxx",
+      "text": "x x xxx xx xxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/107",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "x x xxxxxxx",
+      "text": "x x xxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/108",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxx xxxxxxxxxx xxx xxxxxxxxx x xx xx xxx xxxxxxxxxx xx xxxxxxxxxx xx xxxxxx",
+      "text": "xxx xxxxxxxxxx xxx xxxxxxxxx x xx xx xxx xxxxxxxxxx xx xxxxxxxxxx xx xxxxxx"
+    },
+    {
+      "self_ref": "#/texts/109",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxx**",
+      "text": "**xxxxxxxxx**"
+    },
+    {
+      "self_ref": "#/texts/110",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxx xxxxx xx xxxxxxx xxx xxxxxxxxxxx",
+      "text": "xxxx xxxxx xx xxxxxxx xxx xxxxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/111",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xx xxxxxxxxx x x",
+      "text": "xx xxxxxxxxx x x"
+    },
+    {
+      "self_ref": "#/texts/112",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxx xxxxxxxx xxx xxxxxxxxxxx xx xxxxx xx xxxx xxxxxxxxx x xx xxxxx xxxxx",
+      "text": "xxx xxxxxxxx xxx xxxxxxxxxxx xx xxxxx xx xxxx xxxxxxxxx x xx xxxxx xxxxx"
+    },
+    {
+      "self_ref": "#/texts/113",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "***xxxxxxxxxx xxxxxxx xxxxxxx***",
+      "text": "***xxxxxxxxxx xxxxxxx xxxxxxx***"
+    },
+    {
+      "self_ref": "#/texts/114",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxx**",
+      "text": "**xxxxxxxxx**"
+    },
+    {
+      "self_ref": "#/texts/115",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxxxxxx xxxxx xxxxxxxxxxxxx xxxx xxxxxxx xxxxxxxx",
+      "text": "xxxxxxxxxx xxxxx xxxxxxxxxxxxx xxxx xxxxxxx xxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/116",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxx xxxxxxxxxx xxxxxx xx xxxxxxxxx xx xx xxxxxxx xxxxx xxxxxx xxxx x xxxxxx xxxx xxxxxxx xxxxxxxxx xx xxxxxx xx xx xxxxxxxx xx xxxxxxx xxxxxxxxxx xxx xxxxxxxx xxxxx xxx xxxxxxxxxx xx xxx xxxxxxxxxx x xxx xxxxxx",
+      "text": "xxx xxxxxxxxxx xxxxxx xx xxxxxxxxx xx xx xxxxxxx xxxxx xxxxxx xxxx x xxxxxx xxxx xxxxxxx xxxxxxxxx xx xxxxxx xx xx xxxxxxxx xx xxxxxxx xxxxxxxxxx xxx xxxxxxxx xxxxx xxx xxxxxxxxxx xx xxx xxxxxxxxxx x xxx xxxxxx"
+    },
+    {
+      "self_ref": "#/texts/117",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxx\txx xxxxxxxxxxxxx x xxxxxxxx xx**",
+      "text": "**xxxxxxxxx\txx xxxxxxxxxxxxx x xxxxxxxx xx**"
+    },
+    {
+      "self_ref": "#/texts/118",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxxxxxx xxxxx xxxxxxxxxx xxxxxxxxxxxx xx xxxxxxx xx xxxx",
+      "text": "xxxxxxxxxx xxxxx xxxxxxxxxx xxxxxxxxxxxx xx xxxxxxx xx xxxx"
+    },
+    {
+      "self_ref": "#/texts/119",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxx\txx xxxxxxxxxxxx x xxxxxxxx xxx x xxx xx xxxxxxxx xx**",
+      "text": "**xxxxxxxxx\txx xxxxxxxxxxxx x xxxxxxxx xxx x xxx xx xxxxxxxx xx**"
+    },
+    {
+      "self_ref": "#/texts/120",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxx xx xxxxxxx xx xxxxxxxxxxxxxx xxxxxx xx xxxxxx",
+      "text": "xxxx xx xxxxxxx xx xxxxxxxxxxxxxx xxxxxx xx xxxxxx"
+    },
+    {
+      "self_ref": "#/texts/121",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxx xx xxxxxxx xxxx xxxxxxx xx xxxxxxxx xxx xxxxxx xx xx xx x xxxx xxx xxxxxxx xx xxxxxxxxxxxxxx xxxx xxxxxxxxxxx xxx xxxxxx",
+      "text": "xxxxx xx xxxxxxx xxxx xxxxxxx xx xxxxxxxx xxx xxxxxx xx xx xx x xxxx xxx xxxxxxx xx xxxxxxxxxxxxxx xxxx xxxxxxxxxxx xxx xxxxxx"
+    },
+    {
+      "self_ref": "#/texts/122",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxx xxxxxxxx xxx xxxxxxxxxx",
+      "text": "xxx xxxxxxxx xxx xxxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/123",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "***xxxxx xxxxxxxxxxx xxxxxxx***",
+      "text": "***xxxxx xxxxxxxxxxx xxxxxxx***"
+    },
+    {
+      "self_ref": "#/texts/124",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxx**",
+      "text": "**xxxxxxxxx**"
+    },
+    {
+      "self_ref": "#/texts/125",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxx xxxx xx xxxxxx xx xxxxxxx xxxxxxxxxxxx xxxxxxxxxx x x",
+      "text": "xxx xxxx xx xxxxxx xx xxxxxxx xxxxxxxxxxxx xxxxxxxxxx x x"
+    },
+    {
+      "self_ref": "#/texts/126",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxx**",
+      "text": "**xxxxxxxxx**"
+    },
+    {
+      "self_ref": "#/texts/127",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxx xx xxxxxxxxxxxxx xxxxxxxxxxxx xxxxxxxxxx x x",
+      "text": "xxxxxx xx xxxxxxxxxxxxx xxxxxxxxxxxx xxxxxxxxxx x x"
+    },
+    {
+      "self_ref": "#/texts/128",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxx**",
+      "text": "**xxxxxxxxx**"
+    },
+    {
+      "self_ref": "#/texts/129",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxxxxxx xxxxx xx xxxxxxx xxxxxx xxxxxxxxxx x xxx xxxxx",
+      "text": "xxxxxxxxxx xxxxx xx xxxxxxx xxxxxx xxxxxxxxxx x xxx xxxxx"
+    },
+    {
+      "self_ref": "#/texts/130",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxx**",
+      "text": "**xxxxxxxxx**"
+    },
+    {
+      "self_ref": "#/texts/131",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxx xx xxxxxxx xxxxxxxx xxxxxxxxxx x x",
+      "text": "xxxxxx xx xxxxxxx xxxxxxxx xxxxxxxxxx x x"
+    },
+    {
+      "self_ref": "#/texts/132",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xx xxxxxxxxx x xxx xxxxx",
+      "text": "xx xxxxxxxxx x xxx xxxxx"
+    },
+    {
+      "self_ref": "#/texts/133",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxxxxx xxxx xxxx xxxxxxxxx xx x",
+      "text": "xxxxxxxxx xxxx xxxx xxxxxxxxx xx x"
+    },
+    {
+      "self_ref": "#/texts/134",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxx**",
+      "text": "**xxxxxxxxx**"
+    },
+    {
+      "self_ref": "#/texts/135",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxx xx xxxxxxx xxxxxxxxx xxxxxxxxxxxxxxx xxxxxxxxxx x x",
+      "text": "xxxxxx xx xxxxxxx xxxxxxxxx xxxxxxxxxxxxxxx xxxxxxxxxx x x"
+    },
+    {
+      "self_ref": "#/texts/136",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxx**",
+      "text": "**xxxxxxxxx**"
+    },
+    {
+      "self_ref": "#/texts/137",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxx xx xxxxxxx xx xxxx xxxxxxxxxxxxxx xxxxxxxxxx x x",
+      "text": "xxxxxx xx xxxxxxx xx xxxx xxxxxxxxxxxxxx xxxxxxxxxx x x"
+    },
+    {
+      "self_ref": "#/texts/138",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "***xxxxxxxxxx xx xxxxxxxxxxxxxxx xxxxxxxx xxx xxxxxxxxxx xx xxxxxxxx***",
+      "text": "***xxxxxxxxxx xx xxxxxxxxxxxxxxx xxxxxxxx xxx xxxxxxxxxx xx xxxxxxxx***"
+    },
+    {
+      "self_ref": "#/texts/139",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxx\txx xxxxxxxx xx xxxxxxxxxxxxxxx xxxxxxxxx x x xxxxxxxxx xx**",
+      "text": "**xxxxxxxxx\txx xxxxxxxx xx xxxxxxxxxxxxxxx xxxxxxxxx x x xxxxxxxxx xx**"
+    },
+    {
+      "self_ref": "#/texts/140",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxx xx xxxxx xx xxxxxxx xxxxxx xxxxx",
+      "text": "xxxx xx xxxxx xx xxxxxxx xxxxxx xxxxx"
+    },
+    {
+      "self_ref": "#/texts/141",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxx xxxxxxxx xxx xxxxxxxxxxx xxxxxxxxxxx xxxx xxx xxxxxxxxxxxxx xx xxx xxxxxxxxxxxxxxx xxxxxxxxx xx xxxxxxx xx xxxxxxxx xxxxxxx xxxxxxxxx xx xx xxxxx xxxxxxxxx",
+      "text": "xxx xxxxxxxx xxx xxxxxxxxxxx xxxxxxxxxxx xxxx xxx xxxxxxxxxxxxx xx xxx xxxxxxxxxxxxxxx xxxxxxxxx xx xxxxxxx xx xxxxxxxx xxxxxxx xxxxxxxxx xx xx xxxxx xxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/142",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxx\txx xxxxxxxx xx xxxxxxxxxxxxxxx xxxxxxxxx x x xxxxxxxxx xx**",
+      "text": "**xxxxxx\txx xxxxxxxx xx xxxxxxxxxxxxxxx xxxxxxxxx x x xxxxxxxxx xx**"
+    },
+    {
+      "self_ref": "#/texts/143",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxx xx xxxxxx xx xxxxxxx",
+      "text": "xxxx xx xxxxxx xx xxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/144",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxx xxxxxxxx xxx xxxxxxxxxxx xxxxxxxxxxx xxxx xxx xxxxxxxxxxxxx xx xxx xxxxxxxxxxxxxxx xxxxxxxxx xx xxxxxxx xx xxxxxxx xxxxxx xx xx xxxxx xxxxxxxxx xxx xx xxxxxx xx xx xxxxxxxx xxxxxxx xxxxxxxxx xxxxxxx",
+      "text": "xxx xxxxxxxx xxx xxxxxxxxxxx xxxxxxxxxxx xxxx xxx xxxxxxxxxxxxx xx xxx xxxxxxxxxxxxxxx xxxxxxxxx xx xxxxxxx xx xxxxxxx xxxxxx xx xx xxxxx xxxxxxxxx xxx xx xxxxxx xx xx xxxxxxxx xxxxxxx xxxxxxxxx xxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/145",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "***xxxxxxxxxx xx xxxxxxxxxxxxxxx xxxxxxxx xxx xxx xxxxxxxxx xxxxxxxxxx xxx xxx xxxxxxxx***",
+      "text": "***xxxxxxxxxx xx xxxxxxxxxxxxxxx xxxxxxxx xxx xxx xxxxxxxxx xxxxxxxxxx xxx xxx xxxxxxxx***"
+    },
+    {
+      "self_ref": "#/texts/146",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxx\txx xxxxxxxx xx xxxxxxxxxxxxxxx xxxxxxxxx x x xxxxxxxxx xx**",
+      "text": "**xxxxxx\txx xxxxxxxx xx xxxxxxxxxxxxxxx xxxxxxxxx x x xxxxxxxxx xx**"
+    },
+    {
+      "self_ref": "#/texts/147",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxxxxxx xx xxxxxxxxxxxxxxxxx",
+      "text": "xxxxxxxxxx xx xxxxxxxxxxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/148",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "x x xxx",
+      "text": "x x xxx"
+    },
+    {
+      "self_ref": "#/texts/149",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxx x xxxxxxxxxxxxxxxxx",
+      "text": "xxx x xxxxxxxxxxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/150",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxx\t\txx xxxxxxxx xx xxxxxxxxxxxxxxx xxxxxxxxx x x xxxxxxxxx xx**",
+      "text": "**xxxxxxxxx\t\txx xxxxxxxx xx xxxxxxxxxxxxxxx xxxxxxxxx x x xxxxxxxxx xx**"
+    },
+    {
+      "self_ref": "#/texts/151",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxxxxxx xx xxxxxxxxxx x",
+      "text": "xxxxxxxxxx xx xxxxxxxxxx x"
+    },
+    {
+      "self_ref": "#/texts/152",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "x x xxx",
+      "text": "x x xxx"
+    },
+    {
+      "self_ref": "#/texts/153",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xx x xxxxxxxxxx xxxxxx",
+      "text": "xx x xxxxxxxxxx xxxxxx"
+    },
+    {
+      "self_ref": "#/texts/154",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xx x xxxxxxxxxx xxxxx",
+      "text": "xx x xxxxxxxxxx xxxxx"
+    },
+    {
+      "self_ref": "#/texts/155",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxx\t\txx xxxxxxxx xx xxxxxxxxxxxxxxx xxxxxxxxx x x xxxxxxxxx xx**",
+      "text": "**xxxxxxxxx\t\txx xxxxxxxx xx xxxxxxxxxxxxxxx xxxxxxxxx x x xxxxxxxxx xx**"
+    },
+    {
+      "self_ref": "#/texts/156",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxxxxxx xx xxxxxx xx xxxx",
+      "text": "xxxxxxxxxx xx xxxxxx xx xxxx"
+    },
+    {
+      "self_ref": "#/texts/157",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "x x xxx",
+      "text": "x x xxx"
+    },
+    {
+      "self_ref": "#/texts/158",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "x  x xxxxxxx x xxxxxxxxxxxxxx xxxxxx xxxxxxxxxxxx",
+      "text": "x  x xxxxxxx x xxxxxxxxxxxxxx xxxxxx xxxxxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/159",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "x x xxxxxxx x xxxxxxxxxxxxxx xxxxxx xxxxxxxx",
+      "text": "x x xxxxxxx x xxxxxxxxxxxxxx xxxxxx xxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/160",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "section_header",
+      "prov": [],
+      "orig": "HEADING NUMBER",
+      "text": "HEADING NUMBER",
+      "level": 1
+    },
+    {
+      "self_ref": "#/texts/161",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxxx xxx xxxxxxx xxxx xxxxxxxx xxxxx xx xxxxxxxxxx xxxx xxxx xxxxx x xxxx xxxx xxxx xxxxxx xx xxxx xxxxxxxxx xx xxxxxxxxx xx xxxxxxxx**",
+      "text": "**xxxxxxxxxx xxx xxxxxxx xxxx xxxxxxxx xxxxx xx xxxxxxxxxx xxxx xxxx xxxxx x xxxx xxxx xxxx xxxxxx xx xxxx xxxxxxxxx xx xxxxxxxxx xx xxxxxxxx**"
+    },
+    {
+      "self_ref": "#/texts/162",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxx xx xx xxxxxxxx xxxx xxxxxxxx xx xxxx xxxxx xxx xxxx xxxx xxxxxxxxx x xxxxxxxxxxxxxxxxxxx xxxxxxxxx x x xxxxxxxx xx xxxxxx x xxxxxxx**",
+      "text": "**xxxx xx xx xxxxxxxx xxxx xxxxxxxx xx xxxx xxxxx xxx xxxx xxxx xxxxxxxxx x xxxxxxxxxxxxxxxxxxx xxxxxxxxx x x xxxxxxxx xx xxxxxx x xxxxxxx**"
+    },
+    {
+      "self_ref": "#/texts/163",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxx**",
+      "text": "**xxxxxx**"
+    },
+    {
+      "self_ref": "#/texts/164",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxx xxxxxxx xx xxxxxxx xxxxxxxxx xx xxxxx xx xx xxxxx xxxxxxxxx xxxxxxxx xx xxxxxxx xx xx xxxxxx xxxxxxx xxxxxxx xxx xxxxxxxx",
+      "text": "xxxxxx xxxxxxx xx xxxxxxx xxxxxxxxx xx xxxxx xx xx xxxxx xxxxxxxxx xxxxxxxx xx xxxxxxx xx xx xxxxxx xxxxxxx xxxxxxx xxx xxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/165",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxx**",
+      "text": "**xxxxxxxxx**"
+    },
+    {
+      "self_ref": "#/texts/166",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxx xx xxxxx xx xxxxxx",
+      "text": "xxxx xx xxxxx xx xxxxxx"
+    },
+    {
+      "self_ref": "#/texts/167",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxx xxxxxxxx xxx xxxxxxxxxx xxxx xxxxxxxxxxxxxxxxx xx xxxxxx xx xx xxxx xxxxxxx xxx xxxx xx xx xxxxxxxx xx xxxxxxx",
+      "text": "xxx xxxxxxxx xxx xxxxxxxxxx xxxx xxxxxxxxxxxxxxxxx xx xxxxxx xx xx xxxx xxxxxxx xxx xxxx xx xx xxxxxxxx xx xxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/168",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxx**",
+      "text": "**xxxxxxxxx**"
+    },
+    {
+      "self_ref": "#/texts/169",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxx xx xxx xx xxxxxx",
+      "text": "xxxx xx xxx xx xxxxxx"
+    },
+    {
+      "self_ref": "#/texts/170",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxx xx xx xxxxxxxx xxxx xxxxxxxx xxxxx xxxxxxx xxx xxxxxxx xx xxx xxxxxxxxxxx x x xxxxxxxxx xxxx xxxx xxxxxxxxxxx xxx xx xxxxxxxxx x x xxxx xx xxxxxxxx xxxxx xx xx xxxxx",
+      "text": "xxxx xx xx xxxxxxxx xxxx xxxxxxxx xxxxx xxxxxxx xxx xxxxxxx xx xxx xxxxxxxxxxx x x xxxxxxxxx xxxx xxxx xxxxxxxxxxx xxx xx xxxxxxxxx x x xxxx xx xxxxxxxx xxxxx xx xx xxxxx"
+    },
+    {
+      "self_ref": "#/texts/171",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxx**",
+      "text": "**xxxxxx**"
+    },
+    {
+      "self_ref": "#/texts/172",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxx xx xxxxxx xx xxxxxxx",
+      "text": "xxxx xx xxxxxx xx xxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/173",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxx xxx xxx xxxx xxxxxxxxx xxxxxxx xxxxxxxxx x xx xxxxx xxxxxxx xxxx xx xx xxxxxxxxx xxxx xxxxxxx xxxxxxxxxxxxxxxx xxx xxxxxxxxx xxxxxxxx xxxx xxxxxxxxxxx xxxxxxxxxxxxxxxxxx",
+      "text": "xxxxxx xxx xxx xxxx xxxxxxxxx xxxxxxx xxxxxxxxx x xx xxxxx xxxxxxx xxxx xx xx xxxxxxxxx xxxx xxxxxxx xxxxxxxxxxxxxxxx xxx xxxxxxxxx xxxxxxxx xxxx xxxxxxxxxxx xxxxxxxxxxxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/174",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxx**",
+      "text": "**xxxxxxxxx**"
+    },
+    {
+      "self_ref": "#/texts/175",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxxxxxx xx xxxxxx xx xxxxxxx x",
+      "text": "xxxxxxxxxx xx xxxxxx xx xxxxxxx x"
+    },
+    {
+      "self_ref": "#/texts/176",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "x xxx xxxxxxxxxx               x xx xxx",
+      "text": "x xxx xxxxxxxxxx               x xx xxx"
+    },
+    {
+      "self_ref": "#/texts/177",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "x xxx xxxxxxx                     x xxxx xxxxx",
+      "text": "x xxx xxxxxxx                     x xxxx xxxxx"
+    },
+    {
+      "self_ref": "#/texts/178",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxxxxx xxx xxxxxxxxxx xxx xxxxxxx xx xxxxxxxxxxxxxxxx",
+      "text": "xxxxxxxxx xxx xxxxxxxxxx xxx xxxxxxx xx xxxxxxxxxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/179",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxx**",
+      "text": "**xxxxxxxxx**"
+    },
+    {
+      "self_ref": "#/texts/180",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxx xxxxx xx xxxxxxx xx xxxxxx xxxxxxxxx",
+      "text": "xxxx xxxxx xx xxxxxxx xx xxxxxx xxxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/181",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxx xx xxxxx xxxxxx x xx xxxxxxxxxx xx xxxxxxxxxx xx xxxxxxxx xxxxxxxxxxx xx xxxxxxxxxx xx xx xxxxx xxx xxxxxxxxxxx xxx xxxxxxxxxxxxxx xxxxxxxx xxx xxxxxxxxx xxxx xx xxxxx xxxxx xxxx xxxx xxxxx x xxxxx xxxxxxxxx xxxxxxx",
+      "text": "xxxxx xx xxxxx xxxxxx x xx xxxxxxxxxx xx xxxxxxxxxx xx xxxxxxxx xxxxxxxxxxx xx xxxxxxxxxx xx xx xxxxx xxx xxxxxxxxxxx xxx xxxxxxxxxxxxxx xxxxxxxx xxx xxxxxxxxx xxxx xx xxxxx xxxxx xxxx xxxx xxxxx x xxxxx xxxxxxxxx xxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/182",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxx**",
+      "text": "**xxxxxxxxx**"
+    },
+    {
+      "self_ref": "#/texts/183",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxx xx xxxx xx xxxxxxxxxxxx xxxxxxxxxx x xx xxxx xx xx xxxxxxxx xx xxxxxxxx",
+      "text": "xxxxxx xx xxxx xx xxxxxxxxxxxx xxxxxxxxxx x xx xxxx xx xx xxxxxxxx xx xxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/184",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxx**",
+      "text": "**xxxxxx**"
+    },
+    {
+      "self_ref": "#/texts/185",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxxxxx xxxxxxxxxxxx xxxxxxxxxx x xx xxxx xx xx xxxxxxxx xx xxxxxxxx",
+      "text": "xxxxxx xxxxxxxxxxxx xxxxxxxxxx x xx xxxx xx xx xxxxxxxx xx xxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/186",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxx xx xxxxxx**",
+      "text": "**xxxxxxxxx xx xxxxxx**"
+    },
+    {
+      "self_ref": "#/texts/187",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xxx x xxxxxxxxx xxxxxxxxxx xx xxxxxxxxxx xxxxxx xxx xxxxxxxxxxx xxx x xxxxxx xx xxxxxxx xxxx xxx xx xxx xxxxxx xx xxxxxxx xxxxxxxxx xxxx xxx xxxxxxxx",
+      "text": "xxx x xxxxxxxxx xxxxxxxxxx xx xxxxxxxxxx xxxxxx xxx xxxxxxxxxxx xxx x xxxxxx xx xxxxxxx xxxx xxx xx xxx xxxxxx xx xxxxxxx xxxxxxxxx xxxx xxx xxxxxxxx"
+    },
+    {
+      "self_ref": "#/texts/188",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**xxxxxxxxxx xxxxxxxxxxxxxxxxx x**",
+      "text": "**xxxxxxxxxx xxxxxxxxxxxxxxxxx x**"
+    },
+    {
+      "self_ref": "#/texts/189",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "xx xxxxxxx xxx xxx xxxxxxxxxx xxxx xxx xxxxxxxxx xxxxx xxx xxxxxxxxx xx xxxxxxxx xxxx xxx xx xxxxxxx xxxxx xxx xxxxxx xx xxxxxx xxxxx xxxxxxxxx xxxxx xx xxxxxx xxxx xxxxxxxx",
+      "text": "xx xxxxxxx xxx xxx xxxxxxxxxx xxxx xxx xxxxxxxxx xxxxx xxx xxxxxxxxx xx xxxxxxxx xxxx xxx xx xxxxxxx xxxxx xxx xxxxxx xx xxxxxx xxxxx xxxxxxxxx xxxxx xx xxxxxx xxxx xxxxxxxx"
+    }
+  ],
+  "pictures": [],
+  "tables": [
+    {
+      "self_ref": "#/tables/0",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "table",
+      "prov": [],
+      "captions": [],
+      "references": [],
+      "footnotes": [],
+      "data": {
+        "table_cells": [
+          {
+            "row_span": 1,
+            "col_span": 1,
+            "start_row_offset_idx": 0,
+            "end_row_offset_idx": 1,
+            "start_col_offset_idx": 0,
+            "end_col_offset_idx": 1,
+            "text": "xxxxxx",
+            "column_header": true,
+            "row_header": false,
+            "row_section": false,
+            "fillable": false
+          },
+          {
+            "row_span": 1,
+            "col_span": 1,
+            "start_row_offset_idx": 0,
+            "end_row_offset_idx": 1,
+            "start_col_offset_idx": 1,
+            "end_col_offset_idx": 2,
+            "text": "xxxxxxxxxxx",
+            "column_header": true,
+            "row_header": false,
+            "row_section": false,
+            "fillable": false
+          },
+          {
+            "row_span": 1,
+            "col_span": 1,
+            "start_row_offset_idx": 1,
+            "end_row_offset_idx": 2,
+            "start_col_offset_idx": 0,
+            "end_col_offset_idx": 1,
+            "text": "xxxxxxx xxxxxxxxx",
+            "column_header": false,
+            "row_header": false,
+            "row_section": false,
+            "fillable": false
+          },
+          {
+            "row_span": 1,
+            "col_span": 1,
+            "start_row_offset_idx": 1,
+            "end_row_offset_idx": 2,
+            "start_col_offset_idx": 1,
+            "end_col_offset_idx": 2,
+            "text": "**xxx**",
+            "column_header": false,
+            "row_header": false,
+            "row_section": false,
+            "fillable": false
+          }
+        ],
+        "num_rows": 2,
+        "num_cols": 2,
+        "orientation": "rot_0",
+        "grid": [
+          [
+            {
+              "row_span": 1,
+              "col_span": 1,
+              "start_row_offset_idx": 0,
+              "end_row_offset_idx": 1,
+              "start_col_offset_idx": 0,
+              "end_col_offset_idx": 1,
+              "text": "xxxxxx",
+              "column_header": true,
+              "row_header": false,
+              "row_section": false,
+              "fillable": false
+            },
+            {
+              "row_span": 1,
+              "col_span": 1,
+              "start_row_offset_idx": 0,
+              "end_row_offset_idx": 1,
+              "start_col_offset_idx": 1,
+              "end_col_offset_idx": 2,
+              "text": "xxxxxxxxxxx",
+              "column_header": true,
+              "row_header": false,
+              "row_section": false,
+              "fillable": false
+            }
+          ],
+          [
+            {
+              "row_span": 1,
+              "col_span": 1,
+              "start_row_offset_idx": 1,
+              "end_row_offset_idx": 2,
+              "start_col_offset_idx": 0,
+              "end_col_offset_idx": 1,
+              "text": "xxxxxxx xxxxxxxxx",
+              "column_header": false,
+              "row_header": false,
+              "row_section": false,
+              "fillable": false
+            },
+            {
+              "row_span": 1,
+              "col_span": 1,
+              "start_row_offset_idx": 1,
+              "end_row_offset_idx": 2,
+              "start_col_offset_idx": 1,
+              "end_col_offset_idx": 2,
+              "text": "**xxx**",
+              "column_header": false,
+              "row_header": false,
+              "row_section": false,
+              "fillable": false
+            }
+          ]
+        ]
+      },
+      "annotations": []
+    },
+    {
+      "self_ref": "#/tables/1",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "table",
+      "prov": [],
+      "captions": [],
+      "references": [],
+      "footnotes": [],
+      "data": {
+        "table_cells": [
+          {
+            "row_span": 1,
+            "col_span": 1,
+            "start_row_offset_idx": 0,
+            "end_row_offset_idx": 1,
+            "start_col_offset_idx": 0,
+            "end_col_offset_idx": 1,
+            "text": "",
+            "column_header": true,
+            "row_header": false,
+            "row_section": false,
+            "fillable": false
+          }
+        ],
+        "num_rows": 1,
+        "num_cols": 1,
+        "orientation": "rot_0",
+        "grid": [
+          [
+            {
+              "row_span": 1,
+              "col_span": 1,
+              "start_row_offset_idx": 0,
+              "end_row_offset_idx": 1,
+              "start_col_offset_idx": 0,
+              "end_col_offset_idx": 1,
+              "text": "",
+              "column_header": true,
+              "row_header": false,
+              "row_section": false,
+              "fillable": false
+            }
+          ]
+        ]
+      },
+      "annotations": []
+    },
+    {
+      "self_ref": "#/tables/2",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "table",
+      "prov": [],
+      "captions": [],
+      "references": [],
+      "footnotes": [],
+      "data": {
+        "table_cells": [
+          {
+            "row_span": 1,
+            "col_span": 1,
+            "start_row_offset_idx": 0,
+            "end_row_offset_idx": 1,
+            "start_col_offset_idx": 0,
+            "end_col_offset_idx": 1,
+            "text": "xxxxxxxxx xxxxxxxx",
+            "column_header": true,
+            "row_header": false,
+            "row_section": false,
+            "fillable": false
+          }
+        ],
+        "num_rows": 1,
+        "num_cols": 1,
+        "orientation": "rot_0",
+        "grid": [
+          [
+            {
+              "row_span": 1,
+              "col_span": 1,
+              "start_row_offset_idx": 0,
+              "end_row_offset_idx": 1,
+              "start_col_offset_idx": 0,
+              "end_col_offset_idx": 1,
+              "text": "xxxxxxxxx xxxxxxxx",
+              "column_header": true,
+              "row_header": false,
+              "row_section": false,
+              "fillable": false
+            }
+          ]
+        ]
+      },
+      "annotations": []
+    },
+    {
+      "self_ref": "#/tables/3",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "table",
+      "prov": [],
+      "captions": [],
+      "references": [],
+      "footnotes": [],
+      "data": {
+        "table_cells": [
+          {
+            "row_span": 1,
+            "col_span": 1,
+            "start_row_offset_idx": 0,
+            "end_row_offset_idx": 1,
+            "start_col_offset_idx": 0,
+            "end_col_offset_idx": 1,
+            "text": "x   xx",
+            "column_header": true,
+            "row_header": false,
+            "row_section": false,
+            "fillable": false
+          }
+        ],
+        "num_rows": 1,
+        "num_cols": 1,
+        "orientation": "rot_0",
+        "grid": [
+          [
+            {
+              "row_span": 1,
+              "col_span": 1,
+              "start_row_offset_idx": 0,
+              "end_row_offset_idx": 1,
+              "start_col_offset_idx": 0,
+              "end_col_offset_idx": 1,
+              "text": "x   xx",
+              "column_header": true,
+              "row_header": false,
+              "row_section": false,
+              "fillable": false
+            }
+          ]
+        ]
+      },
+      "annotations": []
+    },
+    {
+      "self_ref": "#/tables/4",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "table",
+      "prov": [],
+      "captions": [],
+      "references": [],
+      "footnotes": [],
+      "data": {
+        "table_cells": [
+          {
+            "row_span": 1,
+            "col_span": 1,
+            "start_row_offset_idx": 0,
+            "end_row_offset_idx": 1,
+            "start_col_offset_idx": 0,
+            "end_col_offset_idx": 1,
+            "text": "",
+            "column_header": true,
+            "row_header": false,
+            "row_section": false,
+            "fillable": false
+          }
+        ],
+        "num_rows": 1,
+        "num_cols": 1,
+        "orientation": "rot_0",
+        "grid": [
+          [
+            {
+              "row_span": 1,
+              "col_span": 1,
+              "start_row_offset_idx": 0,
+              "end_row_offset_idx": 1,
+              "start_col_offset_idx": 0,
+              "end_col_offset_idx": 1,
+              "text": "",
+              "column_header": true,
+              "row_header": false,
+              "row_section": false,
+              "fillable": false
+            }
+          ]
+        ]
+      },
+      "annotations": []
+    }
+  ],
+  "key_value_items": [],
+  "form_items": [],
+  "pages": {}
+}

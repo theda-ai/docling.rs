@@ -6,7 +6,7 @@ This guide covers running the [`docling-serve`](../crates/docling-serve) HTTP co
 
 ## Container Registry & Prebuilt Images
 
-The following container images are published on **GitHub Container Registry (GHCR)** on every release and master commit:
+The following container images are published on **GitHub Container Registry (GHCR)** for every release the maintainer publishes (`release.yml`; version tags plus `latest`):
 
 #### 📦 Distributed Images
 
@@ -14,8 +14,8 @@ The following container images are published on **GitHub Container Registry (GHC
 |---|---|---|
 | [`ghcr.io/docling-project/docling-rs-serve`](https://github.com/docling-project/docling.rs/pkgs/container/docling-rs-serve) | High-performance document conversion HTTP API with PDF, DOCX, PPTX, XLSX, HTML, images, and audio/video models pre-installed (zero Python runtime dependencies, CPU). | `linux/amd64`, `linux/arm64` |
 | [`ghcr.io/docling-project/docling-rs`](https://github.com/docling-project/docling.rs/pkgs/container/docling-rs) | The `docling-rs` CLI with the same models baked in: batch conversion of local files without installing Rust (CPU). Entrypoint `docling-rs`, working directory `/data`. | `linux/amd64`, `linux/arm64` |
-| [`ghcr.io/docling-project/docling-rs-serve-cuda`](https://github.com/docling-project/docling.rs/pkgs/container/docling-rs-serve-cuda) | NVIDIA CUDA 12 GPU-accelerated HTTP conversion API (CUDA 12 + cuDNN 9, Linux x86_64). Explicit version tags (`v1.28.0`, `master`), no `:latest`. | `linux/amd64` |
-| [`ghcr.io/docling-project/docling-rs-cuda`](https://github.com/docling-project/docling.rs/pkgs/container/docling-rs-cuda) | NVIDIA CUDA 12 GPU-accelerated `docling-rs` CLI. Explicit version tags (`v1.28.0`, `master`), no `:latest`. | `linux/amd64` |
+| [`ghcr.io/docling-project/docling-rs-serve-cuda`](https://github.com/docling-project/docling.rs/pkgs/container/docling-rs-serve-cuda) | NVIDIA CUDA 13 GPU-accelerated HTTP conversion API (CUDA 13 + cuDNN 9, Linux x86_64). Explicit version tags (`v1.28.0`, `master`), no `:latest`. | `linux/amd64` |
+| [`ghcr.io/docling-project/docling-rs-cuda`](https://github.com/docling-project/docling.rs/pkgs/container/docling-rs-cuda) | NVIDIA CUDA 13 GPU-accelerated `docling-rs` CLI. Explicit version tags (`v1.28.0`, `master`), no `:latest`. | `linux/amd64` |
 > [!NOTE]
 > **Image Naming**: The `-rs` in `docling-rs-serve` / `docling-rs` differentiates this native Rust implementation from the Python `docling-project/docling-serve` image repository on GHCR. Both images are targets of the same [`Dockerfile`](../crates/docling-serve/Dockerfile) and share every layer but the final binary.
 
@@ -76,6 +76,20 @@ curl -F file=@document.pdf http://localhost:5001/v1/convert
 ```
 
 ---
+
+### A self-built CLI image (`examples/Dockerfile`)
+
+For a self-contained CLI image with models exported from PyTorch, [`examples/Dockerfile`](../examples/Dockerfile)
+is a 3-stage build that bakes the binary, native libs, and models into a slim runtime stage:
+
+```bash
+docker build -f examples/Dockerfile -t docling-rs .
+docker run --rm -v "$PWD:/data" docling-rs /data/input.pdf          # Markdown to stdout
+docker run --rm -v "$PWD:/data" docling-rs /data/input.pdf --to json
+```
+
+Both `linux/amd64` and `linux/arm64` build (#281) — everything in the image
+is arch-neutral or built from source.
 
 ## Deployment with Docker Compose
 
@@ -145,28 +159,55 @@ docker compose -f docker-compose.cuda.yml up -d
 ```
 
 ---
+## Installing without containers — `install.sh`
+
+`scripts/install/install.sh` installs a self-contained tree — for a dev box or
+a pipeline step:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/docling-project/docling.rs/master/scripts/install/install.sh | bash
+docling-rs your.pdf > out.md
+```
+
+It grabs the **prebuilt CLI binary** from the newest
+[GitHub Release](https://github.com/docling-project/docling.rs/releases) that carries one
+(Linux x64/arm64; `DOCLING_RS_FROM_SOURCE=1` opts out) and only falls back to
+building from source when no matching asset exists — in that case it checks
+for a Rust toolchain (installs one via rustup if `cargo` is missing) and runs
+`cargo build --release -p docling-cli`. Either way it installs the
+binary + all models under `/usr/local/docling.rs`, symlinks
+`/usr/local/bin/docling-rs`, and writes `/etc/profile.d/docling-rs.sh` with
+the `DOCLING_*` exports. The env file is a convenience for other
+consumers of the model tree — the CLI itself resolves `.models/`
+**relative to its own (symlink-resolved) location**, so the
+command works from any directory with no environment at all. ONNX Runtime is
+statically linked; nothing else lands outside the prefix.
+
+Knobs (env vars before the call): `DOCLING_RS_PREFIX` (default
+`/usr/local/docling.rs`), `DOCLING_RS_BIN_DIR`, `DOCLING_RS_REF` (git ref
+to build), `DOCLING_RS_NO_ASR=1` (skip the ~150 MB Whisper models),
+`DOCLING_RS_SUDO=0` (never escalate). Re-running is idempotent — it only
+fetches missing model files. Uninstall:
+`rm -rf /usr/local/docling.rs /usr/local/bin/docling-rs /etc/profile.d/docling-rs.sh`.
+
 ## Configuration & Environment Variables
 
 `docling-serve` is configured via CLI arguments and environment variables:
 
 ### CLI Arguments
 
-| Argument | Default | Description |
-|---|---|---|
-| `--addr HOST:PORT` | `127.0.0.1:5001` | Server bind address (`0.0.0.0:5001` inside container) |
-| `--concurrency N` | `2` | Max conversions processed in parallel; excess requests queue |
-| `--max-body-mb N` | `256` | Maximum request body size for uploads (MiB) |
-| `--queue-size N` | `16` | Maximum async jobs held in queue / unfetched before returning HTTP 429 |
-| `--result-ttl SECS` | `600` | Retention duration for finished async job results (seconds) |
-| `--max-memory-mb N` | auto | RSS ceiling for admission control (MB); 0 disables |
-| `--warmup` | off | Pre-load models at startup; `/ready` returns 503 until complete |
-| `--allow-url-fetch` | off | Enable `{"url": "..."}` inputs and remote fetching (SSRF protected) |
-| `--strict` | off | Default output to clean strict Markdown dialect |
+Every server flag, with its default, is in the serve README's
+[Server flags](../crates/docling-serve/README.md#server-flags) table. The
+published images run `docling-serve --addr 0.0.0.0:5001 --warmup`: bound to
+all interfaces inside the container, and `/ready` answers 503 until the
+PDF/image models have loaded (and stays 503, with the error, if loading fails).
 
 ### Environment Variables
 
 | Variable | Default | Purpose |
 |---|---|---|
+| `DOCLING_RS_SYSTEM_FONTS` | `0` in the images | PDF fallback fonts come only from `.models/fonts` + `DOCLING_RS_FONT_DIRS`, not the host's directories — the same layout input on every host (#633) |
+| `DOCLING_RS_FONT_DIRS` | the image's Liberation + DejaVu dirs | Font directories for fonts a PDF does not embed; extend it when you install a font for another script |
 | `DOCLING_RS_NO_ARENA` | `1` | Disables ONNX Runtime CPU arena to prevent RSS heap ratcheting (#263) |
 | `DOCLING_RS_MAX_MEMORY_MB` | `0` (or cgroup) | Memory ceiling for admission control in MiB |
 | `DOCLING_RS_MEMORY_WATERMARK_PCT` | `85` | Watermark % above which new requests get HTTP 503 Retry-After |
@@ -175,13 +216,13 @@ docker compose -f docker-compose.cuda.yml up -d
 | `DOCLING_RS_GRAPH_CACHE_DIR` | `$XDG_CACHE_HOME/docling-rs/graphs` (else `~/.cache/…`) | Where ONNX Runtime's optimized graphs are cached between processes (CPU provider only; session creation for the layout model ~0.8 s → ~0.15 s) |
 | `DOCLING_RS_NO_GRAPH_CACHE` | `0` | `1` disables the optimized-graph cache (models load and optimize from scratch every process) |
 | `DOCLING_RS_OCR_SESSIONS` | worker thread budget (1–8) | Parallel single-thread OCR recognition lanes per worker; output is byte-identical at any count |
+| `DOCLING_RS_ORT_PROFILE` | unset | A directory: every ONNX session writes ORT's per-operator profile there (`<model>_<timestamp>.json`, Chrome-trace format); `scripts/dev/ort_profile_summary.py` summarizes one |
 | `DOCLING_RS_MAX_RASTER_PAGES` | `100` | Max page count for `to=images` PDF page rasterization |
 | `DOCLING_RS_MAX_FETCH_BYTES` | `268435456` (256MB) | Max response size for remote URL fetching |
 | `DOCLING_RS_OCR_LANG` | `en` | Default OCR language (`en` or `ch` multilingual) |
 | `DOCLING_RS_OCR_MODE` | `default` | OCR region selection (`default`, `full_page`, `layout_regions`) |
 | `DOCLING_RS_FP32` | `0` | Force FP32 model precision instead of INT8 |
 | `DOCLING_RS_MODELS_DIR` | `.models` | Directory override for ONNX model weights |
-| `PDFIUM_DYNAMIC_LIB_PATH` | `/app/.pdfium/lib` | Path to dynamic `libpdfium.so` / `libpdfium.dylib` |
 | `DOCLING_FFMPEG` | `ffmpeg` | Path to `ffmpeg` binary for video frame extraction |
 | `RUST_LOG` | `info` | Logging verbosity (`error`, `warn`, `info`, `debug`, `trace`) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | OTLP/gRPC endpoint for distributed trace export (#297) |
@@ -192,7 +233,7 @@ docker compose -f docker-compose.cuda.yml up -d
 ## Resource Sizing & Performance Tuning
 
 1. **Memory Arena & Admission Control (#263)**:
-   By default, `DOCLING_RS_NO_ARENA=1` is enabled. Without this, ONNX Runtime's allocator retains mapped heap memory indefinitely. Combined with automatic `malloc_trim` calls, process memory drops ~3× after heavy PDF conversions.
+   By default, `DOCLING_RS_NO_ARENA=1` is enabled. Without this, ONNX Runtime's allocator retains mapped heap memory indefinitely. Combined with automatic `malloc_trim` calls, process memory drops ~3× after heavy PDF conversions. The server also pins glibc's mmap threshold at 4 MiB on startup (#669): glibc otherwise raises it each time a large buffer is freed, after which page bitmaps and tensors are carved from per-thread arenas and stay resident — measured, RSS crept 528 → 754 MB over six mixed PDF requests and now holds at ~590 MB, at the same latency. `GLIBC_TUNABLES=glibc.malloc.mmap_threshold=<bytes>` (or `MALLOC_MMAP_THRESHOLD_`) overrides the pinned value.
    Setting `DOCLING_RS_MAX_MEMORY_MB=4096` ensures the server sheds load with `503 + Retry-After` when under memory pressure, rather than being OOM-killed.
 
 2. **Concurrency (`--concurrency`)**:
@@ -213,13 +254,31 @@ The container image is fully self-contained by default. If you need to build a c
 docker build -f crates/docling-serve/Dockerfile --build-arg FETCH_ASSETS=0 -t docling-serve-slim .
 ```
 
+### Baking in more speech-recognition models (`ASR_MODELS`)
+
+The image always carries Whisper tiny, the default audio/video model. Named
+presets (`whisper_tiny_en`, `whisper_base_en`, `whisper_small_en`,
+`whisper_distil_small_en`, `parakeet_tdt_0.6b_v3`) are added with the
+`ASR_MODELS` build arg — space- or comma-separated `--asr-model` names of
+`download_dependencies.sh` — and picked per request with the `asr_model`
+option:
+
+```bash
+docker build -f crates/docling-serve/Dockerfile \
+  --build-arg ASR_MODELS="parakeet_tdt_0.6b_v3 whisper_small_en" -t docling-serve-asr .
+curl -F files=@interview_de.mp3 -F asr_model=parakeet_tdt_0.6b_v3 \
+  http://localhost:5001/v1/convert
+```
+
+Parakeet TDT 0.6B v3 adds ~670 MB (int8 encoder + decoder-joint + the Silero
+VAD).
+
 ### Running with Mounted Assets
 
 ```bash
 docker run -d \
   -p 5001:5001 \
   -v /host/path/.models:/app/.models:ro \
-  -v /host/path/.pdfium:/app/.pdfium:ro \
   docling-serve-slim
 ```
 
@@ -230,7 +289,7 @@ docker run -d \
 | Endpoint | Method | Description |
 |---|---|---|
 | `/health` | `GET` | Liveness probe: returns `{"status":"ok"}` immediately |
-| `/ready` | `GET` | Readiness probe: returns `200` once models are pre-warmed, `503` during startup |
+| `/ready` | `GET` | Readiness probe. With `--warmup`: `503 {"status":"warming_up"}` while the models load, then `200 {"status":"ready","models":"warm"}` — or `503 {"status":"warmup_failed","error":…}` if they cannot load. Without it: `200 {"status":"ready","models":"lazy"}` at once (models load on the first PDF/image request) |
 | `/v1/config` | `GET` | Server capabilities, active memory, and URL fetch status |
 | `/metrics` | `GET` | Prometheus metrics (request counters, latency histograms, active conversions) |
 | `/v1/convert` | `POST` | Synchronous conversion (multipart upload or JSON URL) |

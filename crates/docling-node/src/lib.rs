@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ErrorStrategy, ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
+use serde::Serialize;
 
 use docling::{
     ConversionStatus, DoclingDocument, DocumentConverter as RsConverter, ImageMode, InputFormat,
@@ -29,7 +30,7 @@ use docling::{
 
 /// Config for a reusable [`DocumentConverter`].
 #[napi(object)]
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct ConverterOptions {
     /// Named Whisper model preset for audio sources (English-only /
     /// Distil-Whisper variants under `.models/asr/<preset>/`).
@@ -42,12 +43,38 @@ pub struct ConverterOptions {
     /// (`"shift_jis"`, `"koi8-r"`, `"windows-1251"`). Unset = detect (BOM,
     /// UTF-8, then windows-1252); bytes it cannot decode fail the conversion.
     pub encoding: Option<String>,
+    /// Jupyter notebooks (#673): which cell outputs the document keeps —
+    /// `"none"` (default, the notebook as written) or `"text"` (stream and
+    /// `text/plain` results as code blocks after their cell, image outputs
+    /// as pictures).
+    pub ipynb_outputs: Option<String>,
     /// Max frames sampled from a video input as timestamped pictures (needs
     /// the ffmpeg binary at runtime; `0` = transcript only). Default 8.
+    /// `4294967295` (`2**32 - 1`, the largest value this field takes) keeps
+    /// every distinct cut (#647).
     pub video_frames: Option<u32>,
+    /// ffmpeg's scene score (0–1) a video frame must exceed to count as a
+    /// cut (#647). Default 0.27; 0.6 keeps hard cuts only.
+    pub video_scene_threshold: Option<f64>,
+    /// Downscale each sampled video frame inside ffmpeg so its longer side
+    /// is at most this many px (#647); `0` / unset = the source resolution.
+    pub video_frame_max_side: Option<u32>,
+    /// Drop a sampled video frame whose 64-bit difference hash is within
+    /// this Hamming distance (0–64) of a frame already kept (#647): the same
+    /// slide after a fade becomes one picture. Unset = keep every frame;
+    /// 4–6 is a good distance.
+    pub video_frame_dedupe: Option<u32>,
+    /// XBRL: the directory the instance's taxonomy is read from (docling's
+    /// `XBRLBackendOptions.taxonomy`); unset = the instance's own directory.
+    pub xbrl_taxonomy: Option<String>,
     /// Convert only this PDF page window: `"A-B"` or a single page `"N"`
     /// (1-based inclusive — issue #80). Other formats ignore it.
     pub pages: Option<String>,
+    /// Per-document budget in seconds for the PDF pipeline (docling's
+    /// `document_timeout`, #497); unset = unlimited. Checked between pages:
+    /// once spent, the pages done so far are the document, `status` is
+    /// `"partial_success"` and `errors` says why.
+    pub document_timeout: Option<f64>,
     /// OCR recognition language for scanned PDF/image pages: `"en"` (default;
     /// proper Latin word spacing) or `"ch"` (the multilingual
     /// docling-conformance model), or a BCP-47 tag for either language —
@@ -64,6 +91,18 @@ pub struct ConverterOptions {
     /// #254); unset reads the pipeline's own 2.0 px/pt render (docling's
     /// default is 3 = 216 dpi).
     pub ocr_scale: Option<f64>,
+    /// RapidOCR's text-line orientation handling (#666): oriented line
+    /// crops, tall lines turned 90°, upside-down lines turned by the 0/180
+    /// classifier (`.models/ocr_textline_ori.onnx`). Unset = off unless
+    /// `DOCLING_RS_OCR_TEXTLINE_ORIENTATION` is set.
+    pub ocr_textline_orientation: Option<bool>,
+    /// Picture crops (and page images) in px per PDF point — docling's
+    /// `images_scale` (#520), 0.1–4.0; unset keeps the pipeline's 2.0 px/pt
+    /// render. The JSON picture `dpi` is 72·scale (#519).
+    pub images_scale: Option<f64>,
+    /// Keep each page's render as the JSON `pages[n].image` — docling's
+    /// `generate_page_images` (#520). Default `false`.
+    pub page_images: Option<bool>,
     /// Which OCR engine reads scanned pages (#460): `"ppocr"` (default, the
     /// built-in PP-OCRv3 recognizer) | `"tesseract"` (the system `tesseract`
     /// binary). Under Tesseract `ocrLang` is its language list — tessdata
@@ -81,11 +120,28 @@ pub struct ConverterOptions {
     /// EBCDIC (#252): copybook layout as inline `EbcdicLayout` JSON or a
     /// file path; defaults to the `<stem>.layout.json` sidecar.
     pub ebcdic_layout: Option<String>,
-    /// Keep layout + TableFormer, never OCR (#244) — docling's independent
-    /// `do_ocr=False`. Structured output survives; text that exists only as
-    /// pixels (scanned pages, text inside images) comes back empty.
-    /// Default `false`.
+    /// Keep layout + TableFormer, never OCR — docling's `do_ocr=False`, its
+    /// CLI's `--no-ocr` (#244; since 2.0 the meaning of `noOcr`, #611).
+    /// Structured output survives; text that exists only as pixels (scanned
+    /// pages, text inside images) comes back empty. Default `false`.
+    pub no_ocr: Option<bool>,
+    /// `noOcr` under its pre-2.0 name, still read.
     pub skip_ocr: Option<bool>,
+    /// Skip the whole PDF ML stack and read the embedded text layer only —
+    /// the CLI's `--text-layer-only` (what `noOcr` meant before 2.0, #611).
+    /// Default `false`.
+    pub text_layer_only: Option<bool>,
+    /// The password of an encrypted PDF or Office document — .docx/.xlsx/
+    /// .pptx/.doc/.xls/.ppt (#611, #625).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    /// `password` under its pre-#625 name (docling's PDF-only
+    /// `--pdf-password`), still read; set one of the two.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pdf_password: Option<String>,
+    /// Skip TableFormer — tables come from the layout model's geometry
+    /// instead (the CLI's `--no-table-former`, #577). Default `false`.
+    pub no_table_former: Option<bool>,
     /// OCR every PDF page even when it carries an embedded text layer
     /// (docling's `force_full_page_ocr`) — for text layers that exist but lie.
     /// Default `false`.
@@ -115,6 +171,86 @@ pub struct ConverterOptions {
     /// of the formula placeholder comment. Same model and cost as
     /// `doCodeEnrichment`. Default `false`.
     pub do_formula_enrichment: Option<bool>,
+    /// OCR the pictures embedded in non-PDF documents — DOCX/PPTX
+    /// screenshots, HTML figures, sampled video frames — with the pipeline's
+    /// OCR models and attach the text to the picture as docling's description
+    /// annotation (#645): Markdown prints it between the caption and the
+    /// image placeholder, the JSON picture item carries `meta.description` +
+    /// the `description` annotation, chunks include it. Needs the OCR models
+    /// (`.models/ocr_rec*`, `ocr_det.onnx`; or Tesseract under `ocrEngine`);
+    /// with `skipOcr` / `textLayerOnly` it warns and reads nothing. PDF/image
+    /// pages are OCR'd by the pipeline itself. Default `false`.
+    pub do_picture_ocr: Option<bool>,
+    /// With `doPictureOcr`: only read the pictures the DocumentFigureClassifier
+    /// labels as one of these comma-separated classes
+    /// (`"screenshot_from_computer,screenshot_from_manual"`); unset = every
+    /// picture. Needs `.models/picture_classifier.onnx`.
+    pub picture_ocr_classes: Option<String>,
+    /// With `doPictureOcr`: skip pictures whose smaller side is under this
+    /// many pixels (icons, bullets). Default 32
+    /// (`DOCLING_RS_PICTURE_OCR_MIN_SIDE`).
+    pub picture_ocr_min_side: Option<u32>,
+    /// The picture OCR's resolution in px per picture pixel under
+    /// RapidOCR's 2000 px cap (#666): `1.0` reads pictures at their native
+    /// pixels; unset keeps the image-input rule.
+    pub picture_ocr_scale: Option<f64>,
+    /// `false` drops the embedded image bytes from every picture after the
+    /// enrichment pass (#645): slim JSON/DCLX, placeholder-only Markdown, the
+    /// OCR text kept. Default `true`.
+    pub keep_picture_images: Option<bool>,
+    /// Describe every picture — the embedded pictures of DOCX/PPTX/XLSX/
+    /// HTML, a PDF's figures, video frames, an image input as a whole —
+    /// through an OpenAI-compatible vision endpoint (#670); the answer is the
+    /// picture's description annotation, where `doPictureOcr` puts its text.
+    /// `pictureOcrMinSide` / `pictureOcrClasses` select the pictures here
+    /// too; identical images are sent once; an endpoint error warns and the
+    /// conversion goes on. Default `false`.
+    pub do_picture_description: Option<bool>,
+    /// The vision endpoint (`/v1` base or the full `chat/completions` URL);
+    /// falls back to `vlmEndpoint`, then `$DOCLING_RS_VLM_ENDPOINT`.
+    pub picture_description_endpoint: Option<String>,
+    /// Model name; falls back to `vlmModel`, then `$DOCLING_RS_VLM_MODEL`.
+    pub picture_description_model: Option<String>,
+    /// Bearer token; falls back to `vlmApiKey`, then `$DOCLING_RS_VLM_API_KEY`.
+    pub picture_description_api_key: Option<String>,
+    /// The instruction sent with every picture; unset = the mode's prompt.
+    pub picture_description_prompt: Option<String>,
+    /// `"caption"` (default; MarkItDown's caption prompt) | `"ocr"`
+    /// (markitdown-ocr's text-extraction prompt).
+    pub picture_description_mode: Option<String>,
+    /// Pictures in flight at once (default 1).
+    pub picture_description_concurrency: Option<u32>,
+    /// Redact personal data from the converted document before any export
+    /// (#621): e-mail, phone, card numbers (Luhn), IBANs (mod-97), IP
+    /// addresses, URL credentials, national IDs, and — with the NER model
+    /// under `.models/ner/` — names, organizations and locations; every
+    /// string of the document model is rewritten, so Markdown, JSON, DCLX
+    /// and chunks all come out clean. The result's `redaction` carries the
+    /// counts per label. A docling.rs extension; default `false`.
+    pub redact_pii: Option<bool>,
+    /// `"label"` (default: `[EMAIL]`) | `"pseudonym"` (`[EMAIL_1]`, one
+    /// number per distinct value) | `"fixed:<text>"`.
+    pub redact_mode: Option<String>,
+    /// Comma-separated kinds to redact (`"email,phone,credit_card,iban,
+    /// ip_address,url_credentials,national_id,person,organization,location,
+    /// address"`); unset = every kind.
+    pub redact_kinds: Option<String>,
+    /// Extra patterns as `NAME=REGEX` lines (newline-separated); the match
+    /// (or capture group 1) is redacted as `[NAME]`.
+    pub redact_pattern: Option<String>,
+    /// Embedded images and page renders: `"drop"` (default) | `"box_out"`
+    /// (OCR and paint over the lines carrying a value) | `"keep"`.
+    pub redact_images: Option<String>,
+    /// With `redactPii` (#694): comma-separated terms never redacted even
+    /// when a detector flags them.
+    pub redact_allow_terms: Option<String>,
+    /// Comma-separated terms always redacted, as `[REDACTED]`.
+    pub redact_deny_terms: Option<String>,
+    /// Regexes, one per line, a flagged span must not match in full to be
+    /// redacted — the document's own part numbers and record IDs.
+    pub redact_allow_patterns: Option<String>,
+    /// The NER detector's minimum confidence, 0–1 (default 0.85).
+    pub redact_ner_min_score: Option<f64>,
     /// `"standard"` (default) or `"vlm"` (#77): replace the whole ONNX stack —
     /// layout, OCR, TableFormer — with a remote OpenAI-compatible vision
     /// endpoint, which converts each rendered page on its own. PDF and image
@@ -156,7 +292,31 @@ pub struct ConverterOptions {
     /// files, http(s) URLs, EPUB/MHTML archive parts, JATS `<graphic>` files)
     /// and embed the bytes. Off by default; when on,
     /// http(s) URLs are fetched over the network — enable only for trusted input.
+    /// The alias of `imageSources: "remote"` (#646).
     pub fetch_images: Option<bool>,
+    /// Which image references resolve (#646): `"none"` (default — every
+    /// picture a placeholder), `"embedded"` (`data:` URIs and parts of the
+    /// same container: EPUB/MHTML entries, an email's `cid:` attachments —
+    /// no filesystem, no network), `"local"` (plus files under the source
+    /// file's directory, never an absolute path or one that escapes it),
+    /// `"remote"` (plus http(s) fetches). HTML, EPUB, MHTML, JATS, AsciiDoc,
+    /// ODF, Markdown and email bodies.
+    pub image_sources: Option<String>,
+    /// Hosts a `"remote"` image fetch may reach (#646): exact names or
+    /// `*.suffix` wildcards; redirects are held to the same list. Unset =
+    /// any host.
+    pub image_hosts: Option<Vec<String>>,
+    /// Largest image that resolves, in bytes (#646; default 32 MiB).
+    pub max_image_bytes: Option<f64>,
+    /// Images resolved per document; the rest stay placeholders (#646;
+    /// default unlimited).
+    pub max_images: Option<u32>,
+    /// Total resolved image bytes per document, in MiB (#646; default
+    /// unlimited).
+    pub max_image_total_mb: Option<u32>,
+    /// Smallest image that resolves, in bytes — skips spacer / tracking
+    /// pixels (#646; default 0).
+    pub min_image_bytes: Option<u32>,
     /// Restrict the converter to these formats (ids like `"md"`, `"pdf"`, or
     /// extensions like `".html"`); anything else is rejected. Default: accept all.
     pub allowed_formats: Option<Vec<String>>,
@@ -167,11 +327,19 @@ pub struct ConverterOptions {
 #[derive(Clone, Default)]
 pub struct OutputOptions {
     /// `"markdown"` (default), `"json"` (docling-core DoclingDocument wire
-    /// format) or `"latex"` (a complete LaTeX document, #317).
+    /// format), `"text"` (plain text, docling's `export_to_text`, #613),
+    /// `"latex"` (a complete LaTeX document, #317), `"html"` (a
+    /// complete HTML document, docling-core's `HTMLDocSerializer`, #492 —
+    /// pictures follow `imageMode` like Markdown) or `"pandoc"` (Pandoc's
+    /// JSON AST for `pandoc -f json`, #515 — pictures follow `imageMode`) or
+    /// `"vtt"` (WebVTT subtitles, docling's `--to vtt`, #614: a cue per timed
+    /// text item — an audio/video transcript's segments, a `.vtt` input's
+    /// cues).
     pub to: Option<String>,
-    /// Picture handling for Markdown: `"placeholder"` (default), `"embedded"`
-    /// (base64 data URIs inline), or `"referenced"` (returns image files in
-    /// `images`). Ignored for JSON, which always embeds images as data URIs.
+    /// Picture handling for Markdown: `"placeholder"` (default; `"embedded"`
+    /// for `to: "pandoc"`, #537), `"embedded"` (base64 data URIs inline), or
+    /// `"referenced"` (returns image files in `images`). Ignored for JSON,
+    /// which always embeds images as data URIs.
     pub image_mode: Option<String>,
     /// Directory name used in `referenced` image links. Default `"artifacts"`.
     pub artifacts_dir: Option<String>,
@@ -187,10 +355,22 @@ pub struct OutputOptions {
 /// All options for the one-shot module-level functions (converter config +
 /// output options in a single object).
 #[napi(object)]
-#[derive(Clone, Default)]
+#[derive(Serialize, Clone, Default)]
 pub struct ConvertOptions {
     pub strict: Option<bool>,
     pub fetch_images: Option<bool>,
+    /// Image-source tier (#646): `"none"` | `"embedded"` | `"local"` | `"remote"`.
+    pub image_sources: Option<String>,
+    /// Remote image host allow-list (#646).
+    pub image_hosts: Option<Vec<String>>,
+    /// Largest image that resolves, in bytes (#646).
+    pub max_image_bytes: Option<f64>,
+    /// Images resolved per document (#646).
+    pub max_images: Option<u32>,
+    /// Total resolved image bytes per document, in MiB (#646).
+    pub max_image_total_mb: Option<u32>,
+    /// Smallest image that resolves, in bytes (#646).
+    pub min_image_bytes: Option<u32>,
     /// Named Whisper model preset for audio sources.
     pub asr_model: Option<String>,
     /// ASR transcription language for audio/video: a Whisper code (`"en"`,
@@ -199,10 +379,28 @@ pub struct ConvertOptions {
     /// Character encoding of text inputs (docling's
     /// `TextBackendOptions.encoding`); unset = detect.
     pub encoding: Option<String>,
-    /// Max frames sampled from a video input (`0` = transcript only).
+    /// Jupyter notebooks (#673): which cell outputs the document keeps —
+    /// `"none"` (default, the notebook as written) or `"text"` (stream and
+    /// `text/plain` results as code blocks after their cell, image outputs
+    /// as pictures).
+    pub ipynb_outputs: Option<String>,
+    /// Max frames sampled from a video input (`0` = transcript only;
+    /// `4294967295` = every distinct cut, #647).
     pub video_frames: Option<u32>,
+    /// Scene score (0–1) a video frame must exceed to be a cut (#647).
+    pub video_scene_threshold: Option<f64>,
+    /// Cap on a sampled video frame's longer side in px (#647).
+    pub video_frame_max_side: Option<u32>,
+    /// Difference-hash distance (0–64) under which a sampled video frame is
+    /// a duplicate and dropped (#647).
+    pub video_frame_dedupe: Option<u32>,
+    /// XBRL taxonomy directory (docling's `XBRLBackendOptions.taxonomy`).
+    pub xbrl_taxonomy: Option<String>,
     /// PDF page window `"A-B"` (or `"N"`), 1-based inclusive (#80).
     pub pages: Option<String>,
+    /// Per-document budget in seconds (docling's `document_timeout`, #497);
+    /// see `ConverterOptions.documentTimeout`.
+    pub document_timeout: Option<f64>,
     /// OCR recognition language for scanned pages: `"en"` (default) | `"ch"`,
     /// or a BCP-47 tag for either (`"en-US"`, `"zh-Hans"`, #388).
     pub ocr_lang: Option<String>,
@@ -212,6 +410,16 @@ pub struct ConvertOptions {
     /// OCR render scale in px per PDF point (docling's `OcrOptions.scale`,
     /// #254); unset reads the pipeline's own 2.0 px/pt render.
     pub ocr_scale: Option<f64>,
+    /// RapidOCR's text-line orientation handling (#666). See
+    /// [`ConverterOptions`].
+    pub ocr_textline_orientation: Option<bool>,
+    /// Picture crops (and page images) in px per PDF point — docling's
+    /// `images_scale` (#520), 0.1–4.0; unset keeps the pipeline's 2.0 px/pt
+    /// render. The JSON picture `dpi` is 72·scale (#519).
+    pub images_scale: Option<f64>,
+    /// Keep each page's render as the JSON `pages[n].image` — docling's
+    /// `generate_page_images` (#520). Default `false`.
+    pub page_images: Option<bool>,
     /// Which OCR engine reads scanned pages (#460): `"ppocr"` (default) |
     /// `"tesseract"`.
     pub ocr_engine: Option<String>,
@@ -226,11 +434,28 @@ pub struct ConvertOptions {
     /// EBCDIC (#252): copybook layout as inline `EbcdicLayout` JSON or a
     /// file path; defaults to the `<stem>.layout.json` sidecar.
     pub ebcdic_layout: Option<String>,
-    /// Keep layout + TableFormer, never OCR (#244) — docling's independent
-    /// `do_ocr=False`. Structured output survives; text that exists only as
-    /// pixels (scanned pages, text inside images) comes back empty.
-    /// Default `false`.
+    /// Keep layout + TableFormer, never OCR — docling's `do_ocr=False`, its
+    /// CLI's `--no-ocr` (#244; since 2.0 the meaning of `noOcr`, #611).
+    /// Structured output survives; text that exists only as pixels (scanned
+    /// pages, text inside images) comes back empty. Default `false`.
+    pub no_ocr: Option<bool>,
+    /// `noOcr` under its pre-2.0 name, still read.
     pub skip_ocr: Option<bool>,
+    /// Skip the whole PDF ML stack and read the embedded text layer only —
+    /// the CLI's `--text-layer-only` (what `noOcr` meant before 2.0, #611).
+    /// Default `false`.
+    pub text_layer_only: Option<bool>,
+    /// The password of an encrypted PDF or Office document — .docx/.xlsx/
+    /// .pptx/.doc/.xls/.ppt (#611, #625).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    /// `password` under its pre-#625 name (docling's PDF-only
+    /// `--pdf-password`), still read; set one of the two.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pdf_password: Option<String>,
+    /// Skip TableFormer — tables come from the layout model's geometry
+    /// instead (the CLI's `--no-table-former`, #577). Default `false`.
+    pub no_table_former: Option<bool>,
     /// OCR every PDF page even when it carries a text layer (docling's
     /// `force_full_page_ocr`). Default `false`.
     pub force_full_page_ocr: Option<bool>,
@@ -245,6 +470,51 @@ pub struct ConvertOptions {
     pub do_picture_classification: Option<bool>,
     pub do_code_enrichment: Option<bool>,
     pub do_formula_enrichment: Option<bool>,
+    /// Picture OCR for non-PDF documents (#645) and its filters. See
+    /// [`ConverterOptions`]. Defaults `false` / unset / 32 / `true`.
+    pub do_picture_ocr: Option<bool>,
+    pub picture_ocr_classes: Option<String>,
+    pub picture_ocr_min_side: Option<u32>,
+    pub picture_ocr_scale: Option<f64>,
+    pub keep_picture_images: Option<bool>,
+    /// Describe every picture — the embedded pictures of DOCX/PPTX/XLSX/
+    /// HTML, a PDF's figures, video frames, an image input as a whole —
+    /// through an OpenAI-compatible vision endpoint (#670); the answer is the
+    /// picture's description annotation, where `doPictureOcr` puts its text.
+    /// `pictureOcrMinSide` / `pictureOcrClasses` select the pictures here
+    /// too; identical images are sent once; an endpoint error warns and the
+    /// conversion goes on. Default `false`.
+    pub do_picture_description: Option<bool>,
+    /// The vision endpoint (`/v1` base or the full `chat/completions` URL);
+    /// falls back to `vlmEndpoint`, then `$DOCLING_RS_VLM_ENDPOINT`.
+    pub picture_description_endpoint: Option<String>,
+    /// Model name; falls back to `vlmModel`, then `$DOCLING_RS_VLM_MODEL`.
+    pub picture_description_model: Option<String>,
+    /// Bearer token; falls back to `vlmApiKey`, then `$DOCLING_RS_VLM_API_KEY`.
+    pub picture_description_api_key: Option<String>,
+    /// The instruction sent with every picture; unset = the mode's prompt.
+    pub picture_description_prompt: Option<String>,
+    /// `"caption"` (default; MarkItDown's caption prompt) | `"ocr"`
+    /// (markitdown-ocr's text-extraction prompt).
+    pub picture_description_mode: Option<String>,
+    /// Pictures in flight at once (default 1).
+    pub picture_description_concurrency: Option<u32>,
+    /// PII redaction (#621) and its settings. See [`ConverterOptions`].
+    pub redact_pii: Option<bool>,
+    pub redact_mode: Option<String>,
+    pub redact_kinds: Option<String>,
+    pub redact_pattern: Option<String>,
+    pub redact_images: Option<String>,
+    /// With `redactPii` (#694): comma-separated terms never redacted even
+    /// when a detector flags them.
+    pub redact_allow_terms: Option<String>,
+    /// Comma-separated terms always redacted, as `[REDACTED]`.
+    pub redact_deny_terms: Option<String>,
+    /// Regexes, one per line, a flagged span must not match in full to be
+    /// redacted — the document's own part numbers and record IDs.
+    pub redact_allow_patterns: Option<String>,
+    /// The NER detector's minimum confidence, 0–1 (default 0.85).
+    pub redact_ner_min_score: Option<f64>,
     /// `"standard"` (default) or `"vlm"` (#77): convert PDF/image pages
     /// through a remote OpenAI-compatible vision endpoint instead of the ONNX
     /// stack. The `vlm_*` options below take effect only under `"vlm"` and are
@@ -306,6 +576,72 @@ pub struct ConvertResult {
     /// For the `referenced` image mode, the image files to write next to the
     /// Markdown; empty otherwise.
     pub images: Vec<ImageArtifact>,
+    /// The problems the conversion survived — docling's
+    /// `ConversionResult.errors`; non-empty exactly when `status` is
+    /// `"partial_success"` (today: a spent `documentTimeout`, #497).
+    pub errors: Vec<ConversionErrorItem>,
+    /// What the PII pass redacted (#621) when `redactPii` was on: counts
+    /// per label (`{ EMAIL: 2, PHONE: 1 }`); absent otherwise.
+    pub redaction: Option<std::collections::HashMap<String, u32>>,
+}
+
+/// docling's `ErrorItem`: one recorded problem of a conversion that still
+/// produced a document.
+#[napi(object)]
+pub struct ConversionErrorItem {
+    /// `"document_backend"`, `"model"`, `"doc_assembler"`, `"user_input"`.
+    pub component_type: String,
+    /// The stage that recorded it (`"pipeline"` for the document budget).
+    pub module_name: String,
+    pub error_message: String,
+}
+
+fn error_items(errors: Vec<docling::ErrorItem>) -> Vec<ConversionErrorItem> {
+    errors
+        .into_iter()
+        .map(|e| ConversionErrorItem {
+            component_type: e.component_type,
+            module_name: e.module_name,
+            error_message: e.error_message,
+        })
+        .collect()
+}
+
+/// One entry of a ZIP archive converted by [`convert_archive`] /
+/// [`convert_archive_file`] (#557): its path inside the archive and what
+/// became of it.
+#[napi(object)]
+pub struct ArchiveItem {
+    /// The entry's path inside the archive (`/`-separated).
+    pub path: String,
+    /// `"converted"` (`result` is set), `"skipped"` (`error` says why:
+    /// unsupported type, nested archive, unsafe path, over a
+    /// `DOCLING_RS_ZIP_MAX_*` limit) or `"failed"` (`error` is the
+    /// conversion error; the other entries are unaffected).
+    pub outcome: String,
+    pub result: Option<ConvertResult>,
+    pub error: Option<String>,
+}
+
+/// Send-safe [`ArchiveItem`], produced off the JS thread. Public only as a
+/// [`Task`] output; not exposed to JS.
+#[doc(hidden)]
+pub struct RawArchiveItem {
+    path: String,
+    outcome: &'static str,
+    result: Option<RawResult>,
+    error: Option<String>,
+}
+
+impl RawArchiveItem {
+    fn into_js(self) -> ArchiveItem {
+        ArchiveItem {
+            path: self.path,
+            outcome: self.outcome.to_string(),
+            result: self.result.map(RawResult::into_js),
+            error: self.error,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -315,27 +651,9 @@ pub struct ConvertResult {
 /// Fully-resolved conversion config, free of any napi/JS types so it can move
 /// onto a worker thread for the async and streaming paths.
 struct ConvertConfig {
-    strict: bool,
-    fetch_images: bool,
-    asr_model: Option<String>,
-    asr_lang: Option<String>,
-    encoding: Option<String>,
-    video_frames: Option<usize>,
-    page_range: Option<(usize, usize)>,
-    ocr_lang: Option<String>,
-    ocr_mode: Option<String>,
-    ocr_engine: Option<String>,
-    ocr_scale: Option<f32>,
-    list_attachments: bool,
-    skip_empty_cells: bool,
-    compact_tables: bool,
-    ebcdic_layout: Option<String>,
-    skip_ocr: bool,
-    force_full_page_ocr: bool,
-    no_text_panels: bool,
-    heading_hierarchy: bool,
-    /// Opt-in enrichment passes (#423), all off by default.
-    enrich: docling::EnrichmentOptions,
+    /// The shared conversion options (#577), validated on the way in — the
+    /// `DocumentConverter` is built from them by the library's own mapping.
+    opts: docling::ConvertOptions,
     /// `Some` only for `pipeline: "vlm"` (#77), already resolved against the
     /// `DOCLING_RS_VLM_*` environment. Its presence *is* the pipeline switch:
     /// [`run_convert`] short-circuits the whole ML stack when it is set.
@@ -344,7 +662,9 @@ struct ConvertConfig {
     to: OutputKind,
     image_mode: ImageMode,
     artifacts_dir: String,
-    /// docling's `page_break_placeholder` for the Markdown export.
+    /// docling's `page_break_placeholder` for the Markdown export (an
+    /// *output* option on this surface — `OutputOptions` — so it overrides
+    /// whatever the converter options carry).
     page_break_placeholder: Option<String>,
 }
 
@@ -354,6 +674,16 @@ enum OutputKind {
     Json,
     /// A complete LaTeX document (docling 2.124's `--to latex`, #317).
     Latex,
+    /// Plain text (docling's `--to text`, `export_to_text`, #613).
+    Text,
+    /// WebVTT subtitles (docling's `--to vtt`, #614).
+    Vtt,
+    /// A complete HTML document (docling-core's `HTMLDocSerializer`, #492);
+    /// pictures follow `imageMode` like the Markdown export.
+    Html,
+    /// Pandoc's JSON AST (#515), for `pandoc -f json`; pictures follow
+    /// `imageMode` like the Markdown export.
+    Pandoc,
 }
 
 /// A Send-safe conversion result (raw bytes, no `Buffer`), so it can be produced
@@ -366,6 +696,8 @@ pub struct RawResult {
     status: String,
     input_name: String,
     images: Vec<(String, Vec<u8>)>,
+    errors: Vec<docling::ErrorItem>,
+    redaction: Option<docling::RedactionReport>,
 }
 
 impl RawResult {
@@ -375,6 +707,10 @@ impl RawResult {
             format: self.format,
             status: self.status,
             input_name: self.input_name,
+            errors: error_items(self.errors),
+            redaction: self
+                .redaction
+                .map(|r| r.counts.into_iter().map(|(k, v)| (k, v as u32)).collect()),
             images: self
                 .images
                 .into_iter()
@@ -387,8 +723,46 @@ impl RawResult {
     }
 }
 
+/// The shared option set (#577) read off a napi options object: serde
+/// serializes the Rust fields — snake_case, the wire names — and the keys
+/// `docling::ConvertOptions` lacks (`to`, `imageMode`, `allowedFormats`, …)
+/// are this surface's own and left behind. One mapping for the one-shot
+/// options, the `DocumentConverter` class and the warm `Pipeline`.
+fn shared_options<T: Serialize>(o: &T) -> Result<docling::ConvertOptions> {
+    serde_json::to_value(o)
+        .and_then(serde_json::from_value)
+        .map_err(|e| Error::new(Status::InvalidArg, e.to_string()))
+}
+
+/// A rejected option as this surface's error: `InvalidArg` (a bad call, not
+/// a conversion that went wrong), the option named as TypeScript spells it
+/// (`ocrLang`, `documentTimeout`, `vlmEndpoint`).
+fn option_err(e: docling::OptionsError) -> Error {
+    Error::new(
+        Status::InvalidArg,
+        e.message.replacen(e.field, &camel_case(e.field), 1),
+    )
+}
+
+/// `ocr_lang` → `ocrLang`: napi's rename of the option fields.
+fn camel_case(snake: &str) -> String {
+    let mut out = String::with_capacity(snake.len());
+    let mut upper = false;
+    for c in snake.chars() {
+        if c == '_' {
+            upper = true;
+        } else if upper {
+            out.extend(c.to_uppercase());
+            upper = false;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn build_config(o: ConvertOptions) -> Result<ConvertConfig> {
-    let allowed = match o.allowed_formats {
+    let allowed = match &o.allowed_formats {
         Some(list) => Some(
             list.iter()
                 .map(|s| parse_format(s))
@@ -396,244 +770,38 @@ fn build_config(o: ConvertOptions) -> Result<ConvertConfig> {
         ),
         None => None,
     };
-    let page_range = parse_pages(o.pages.as_deref())?;
+    let opts = shared_options(&o)?;
+    // Validated at option-parsing time, not at conversion time, so a bad
+    // option fails fast on the call instead of after a file has been read —
+    // and `pipeline: "vlm"` resolves its endpoint/model now for the same
+    // reason (the standard pipeline ignores stray `vlm*` options, the CLI's
+    // rule too; pinned by `standard_pipeline_ignores_vlm_options`).
+    opts.validate().map_err(option_err)?;
+    let vlm = opts.vlm_options().map_err(option_err)?;
+    let to = parse_output_kind(o.to.as_deref())?;
     Ok(ConvertConfig {
-        strict: o.strict.unwrap_or(false),
-        fetch_images: o.fetch_images.unwrap_or(false),
-        asr_model: o.asr_model,
-        asr_lang: o.asr_lang,
-        encoding: o.encoding,
-        video_frames: o.video_frames.map(|n| n as usize),
-        page_range,
-        ocr_lang: parse_ocr_lang(o.ocr_lang, o.ocr_engine.as_deref())?,
-        ocr_mode: parse_ocr_mode(o.ocr_mode)?,
-        ocr_engine: parse_ocr_engine(o.ocr_engine)?,
-        ocr_scale: parse_ocr_scale(o.ocr_scale)?,
-        list_attachments: o.list_attachments.unwrap_or(false),
-        skip_empty_cells: o.skip_empty_cells.unwrap_or(false),
-        compact_tables: o.compact_tables.unwrap_or(false),
-        ebcdic_layout: o.ebcdic_layout,
-        skip_ocr: o.skip_ocr.unwrap_or(false),
-        force_full_page_ocr: o.force_full_page_ocr.unwrap_or(false),
-        no_text_panels: o.no_text_panels.unwrap_or(false),
-        heading_hierarchy: o.heading_hierarchy.unwrap_or(false),
-        enrich: enrichments(
-            o.do_picture_classification,
-            o.do_code_enrichment,
-            o.do_formula_enrichment,
-        ),
-        vlm: resolve_vlm(
-            o.pipeline.as_deref(),
-            o.vlm_endpoint,
-            o.vlm_model,
-            o.vlm_api_key,
-            o.vlm_prompt,
-            o.vlm_max_tokens,
-            page_range,
-        )?,
+        opts,
+        vlm,
         allowed_formats: allowed,
-        to: parse_output_kind(o.to.as_deref())?,
-        image_mode: parse_image_mode(o.image_mode.as_deref())?,
+        to,
+        image_mode: parse_image_mode(o.image_mode.as_deref(), to)?,
         artifacts_dir: o.artifacts_dir.unwrap_or_else(|| "artifacts".to_string()),
         page_break_placeholder: o.page_break_placeholder,
     })
 }
 
-/// Resolve the `pipeline` selection into the VLM options the conversion needs
-/// (#77), or `None` for the standard ONNX pipeline.
-///
-/// [`docling::vlm::VlmOptions::resolve`] does the endpoint/model fallback onto
-/// `DOCLING_RS_VLM_ENDPOINT` / `_MODEL` and reads `_PROMPT` / `_API_KEY` itself,
-/// so going through it — rather than building the struct field by field — is
-/// what makes the environment behave identically from Node and from the CLI.
-/// The explicit options then override whatever the environment supplied.
-///
-/// Resolution happens at option-parsing time, not at conversion time, so a
-/// missing endpoint fails fast on the call (or on the `DocumentConverter`
-/// constructor) instead of after a file has been read.
-///
-/// The standard branch drops the `vlm_*` arguments instead of rejecting them:
-/// an option configures the VLM, only `pipeline` selects it, and that is one
-/// rule shared with the CLI — which parses `--vlm-endpoint` / `--vlm-model`
-/// and ignores them without `--pipeline vlm`. Pinned by
-/// `standard_pipeline_ignores_vlm_options` below and by the Node-side smoke
-/// check, so the ignore stays a decision rather than resurfacing as a bug.
-/// The three enrichment switches as the engine's option set (#423); unset
-/// and `false` both mean off.
-fn enrichments(
-    picture_classification: Option<bool>,
-    code: Option<bool>,
-    formula: Option<bool>,
-) -> docling::EnrichmentOptions {
-    docling::EnrichmentOptions {
-        picture_classification: picture_classification.unwrap_or(false),
-        code: code.unwrap_or(false),
-        formula: formula.unwrap_or(false),
-    }
-}
-
-fn resolve_vlm(
-    pipeline: Option<&str>,
-    endpoint: Option<String>,
-    model: Option<String>,
-    api_key: Option<String>,
-    prompt: Option<String>,
-    max_tokens: Option<u32>,
-    page_range: Option<(usize, usize)>,
-) -> Result<Option<docling::vlm::VlmOptions>> {
-    // An empty string counts as unset, the way `docling_core::env::nonempty`
-    // treats the variables these options fall back to. `vlmEndpoint:
-    // process.env.VLM_URL ?? ''` is an easy shape to write, and it must reach
-    // the env fallback rather than resolve to an empty endpoint.
-    let set = |s: Option<String>| s.filter(|v| !v.trim().is_empty());
-    match pipeline {
-        // Intentionally without inspecting the `vlm_*` arguments: see above.
-        None | Some("standard") => Ok(None),
-        Some("vlm") => {
-            let (endpoint, model) = (set(endpoint), set(model));
-            let (api_key, prompt) = (set(api_key), set(prompt));
-            let mut v = docling::vlm::VlmOptions::resolve(endpoint, model).map_err(|e| {
-                // InvalidArg, not GenericFailure: a missing endpoint/model is a
-                // bad call, not a conversion that went wrong.
-                Error::new(Status::InvalidArg, e.to_string())
-            })?;
-            if prompt.is_some() {
-                v.prompt = prompt;
-            }
-            if api_key.is_some() {
-                v.api_key = api_key;
-            }
-            // Validated like `ocrScale`: 0 would have every page come back
-            // empty and surface as "the model's responses contained no
-            // parseable DocLang" — a message pointing at the model, not at the
-            // option. (napi applies JS ToUint32, so a negative number arrives
-            // here as a huge one; the server rejects that on its own terms.)
-            match max_tokens {
-                Some(0) => {
-                    return Err(Error::new(
-                        Status::InvalidArg,
-                        "vlmMaxTokens must be greater than 0",
-                    ))
-                }
-                Some(n) => v.max_tokens = n as usize,
-                None => {}
-            }
-            // `pages` composes with the VLM exactly as with the ML pipeline —
-            // only the selected pages are rendered and sent.
-            v.page_range = page_range;
-            Ok(Some(v))
-        }
-        Some(other) => Err(Error::new(
-            Status::InvalidArg,
-            format!("unknown pipeline '{other}' (expected: standard, vlm)"),
-        )),
-    }
-}
-
-/// Validate an `ocrLang` option against the engine it will drive (#388,
-/// #460): `"en"`/`"ch"` or a BCP-47 tag for English / Chinese under PP-OCR,
-/// tessdata stems or BCP-47 tags under Tesseract; an unknown language is an
-/// error.
-fn parse_ocr_lang(s: Option<String>, engine: Option<&str>) -> Result<Option<String>> {
-    let Some(v) = s else {
-        return Ok(None);
-    };
-    let engine = engine
-        .and_then(docling::OcrEngine::parse)
-        .unwrap_or_else(docling::OcrEngine::from_env);
-    engine
-        .validate_lang(&v)
-        .map(|()| Some(v))
-        .map_err(|e| Error::from_reason(format!("ocrLang: {e}")))
-}
-
-/// Validate an `ocrEngine` option (#460); an unknown id is an error.
-fn parse_ocr_engine(s: Option<String>) -> Result<Option<String>> {
-    match s {
-        Some(v) if docling::OcrEngine::parse(&v).is_some() => Ok(Some(v)),
-        Some(v) => Err(Error::from_reason(format!(
-            "ocrEngine {v:?} is not {}",
-            docling::OcrEngine::ACCEPTED
-        ))),
-        None => Ok(None),
-    }
-}
-
-/// Validate an `ocrMode` option (#254); an unknown id is an error.
-fn parse_ocr_mode(s: Option<String>) -> Result<Option<String>> {
-    match s {
-        Some(v) if docling::OcrMode::parse(&v).is_some() => Ok(Some(v)),
-        Some(v) => Err(Error::from_reason(format!(
-            "ocrMode {v:?} is not default|full_page|layout_regions|pdf_aware_layout_regions"
-        ))),
-        None => Ok(None),
-    }
-}
-
-/// Validate an `ocrScale` option (#254); non-positive values are an error.
-fn parse_ocr_scale(s: Option<f64>) -> Result<Option<f32>> {
-    match s {
-        Some(v) if v.is_finite() && v > 0.0 => Ok(Some(v as f32)),
-        Some(v) => Err(Error::from_reason(format!(
-            "ocrScale must be a positive number, got {v}"
-        ))),
-        None => Ok(None),
-    }
-}
-
-/// `"A-B"` / `"N"` → the converter's 1-based inclusive page window (#80).
-fn parse_pages(s: Option<&str>) -> Result<Option<(usize, usize)>> {
-    s.map(|v| docling::parse_page_range(v).map_err(|e| Error::from_reason(format!("pages: {e}"))))
-        .transpose()
-}
-
-fn build_converter(cfg: &ConvertConfig) -> RsConverter {
+fn build_converter(cfg: &ConvertConfig) -> Result<RsConverter> {
     let base = match &cfg.allowed_formats {
         Some(list) => RsConverter::with_allowed_formats(list.iter().copied()),
         None => RsConverter::new(),
     };
-    let base = base
-        .strict(cfg.strict)
-        .fetch_images(cfg.fetch_images)
-        .list_attachments(cfg.list_attachments)
-        .skip_empty_cells(cfg.skip_empty_cells)
-        .compact_tables(cfg.compact_tables)
-        .page_break_placeholder(cfg.page_break_placeholder.clone())
-        .ebcdic_layout_opt(cfg.ebcdic_layout.clone())
-        .skip_ocr(cfg.skip_ocr)
-        .force_full_page_ocr(cfg.force_full_page_ocr)
-        .no_text_panels(cfg.no_text_panels)
-        .heading_hierarchy(cfg.heading_hierarchy)
-        .do_picture_classification(cfg.enrich.picture_classification)
-        .do_code_enrichment(cfg.enrich.code)
-        .do_formula_enrichment(cfg.enrich.formula)
-        .asr_model(cfg.asr_model.clone())
-        .asr_lang(cfg.asr_lang.clone())
-        .encoding(cfg.encoding.clone());
-    let base = match cfg.video_frames {
-        Some(max) => base.video_frames(max),
-        None => base,
-    };
-    let base = match cfg.page_range {
-        Some((first, last)) => base.page_range(first, last),
-        None => base,
-    };
-    let base = match &cfg.ocr_lang {
-        Some(lang) => base.ocr_lang(lang.clone()),
-        None => base,
-    };
-    let base = match &cfg.ocr_mode {
-        Some(mode) => base.ocr_mode(mode.clone()),
-        None => base,
-    };
-    let base = match &cfg.ocr_engine {
-        Some(engine) => base.ocr_engine(engine.clone()),
-        None => base,
-    };
-    match cfg.ocr_scale {
-        Some(s) => base.ocr_scale(s),
-        None => base,
+    let mut o = cfg.opts.clone();
+    if cfg.page_break_placeholder.is_some() {
+        o.page_break_placeholder = cfg.page_break_placeholder.clone();
     }
+    // The library's mapping onto the builder (#577); `opts` was validated
+    // when the config was built, so this cannot fail.
+    o.apply(base).map_err(option_err)
 }
 
 /// Render an already-converted document to Markdown/JSON per the config. The
@@ -644,10 +812,26 @@ fn render_doc(
     input_name: String,
     format: String,
     status: String,
+    errors: Vec<docling::ErrorItem>,
+    redaction: Option<docling::RedactionReport>,
 ) -> RawResult {
     let (content, images) = match cfg.to {
         OutputKind::Json => (doc.export_to_json(), Vec::new()),
         OutputKind::Latex => (doc.export_to_latex(), Vec::new()),
+        OutputKind::Text => (doc.export_to_text(), Vec::new()),
+        OutputKind::Vtt => (doc.export_to_vtt(), Vec::new()),
+        OutputKind::Html => match cfg.image_mode {
+            ImageMode::Placeholder => (doc.export_to_html(), Vec::new()),
+            mode => doc.export_to_html_with_images(mode, &cfg.artifacts_dir),
+        },
+        OutputKind::Pandoc => doc
+            .export_to_pandoc_json_with(&docling::pandoc::PandocExportOptions {
+                image_mode: cfg.image_mode,
+                artifacts_dir: cfg.artifacts_dir.clone(),
+                ..Default::default()
+            })
+            // Only an explicit `api_version` can fail, and none is set.
+            .expect("Pandoc export at the default API version"),
         OutputKind::Markdown => match cfg.image_mode {
             ImageMode::Placeholder => (doc.export_to_markdown(), Vec::new()),
             mode => doc.export_to_markdown_with_images(mode, &cfg.artifacts_dir),
@@ -659,6 +843,8 @@ fn render_doc(
         status,
         input_name,
         images,
+        errors,
+        redaction,
     }
 }
 
@@ -689,18 +875,24 @@ fn run_convert(source: SourceDocument, cfg: &ConvertConfig) -> Result<RawResult>
         // The serializer knobs `DocumentConverter::convert` would have applied
         // (converter.rs) — this path never reaches it, so they are set here or
         // they silently lapse under `pipeline: "vlm"`.
-        document.strict_markdown = cfg.strict;
-        document.compact_tables = cfg.compact_tables;
+        document.strict_markdown = cfg.opts.strict.unwrap_or(false);
+        document.compact_tables = cfg.opts.compact_tables.unwrap_or(false);
         document.page_break_placeholder = cfg.page_break_placeholder.clone();
+        // The PII pass (#621) lapses on this path too unless applied here.
+        let redaction = build_converter(cfg)?
+            .redact(&mut document)
+            .map_err(convert_err)?;
         return Ok(render_doc(
             document,
             cfg,
             source.name,
             format,
             "success".to_string(),
+            Vec::new(),
+            redaction,
         ));
     }
-    let converter = build_converter(cfg);
+    let converter = build_converter(cfg)?;
     let result = converter.convert(source).map_err(convert_err)?;
     let format = result.format.as_str().to_string();
     let status = status_str(result.status);
@@ -710,28 +902,70 @@ fn run_convert(source: SourceDocument, cfg: &ConvertConfig) -> Result<RawResult>
         result.input_name,
         format,
         status,
+        result.errors,
+        result.redaction,
     ))
+}
+
+/// Convert every document inside a ZIP archive (#557), each through
+/// [`run_convert`] with the same config (so `allowedFormats`, the VLM
+/// pipeline and the output options apply per entry), in archive order. The
+/// entries are vetted from the central directory before anything is
+/// inflated (`docling::archive`, `DOCLING_RS_ZIP_MAX_*`); an entry that does
+/// not convert is its own `skipped` / `failed` item. Errors only when the
+/// bytes are not a readable ZIP archive.
+fn run_convert_archive(bytes: Vec<u8>, cfg: &ConvertConfig) -> Result<Vec<RawArchiveItem>> {
+    let mut archive = docling::archive::Archive::open(
+        std::io::Cursor::new(bytes),
+        &docling::ArchiveLimits::from_env(),
+    )
+    .map_err(convert_err)?;
+    let entries = archive.entries().to_vec();
+    Ok(entries
+        .into_iter()
+        .map(|info| {
+            let (outcome, result, error) = match info.skipped {
+                Some(reason) => ("skipped", None, Some(reason)),
+                None => match archive.read(info.index).map_err(convert_err) {
+                    Ok(source) => match run_convert(source, cfg) {
+                        Ok(raw) => ("converted", Some(raw), None),
+                        Err(e) => ("failed", None, Some(e.reason.clone())),
+                    },
+                    Err(e) => ("failed", None, Some(e.reason.clone())),
+                },
+            };
+            RawArchiveItem {
+                path: info.path,
+                outcome,
+                result,
+                error,
+            }
+        })
+        .collect())
 }
 
 /// Load a [`SourceDocument`] from an in-memory [`ConvertInput`].
 fn source_from_input(input: ConvertInput) -> Result<SourceDocument> {
-    let format = match &input.format {
-        Some(f) => parse_format(f)?,
-        None => infer_format(&input.name).ok_or_else(|| {
-            Error::new(
-                Status::InvalidArg,
-                format!(
-                    "could not infer a format from name '{}'; pass `format` explicitly",
-                    input.name
-                ),
-            )
-        })?,
-    };
-    Ok(SourceDocument::from_bytes(
-        input.name,
-        format,
-        input.data.to_vec(),
-    ))
+    match &input.format {
+        Some(f) => {
+            let format = parse_format(f)?;
+            Ok(SourceDocument::from_bytes(
+                input.name,
+                format,
+                input.data.to_vec(),
+            ))
+        }
+        // The engine's own routing (#671): the extension, else the content's
+        // signature, else plain text when the bytes are text.
+        None => {
+            SourceDocument::from_named_bytes(&input.name, input.data.to_vec(), None).map_err(|e| {
+                Error::new(
+                    Status::InvalidArg,
+                    format!("{}: {e}; pass `format` explicitly", input.name),
+                )
+            })
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -785,6 +1019,94 @@ pub fn convert_async(
     }))
 }
 
+/// Convert every document inside a ZIP archive on disk (#557): one
+/// [`ArchiveItem`] per entry. Throws only when the file is not a readable ZIP.
+#[napi]
+pub fn convert_archive_file(
+    path: String,
+    options: Option<ConvertOptions>,
+) -> Result<Vec<ArchiveItem>> {
+    let cfg = build_config(options.unwrap_or_default())?;
+    let bytes = std::fs::read(&path)
+        .map_err(|e| Error::new(Status::GenericFailure, format!("{path}: {e}")))?;
+    Ok(run_convert_archive(bytes, &cfg)?
+        .into_iter()
+        .map(RawArchiveItem::into_js)
+        .collect())
+}
+
+/// Convert every document inside an in-memory ZIP archive (#557); `input.name`
+/// names it, `input.format` is ignored.
+#[napi]
+pub fn convert_archive(
+    input: ConvertInput,
+    options: Option<ConvertOptions>,
+) -> Result<Vec<ArchiveItem>> {
+    let cfg = build_config(options.unwrap_or_default())?;
+    Ok(run_convert_archive(input.data.to_vec(), &cfg)?
+        .into_iter()
+        .map(RawArchiveItem::into_js)
+        .collect())
+}
+
+/// Async (Promise-returning) [`convert_archive_file`].
+#[napi(ts_return_type = "Promise<Array<ArchiveItem>>")]
+pub fn convert_archive_file_async(
+    path: String,
+    options: Option<ConvertOptions>,
+) -> Result<AsyncTask<ConvertArchiveTask>> {
+    let cfg = build_config(options.unwrap_or_default())?;
+    Ok(AsyncTask::new(ConvertArchiveTask {
+        source: ArchiveSource::Path(path),
+        cfg,
+    }))
+}
+
+/// Async (Promise-returning) [`convert_archive`].
+#[napi(ts_return_type = "Promise<Array<ArchiveItem>>")]
+pub fn convert_archive_async(
+    input: ConvertInput,
+    options: Option<ConvertOptions>,
+) -> Result<AsyncTask<ConvertArchiveTask>> {
+    let cfg = build_config(options.unwrap_or_default())?;
+    Ok(AsyncTask::new(ConvertArchiveTask {
+        source: ArchiveSource::Bytes(input.data.to_vec()),
+        cfg,
+    }))
+}
+
+enum ArchiveSource {
+    Path(String),
+    Bytes(Vec<u8>),
+    Taken,
+}
+
+pub struct ConvertArchiveTask {
+    source: ArchiveSource,
+    cfg: ConvertConfig,
+}
+
+impl Task for ConvertArchiveTask {
+    type Output = Vec<RawArchiveItem>;
+    type JsValue = Vec<ArchiveItem>;
+
+    fn compute(&mut self) -> Result<Vec<RawArchiveItem>> {
+        let bytes = match std::mem::replace(&mut self.source, ArchiveSource::Taken) {
+            ArchiveSource::Path(path) => std::fs::read(&path)
+                .map_err(|e| Error::new(Status::GenericFailure, format!("{path}: {e}")))?,
+            ArchiveSource::Bytes(bytes) => bytes,
+            ArchiveSource::Taken => {
+                return Err(Error::new(Status::GenericFailure, "conversion task reused"))
+            }
+        };
+        run_convert_archive(bytes, &self.cfg)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Vec<RawArchiveItem>) -> Result<Vec<ArchiveItem>> {
+        Ok(output.into_iter().map(RawArchiveItem::into_js).collect())
+    }
+}
+
 pub struct ConvertFileTask {
     path: String,
     cfg: ConvertConfig,
@@ -836,26 +1158,8 @@ impl Task for ConvertBytesTask {
 /// the analogue of the Rust `DocumentConverter`.
 #[napi]
 pub struct DocumentConverter {
-    strict: bool,
-    fetch_images: bool,
-    asr_model: Option<String>,
-    asr_lang: Option<String>,
-    encoding: Option<String>,
-    video_frames: Option<usize>,
-    page_range: Option<(usize, usize)>,
-    ocr_lang: Option<String>,
-    ocr_mode: Option<String>,
-    ocr_engine: Option<String>,
-    ocr_scale: Option<f32>,
-    list_attachments: bool,
-    skip_empty_cells: bool,
-    compact_tables: bool,
-    ebcdic_layout: Option<String>,
-    skip_ocr: bool,
-    force_full_page_ocr: bool,
-    no_text_panels: bool,
-    heading_hierarchy: bool,
-    enrich: docling::EnrichmentOptions,
+    /// The shared conversion options (#577), validated in the constructor.
+    opts: docling::ConvertOptions,
     // Resolved once in the constructor and cloned per call: a converter is
     // configuration, so a missing endpoint should surface at `new`, and the
     // `DOCLING_RS_VLM_*` environment should be read at the same moment every
@@ -869,7 +1173,7 @@ impl DocumentConverter {
     #[napi(constructor)]
     pub fn new(options: Option<ConverterOptions>) -> Result<Self> {
         let o = options.unwrap_or_default();
-        let allowed = match o.allowed_formats {
+        let allowed = match &o.allowed_formats {
             Some(list) => Some(
                 list.iter()
                     .map(|s| parse_format(s))
@@ -877,72 +1181,25 @@ impl DocumentConverter {
             ),
             None => None,
         };
-        let page_range = parse_pages(o.pages.as_deref())?;
+        let opts = shared_options(&o)?;
+        opts.validate().map_err(option_err)?;
+        let vlm = opts.vlm_options().map_err(option_err)?;
         Ok(Self {
-            strict: o.strict.unwrap_or(false),
-            fetch_images: o.fetch_images.unwrap_or(false),
-            asr_model: o.asr_model.clone(),
-            asr_lang: o.asr_lang.clone(),
-            encoding: o.encoding.clone(),
-            video_frames: o.video_frames.map(|n| n as usize),
-            page_range,
-            ocr_lang: parse_ocr_lang(o.ocr_lang.clone(), o.ocr_engine.as_deref())?,
-            ocr_mode: parse_ocr_mode(o.ocr_mode.clone())?,
-            ocr_engine: parse_ocr_engine(o.ocr_engine.clone())?,
-            ocr_scale: parse_ocr_scale(o.ocr_scale)?,
-            list_attachments: o.list_attachments.unwrap_or(false),
-            skip_empty_cells: o.skip_empty_cells.unwrap_or(false),
-            compact_tables: o.compact_tables.unwrap_or(false),
-            ebcdic_layout: o.ebcdic_layout.clone(),
-            skip_ocr: o.skip_ocr.unwrap_or(false),
-            force_full_page_ocr: o.force_full_page_ocr.unwrap_or(false),
-            no_text_panels: o.no_text_panels.unwrap_or(false),
-            heading_hierarchy: o.heading_hierarchy.unwrap_or(false),
-            enrich: enrichments(
-                o.do_picture_classification,
-                o.do_code_enrichment,
-                o.do_formula_enrichment,
-            ),
-            vlm: resolve_vlm(
-                o.pipeline.as_deref(),
-                o.vlm_endpoint.clone(),
-                o.vlm_model.clone(),
-                o.vlm_api_key.clone(),
-                o.vlm_prompt.clone(),
-                o.vlm_max_tokens,
-                page_range,
-            )?,
+            opts,
+            vlm,
             allowed_formats: allowed,
         })
     }
 
     fn config(&self, out: Option<OutputOptions>) -> Result<ConvertConfig> {
         let out = out.unwrap_or_default();
+        let to = parse_output_kind(out.to.as_deref())?;
         Ok(ConvertConfig {
-            strict: self.strict,
-            fetch_images: self.fetch_images,
-            asr_model: self.asr_model.clone(),
-            asr_lang: self.asr_lang.clone(),
-            encoding: self.encoding.clone(),
-            video_frames: self.video_frames,
-            page_range: self.page_range,
-            ocr_lang: self.ocr_lang.clone(),
-            ocr_mode: self.ocr_mode.clone(),
-            ocr_engine: self.ocr_engine.clone(),
-            ocr_scale: self.ocr_scale,
-            list_attachments: self.list_attachments,
-            skip_empty_cells: self.skip_empty_cells,
-            compact_tables: self.compact_tables,
-            ebcdic_layout: self.ebcdic_layout.clone(),
-            skip_ocr: self.skip_ocr,
-            force_full_page_ocr: self.force_full_page_ocr,
-            no_text_panels: self.no_text_panels,
-            heading_hierarchy: self.heading_hierarchy,
-            enrich: self.enrich,
+            opts: self.opts.clone(),
             vlm: self.vlm.clone(),
             allowed_formats: self.allowed_formats.clone(),
-            to: parse_output_kind(out.to.as_deref())?,
-            image_mode: parse_image_mode(out.image_mode.as_deref())?,
+            to,
+            image_mode: parse_image_mode(out.image_mode.as_deref(), to)?,
             artifacts_dir: out.artifacts_dir.unwrap_or_else(|| "artifacts".to_string()),
             page_break_placeholder: out.page_break_placeholder,
         })
@@ -994,6 +1251,65 @@ impl DocumentConverter {
         let source = source_from_input(input)?;
         Ok(AsyncTask::new(ConvertBytesTask {
             source: Some(source),
+            cfg,
+        }))
+    }
+
+    /// Convert every document inside a ZIP archive on disk (#557), with this
+    /// converter's config per entry (sync).
+    #[napi]
+    pub fn convert_archive_file(
+        &self,
+        path: String,
+        options: Option<OutputOptions>,
+    ) -> Result<Vec<ArchiveItem>> {
+        let cfg = self.config(options)?;
+        let bytes = std::fs::read(&path)
+            .map_err(|e| Error::new(Status::GenericFailure, format!("{path}: {e}")))?;
+        Ok(run_convert_archive(bytes, &cfg)?
+            .into_iter()
+            .map(RawArchiveItem::into_js)
+            .collect())
+    }
+
+    /// Convert every document inside an in-memory ZIP archive (#557) (sync).
+    #[napi]
+    pub fn convert_archive(
+        &self,
+        input: ConvertInput,
+        options: Option<OutputOptions>,
+    ) -> Result<Vec<ArchiveItem>> {
+        let cfg = self.config(options)?;
+        Ok(run_convert_archive(input.data.to_vec(), &cfg)?
+            .into_iter()
+            .map(RawArchiveItem::into_js)
+            .collect())
+    }
+
+    /// Async (Promise-returning) archive conversion from disk.
+    #[napi(ts_return_type = "Promise<Array<ArchiveItem>>")]
+    pub fn convert_archive_file_async(
+        &self,
+        path: String,
+        options: Option<OutputOptions>,
+    ) -> Result<AsyncTask<ConvertArchiveTask>> {
+        let cfg = self.config(options)?;
+        Ok(AsyncTask::new(ConvertArchiveTask {
+            source: ArchiveSource::Path(path),
+            cfg,
+        }))
+    }
+
+    /// Async (Promise-returning) archive conversion from bytes.
+    #[napi(ts_return_type = "Promise<Array<ArchiveItem>>")]
+    pub fn convert_archive_async(
+        &self,
+        input: ConvertInput,
+        options: Option<OutputOptions>,
+    ) -> Result<AsyncTask<ConvertArchiveTask>> {
+        let cfg = self.config(options)?;
+        Ok(AsyncTask::new(ConvertArchiveTask {
+            source: ArchiveSource::Bytes(input.data.to_vec()),
             cfg,
         }))
     }
@@ -1052,9 +1368,9 @@ impl DocumentConverter {
                 // `referenced` up front. Mirrors the buffered branch above,
                 // which honours both `compactTables` and `artifactsDir`.
                 let mut streamer = MarkdownStreamer::with_artifacts(
-                    cfg.strict,
+                    cfg.opts.strict.unwrap_or(false),
                     image_mode,
-                    cfg.compact_tables,
+                    cfg.opts.compact_tables.unwrap_or(false),
                     &cfg.artifacts_dir,
                 )
                 .with_page_break_placeholder(cfg.page_break_placeholder.clone());
@@ -1067,6 +1383,13 @@ impl DocumentConverter {
                 callback.call(Ok(None), ThreadsafeFunctionCallMode::NonBlocking);
                 return;
             }
+            let converter = match converter {
+                Ok(c) => c,
+                Err(e) => {
+                    callback.call(Err(e), ThreadsafeFunctionCallMode::NonBlocking);
+                    return;
+                }
+            };
             let stream = match converter.convert_streaming_images(source, image_mode) {
                 Ok(s) => s,
                 Err(e) => {
@@ -1114,15 +1437,94 @@ pub struct Pipeline {
     // queue rather than reload models.
     inner: Arc<Mutex<RsPipeline>>,
     strict: bool,
+    /// The constructor's `password` (#611, #625), for every conversion.
+    password: Option<String>,
+}
+
+/// The PDF/image options of a [`ConverterOptions`] resolved into the typed
+/// values the engine's builders take (#471): what `new Pipeline(options)`
+/// primes the warm [`RsPipeline`] with. Validation is the shared
+/// `ConvertOptions::validate` [`DocumentConverter::new`] runs too (#577), so
+/// the constructor rejects exactly what the one-shot path rejects instead of
+/// quietly running the process defaults.
+#[derive(Debug, PartialEq)]
+struct WarmPipelineConfig {
+    /// docling's `do_ocr=False` (`noOcr`).
+    no_ocr: bool,
+    /// The text-layer fast path (`textLayerOnly`).
+    text_layer_only: bool,
+    /// The password of an encrypted PDF or Office document (#611, #625).
+    password: Option<String>,
+    no_table_former: bool,
+    force_full_page_ocr: bool,
+    no_text_panels: bool,
+    heading_hierarchy: bool,
+    page_range: Option<(usize, usize)>,
+    /// docling's `document_timeout` (#497).
+    document_timeout: Option<std::time::Duration>,
+    ocr_engine: Option<docling::OcrEngine>,
+    /// The PP-OCR recognizer; `None` under Tesseract, whose language list is
+    /// `tesseract_lang` instead (#460).
+    ocr_lang: Option<docling::OcrLang>,
+    /// Tesseract's `-l` argument built from `ocrLang`; `None` under PP-OCR.
+    tesseract_lang: Option<String>,
+    ocr_mode: Option<docling::OcrMode>,
+    ocr_scale: Option<f32>,
+    /// RapidOCR's text-line orientation handling (#666); `None` = the
+    /// environment's default.
+    ocr_textline_orientation: Option<bool>,
+    /// Picture-crop scale and page images (#519/#520).
+    images: docling::ImageOutput,
+    enrich: docling::EnrichmentOptions,
+}
+
+/// Resolve the PDF/image options for the warm [`Pipeline`] (#471). The
+/// `DocumentConverter` keeps these as the validated strings and lets the
+/// `docling` converter parse them per call; the warm pipeline is built once,
+/// so the strings are parsed into the engine's enums here — the same mapping
+/// `docling::DocumentConverter` applies, including the #460 split of
+/// `ocrLang` into a PP-OCR model under PP-OCR and Tesseract's `-l` list under
+/// Tesseract (against the engine the option selects, else the process's
+/// `DOCLING_RS_OCR_ENGINE` default — the library's `ocr_lang()` /
+/// `tesseract_lang()` readers).
+fn warm_pipeline_config(o: &ConverterOptions) -> Result<WarmPipelineConfig> {
+    let s = shared_options(o)?;
+    s.validate().map_err(option_err)?;
+    Ok(WarmPipelineConfig {
+        no_ocr: s.ocr_disabled(),
+        text_layer_only: s.text_layer_only.unwrap_or(false),
+        password: s.password.clone(),
+        no_table_former: s.no_table_former.unwrap_or(false),
+        force_full_page_ocr: s.force_full_page_ocr.unwrap_or(false),
+        no_text_panels: s.no_text_panels.unwrap_or(false),
+        heading_hierarchy: s.heading_hierarchy.unwrap_or(false),
+        page_range: s.page_range().map_err(option_err)?,
+        document_timeout: s.document_timeout().map_err(option_err)?,
+        ocr_engine: s.ocr_engine().map_err(option_err)?,
+        ocr_lang: s.ocr_lang().map_err(option_err)?,
+        tesseract_lang: s.tesseract_lang().map_err(option_err)?,
+        ocr_mode: s.ocr_mode().map_err(option_err)?,
+        ocr_scale: s.ocr_scale,
+        ocr_textline_orientation: s.ocr_textline_orientation,
+        images: s.image_output(),
+        enrich: s.enrichments(),
+    })
 }
 
 #[napi]
 impl Pipeline {
-    /// Construct the pipeline. `strict` (cleaner Markdown) and the three
+    /// Construct the pipeline. `strict` (cleaner Markdown), the three
     /// enrichment switches (`doPictureClassification`, `doCodeEnrichment`,
-    /// `doFormulaEnrichment`, #423) are read — the enrichment passes are
-    /// per-instance state, so pick them here; `fetchImages` /
-    /// `allowedFormats` don't apply to the PDF/image pipeline.
+    /// `doFormulaEnrichment`, #423) and every PDF/image option the one-shot
+    /// calls honour — `ocrEngine`, `ocrLang`, `ocrMode`, `ocrScale`,
+    /// `noOcr`, `textLayerOnly`, `password`, `forceFullPageOcr`,
+    /// `noTextPanels`, `headingHierarchy`,
+    /// `pages` — are read here and apply to every conversion on this
+    /// instance, validated exactly as `DocumentConverter` validates them
+    /// (#471; before, only `strict` and the enrichment switches were read
+    /// and a `por+eng` Tesseract pipeline silently ran PP-OCR English).
+    /// `fetchImages` / `allowedFormats` and the non-PDF options don't apply
+    /// to the PDF/image pipeline.
     #[napi(constructor)]
     pub fn new(options: Option<ConverterOptions>) -> Result<Self> {
         let options = options.unwrap_or_default();
@@ -1148,16 +1550,37 @@ impl Pipeline {
             }
         }
         let strict = options.strict.unwrap_or(false);
-        let pipeline = RsPipeline::new()
+        // Resolve (and so validate) before building: a bad `ocrLang` is an
+        // error on `new`, like on `DocumentConverter`, not a warning after
+        // the models have loaded.
+        let warm = warm_pipeline_config(&options)?;
+        let mut pipeline = RsPipeline::new()
             .map_err(convert_err)?
-            .enrichments(enrichments(
-                options.do_picture_classification,
-                options.do_code_enrichment,
-                options.do_formula_enrichment,
-            ));
+            // docling-pdf's pre-2.0 names: its `skip_ocr` is do_ocr=False,
+            // its `no_ocr` the text-layer fast path (#611).
+            .skip_ocr(warm.no_ocr)
+            .no_ocr(warm.text_layer_only)
+            .no_table_former(warm.no_table_former)
+            .force_full_page_ocr(warm.force_full_page_ocr)
+            .no_text_panels(warm.no_text_panels)
+            .heading_hierarchy(docling::HeadingHierarchyOptions::enabled(
+                warm.heading_hierarchy,
+            ))
+            .ocr_engine(warm.ocr_engine)
+            .ocr_lang(warm.ocr_lang)
+            .tesseract_lang(warm.tesseract_lang)
+            .ocr_mode(warm.ocr_mode)
+            .ocr_scale(warm.ocr_scale)
+            .images_scale(warm.images.scale)
+            .generate_page_images(warm.images.page_images)
+            .pages(warm.page_range)
+            .document_timeout(warm.document_timeout)
+            .enrichments(warm.enrich);
+        pipeline.set_ocr_textline_orientation(warm.ocr_textline_orientation);
         Ok(Self {
             inner: Arc::new(Mutex::new(pipeline)),
             strict,
+            password: warm.password,
         })
     }
 
@@ -1168,7 +1591,7 @@ impl Pipeline {
         path: String,
         options: Option<OutputOptions>,
     ) -> Result<ConvertResult> {
-        let cfg = output_config(options, self.strict)?;
+        let cfg = self.output_cfg(options)?;
         let source = SourceDocument::from_file(&path).map_err(convert_err)?;
         Ok(run_pipeline(&self.inner, source, &cfg, self.strict)?.into_js())
     }
@@ -1258,7 +1681,9 @@ impl Pipeline {
 
 impl Pipeline {
     fn output_cfg(&self, options: Option<OutputOptions>) -> Result<ConvertConfig> {
-        output_config(options, self.strict)
+        let mut cfg = output_config(options, self.strict)?;
+        cfg.opts.password = self.password.clone();
+        Ok(cfg)
     }
 }
 
@@ -1276,10 +1701,16 @@ fn run_pipeline(
             "pipeline poisoned by an earlier panic",
         )
     })?;
+    // docling's PARTIAL_SUCCESS (#497): a spent budget leaves the pages done.
+    let mut errors: Vec<docling::ErrorItem> = Vec::new();
     let mut doc = match source.format {
-        InputFormat::Pdf => pipe
-            .convert(&source.bytes, None, &source.name)
-            .map_err(convert_err)?,
+        InputFormat::Pdf => {
+            let c = pipe
+                .convert_outcome(&source.bytes, cfg.opts.password.as_deref(), &source.name)
+                .map_err(convert_err)?;
+            errors.extend(c.completion.message().map(docling::ErrorItem::timeout));
+            c.document
+        }
         InputFormat::Image => pipe
             .convert_image(&source.bytes, &source.name)
             .map_err(convert_err)?,
@@ -1296,12 +1727,24 @@ fn run_pipeline(
     };
     doc.strict_markdown = strict;
     doc.page_break_placeholder = cfg.page_break_placeholder.clone();
+    // The warm pipeline bypasses `DocumentConverter::convert`: the PII pass
+    // (#621) is applied here, like the serializer knobs above.
+    let redaction = build_converter(cfg)?
+        .redact(&mut doc)
+        .map_err(convert_err)?;
+    let status = if errors.is_empty() {
+        "success"
+    } else {
+        "partial_success"
+    };
     Ok(render_doc(
         doc,
         cfg,
         source.name,
         source.format.as_str().to_string(),
-        "success".to_string(),
+        status.to_string(),
+        errors,
+        redaction,
     ))
 }
 
@@ -1344,8 +1787,9 @@ fn stream_pipeline(
     };
     match source.format {
         InputFormat::Pdf => {
+            let password = cfg.opts.password.as_deref();
             let result =
-                pipe.convert_streaming(&source.bytes, None, &source.name, |nodes, links| {
+                pipe.convert_streaming(&source.bytes, password, &source.name, |nodes, links| {
                     emit_chunk(streamer.push(&nodes, &links));
                     Ok(())
                 });
@@ -1424,32 +1868,19 @@ impl Task for PipelineBytesTask {
 fn output_config(out: Option<OutputOptions>, strict: bool) -> Result<ConvertConfig> {
     let out = out.unwrap_or_default();
     Ok(ConvertConfig {
-        strict,
-        fetch_images: false,
-        asr_model: None,
-        asr_lang: None,
-        encoding: None,
-        video_frames: None,
-        page_range: None,
-        list_attachments: false,
-        skip_empty_cells: false,
-        compact_tables: false,
-        ebcdic_layout: None,
-        skip_ocr: false,
-        force_full_page_ocr: false,
-        no_text_panels: false,
-        heading_hierarchy: false,
-        enrich: docling::EnrichmentOptions::default(),
+        opts: docling::ConvertOptions {
+            strict: Some(strict),
+            ..Default::default()
+        },
         // The warm `Pipeline` is the ONNX-models class; `Pipeline::new` rejects
         // `pipeline: "vlm"` outright, so nothing reaches here with one set.
         vlm: None,
-        ocr_lang: None,
-        ocr_mode: None,
-        ocr_engine: None,
-        ocr_scale: None,
         allowed_formats: None,
         to: parse_output_kind(out.to.as_deref())?,
-        image_mode: parse_image_mode(out.image_mode.as_deref())?,
+        image_mode: parse_image_mode(
+            out.image_mode.as_deref(),
+            parse_output_kind(out.to.as_deref())?,
+        )?,
         artifacts_dir: out.artifacts_dir.unwrap_or_else(|| "artifacts".to_string()),
         page_break_placeholder: out.page_break_placeholder,
     })
@@ -1786,6 +2217,203 @@ impl Task for ChunkBytesTask {
 }
 
 // ---------------------------------------------------------------------------
+// Email attachments (#561).
+// ---------------------------------------------------------------------------
+
+/// One attachment of an `.eml` / Outlook `.msg`, from [`email_attachments`].
+#[napi(object)]
+pub struct EmailAttachment {
+    /// Position among the message's attachments.
+    pub index: u32,
+    /// A safe file name, unique within the message (base name only, control
+    /// and bidi-format characters removed; `attachment-N` when the message
+    /// declares none, `<subject>.eml` for a forwarded message; a repeated
+    /// name gets `-2`, `-3`, …) — safe to write into one directory as it is.
+    pub name: String,
+    /// The declared media type (`type/subtype`), if any.
+    pub content_type: Option<String>,
+    /// The format id it converts as (`"pdf"`, `"docx"`, `"email"`, …), from
+    /// its extension, else its media type, else the bytes; absent when
+    /// `skipped` says why it will not convert.
+    pub format: Option<String>,
+    /// Payload size in bytes (0 without a payload).
+    pub size: i64,
+    /// An image the message shows inline (part of the HTML body) rather than
+    /// a file to open; a PDF disposed `inline` is still `false` (#564).
+    pub inline: bool,
+    /// Why it is not converted, when it is not: no payload (a reference, an
+    /// OLE object), over a limit, a nested archive, an unsupported type.
+    pub skipped: Option<String>,
+    /// The payload, when kept: every attachment with a payload within the
+    /// limits — also an unsupported type or an archive (hand a `.zip` to
+    /// your own extractor). Absent over a limit or without a payload.
+    pub data: Option<Buffer>,
+}
+
+/// Bounds on what [`email_attachments`] keeps, in bytes. Unset = the archive
+/// defaults: 10 000 attachments, 256 MiB each, 1 GiB in all.
+#[napi(object)]
+#[derive(Default)]
+pub struct EmailAttachmentOptions {
+    pub max_entries: Option<u32>,
+    pub max_entry_size: Option<i64>,
+    pub max_total_size: Option<i64>,
+}
+
+/// The attachments of an in-memory `.eml` / `.msg` with their payloads. A
+/// forwarded message is an `.eml` entry whose `data` is the nested message.
+/// Convert one with `convert({ name: att.name, data: att.data, format: att.format })`
+/// — `format` carries what the extension cannot (a `scan.bin` sent as
+/// `application/pdf`, a nameless sniffed part; #564).
+#[napi]
+pub fn email_attachments(
+    input: ConvertInput,
+    options: Option<EmailAttachmentOptions>,
+) -> Result<Vec<EmailAttachment>> {
+    attachments_of(&input.data, options.unwrap_or_default())
+}
+
+/// [`email_attachments`] for a message file on disk.
+#[napi]
+pub fn email_attachments_file(
+    path: String,
+    options: Option<EmailAttachmentOptions>,
+) -> Result<Vec<EmailAttachment>> {
+    let bytes = std::fs::read(&path).map_err(convert_err)?;
+    attachments_of(&bytes, options.unwrap_or_default())
+}
+
+/// Async (Promise-returning) [`email_attachments`]: a large `.msg` parses off
+/// the event loop (#564).
+#[napi(ts_return_type = "Promise<Array<EmailAttachment>>")]
+pub fn email_attachments_async(
+    input: ConvertInput,
+    options: Option<EmailAttachmentOptions>,
+) -> Result<AsyncTask<EmailAttachmentsTask>> {
+    Ok(AsyncTask::new(EmailAttachmentsTask {
+        source: ArchiveSource::Bytes(input.data.to_vec()),
+        options: options.unwrap_or_default(),
+    }))
+}
+
+/// Async (Promise-returning) [`email_attachments_file`].
+#[napi(ts_return_type = "Promise<Array<EmailAttachment>>")]
+pub fn email_attachments_file_async(
+    path: String,
+    options: Option<EmailAttachmentOptions>,
+) -> Result<AsyncTask<EmailAttachmentsTask>> {
+    Ok(AsyncTask::new(EmailAttachmentsTask {
+        source: ArchiveSource::Path(path),
+        options: options.unwrap_or_default(),
+    }))
+}
+
+pub struct EmailAttachmentsTask {
+    source: ArchiveSource,
+    options: EmailAttachmentOptions,
+}
+
+/// A Send-safe [`EmailAttachment`] (raw bytes, no `Buffer`). Public only as
+/// the task's output.
+#[doc(hidden)]
+pub struct RawEmailAttachment {
+    index: u32,
+    name: String,
+    content_type: Option<String>,
+    format: Option<String>,
+    size: i64,
+    inline: bool,
+    skipped: Option<String>,
+    data: Option<Vec<u8>>,
+}
+
+impl Task for EmailAttachmentsTask {
+    type Output = Vec<RawEmailAttachment>;
+    type JsValue = Vec<EmailAttachment>;
+
+    fn compute(&mut self) -> Result<Vec<RawEmailAttachment>> {
+        let bytes = match std::mem::replace(&mut self.source, ArchiveSource::Taken) {
+            ArchiveSource::Path(path) => std::fs::read(&path)
+                .map_err(|e| Error::new(Status::GenericFailure, format!("{path}: {e}")))?,
+            ArchiveSource::Bytes(bytes) => bytes,
+            ArchiveSource::Taken => {
+                return Err(Error::new(Status::GenericFailure, "attachment task reused"))
+            }
+        };
+        let options = std::mem::take(&mut self.options);
+        raw_attachments_of(&bytes, options)
+    }
+
+    fn resolve(
+        &mut self,
+        _env: Env,
+        output: Vec<RawEmailAttachment>,
+    ) -> Result<Vec<EmailAttachment>> {
+        Ok(output
+            .into_iter()
+            .map(RawEmailAttachment::into_js)
+            .collect())
+    }
+}
+
+impl RawEmailAttachment {
+    fn into_js(self) -> EmailAttachment {
+        EmailAttachment {
+            index: self.index,
+            name: self.name,
+            content_type: self.content_type,
+            format: self.format,
+            size: self.size,
+            inline: self.inline,
+            skipped: self.skipped,
+            data: self.data.map(Buffer::from),
+        }
+    }
+}
+
+fn attachments_of(bytes: &[u8], o: EmailAttachmentOptions) -> Result<Vec<EmailAttachment>> {
+    Ok(raw_attachments_of(bytes, o)?
+        .into_iter()
+        .map(RawEmailAttachment::into_js)
+        .collect())
+}
+
+fn raw_attachments_of(bytes: &[u8], o: EmailAttachmentOptions) -> Result<Vec<RawEmailAttachment>> {
+    // The same `DOCLING_RS_ZIP_MAX_*` defaults the converter, CLI and serve
+    // apply (#564); an explicit option overrides its field.
+    let defaults = docling::ArchiveLimits::from_env();
+    let non_negative = |v: Option<i64>, default: u64| match v {
+        Some(v) if v < 0 => Err(Error::new(
+            Status::InvalidArg,
+            "email attachment limits must be non-negative byte counts",
+        )),
+        Some(v) => Ok(v as u64),
+        None => Ok(default),
+    };
+    let limits = docling::ArchiveLimits {
+        max_entries: o.max_entries.map_or(defaults.max_entries, |n| n as usize),
+        max_entry_size: non_negative(o.max_entry_size, defaults.max_entry_size)?,
+        max_total_size: non_negative(o.max_total_size, defaults.max_total_size)?,
+        ..defaults
+    };
+    let atts = docling::EmailAttachments::open(bytes, &limits).map_err(convert_err)?;
+    Ok(atts
+        .entries()
+        .iter()
+        .map(|e| RawEmailAttachment {
+            index: e.index as u32,
+            name: e.name.clone(),
+            content_type: e.content_type.clone(),
+            format: e.format.map(|f| f.as_str().to_string()),
+            size: e.size as i64,
+            inline: e.inline,
+            skipped: e.skipped.clone(),
+            data: atts.data(e.index).map(<[u8]>::to_vec),
+        })
+        .collect())
+}
+
+// ---------------------------------------------------------------------------
 // Format helpers exposed to JS.
 // ---------------------------------------------------------------------------
 
@@ -1822,6 +2450,10 @@ pub fn supported_formats() -> Vec<String> {
         "email",
         "epub",
         "mhtml",
+        "text",
+        "jsonl",
+        "xml",
+        "ipynb",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -1849,15 +2481,24 @@ fn parse_output_kind(to: Option<&str>) -> Result<OutputKind> {
         None | Some("md") | Some("markdown") => Ok(OutputKind::Markdown),
         Some("json") => Ok(OutputKind::Json),
         Some("latex") => Ok(OutputKind::Latex),
+        Some("text") => Ok(OutputKind::Text),
+        Some("html") => Ok(OutputKind::Html),
+        Some("pandoc") => Ok(OutputKind::Pandoc),
+        Some("vtt") => Ok(OutputKind::Vtt),
         Some(other) => Err(Error::new(
             Status::InvalidArg,
-            format!("unknown `to` '{other}' (expected: markdown, json, latex)"),
+            format!(
+                "unknown `to` '{other}' (expected: markdown, json, html, text, latex, pandoc, vtt)"
+            ),
         )),
     }
 }
 
-fn parse_image_mode(mode: Option<&str>) -> Result<ImageMode> {
+/// `imageMode` for output `to`: unset is placeholder, except embedded for
+/// the Pandoc AST (#537 — `pandoc -t docx` drops a target-less picture).
+fn parse_image_mode(mode: Option<&str>, to: OutputKind) -> Result<ImageMode> {
     match mode.map(str::to_ascii_lowercase).as_deref() {
+        None if to == OutputKind::Pandoc => Ok(ImageMode::Embedded),
         None | Some("placeholder") => Ok(ImageMode::Placeholder),
         Some("embedded") => Ok(ImageMode::Embedded),
         Some("referenced") => Ok(ImageMode::Referenced),
@@ -1892,6 +2533,7 @@ fn parse_format(s: &str) -> Result<InputFormat> {
         "latex" => InputFormat::Latex,
         "audio" => InputFormat::Audio,
         "video" => InputFormat::Video,
+        "text" | "plain" => InputFormat::Text,
         _ => {
             return Err(Error::new(
                 Status::InvalidArg,
@@ -1918,6 +2560,56 @@ fn convert_err(e: impl std::fmt::Display) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The VLM resolution as the one-shot options reach it: the flat
+    /// `ConvertOptions` object → the shared set → `vlm_options()` (#577).
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_vlm(
+        pipeline: Option<&str>,
+        endpoint: Option<String>,
+        model: Option<String>,
+        api_key: Option<String>,
+        prompt: Option<String>,
+        max_tokens: Option<u32>,
+        page_range: Option<(usize, usize)>,
+    ) -> Result<Option<docling::vlm::VlmOptions>> {
+        let o = ConvertOptions {
+            pipeline: pipeline.map(str::to_string),
+            vlm_endpoint: endpoint,
+            vlm_model: model,
+            vlm_api_key: api_key,
+            vlm_prompt: prompt,
+            vlm_max_tokens: max_tokens,
+            pages: page_range.map(|(a, b)| format!("{a}-{b}")),
+            ..Default::default()
+        };
+        shared_options(&o)?.vlm_options().map_err(option_err)
+    }
+
+    /// The option names reach the error messages as TypeScript spells them.
+    #[test]
+    fn errors_name_options_in_camel_case() {
+        assert_eq!(camel_case("ocr_lang"), "ocrLang");
+        assert_eq!(camel_case("document_timeout"), "documentTimeout");
+        let Err(err) = DocumentConverter::new(Some(ConverterOptions {
+            document_timeout: Some(-5.0),
+            ..Default::default()
+        })) else {
+            panic!("a negative documentTimeout must be rejected");
+        };
+        assert_eq!(err.status, Status::InvalidArg);
+        assert!(err.reason.contains("documentTimeout"), "{}", err.reason);
+        let Err(err) = DocumentConverter::new(Some(ConverterOptions {
+            vlm_max_tokens: Some(0),
+            pipeline: Some("vlm".into()),
+            vlm_endpoint: Some("http://127.0.0.1:1/v1".into()),
+            vlm_model: Some("m".into()),
+            ..Default::default()
+        })) else {
+            panic!("vlmMaxTokens: 0 must be rejected");
+        };
+        assert!(err.reason.contains("vlmMaxTokens"), "{}", err.reason);
+    }
 
     // napi-derive gates its N-API registration glue behind `cfg(not(test))`, so
     // the cdylib's lib target still links as an ordinary test binary and the
@@ -1964,8 +2656,8 @@ mod tests {
     }
 
     /// Every explicit option must land on the resolved struct — including the
-    /// four `resolve_vlm` applies itself on top of `VlmOptions::resolve`
-    /// (api_key, prompt, max_tokens, page_range). Precedence against a *set*
+    /// four the shared `vlm_options()` applies on top of
+    /// `VlmOptions::resolve` (api_key, prompt, max_tokens, page_range). Precedence against a *set*
     /// `DOCLING_RS_VLM_*` is not asserted here: `std::env::set_var` is unsound
     /// under the parallel test harness.
     #[test]
@@ -2031,5 +2723,140 @@ mod tests {
             "reason: {}",
             err.reason
         );
+    }
+
+    /// `new Pipeline(options)` primes the warm engine with every PDF/image
+    /// option the one-shot path honours (#471) — the same shared option set
+    /// as `DocumentConverter`, resolved into the engine's typed values, with
+    /// `ocrLang` read against the engine it drives (#460): Tesseract's `-l`
+    /// list under Tesseract, the en/ch recognizer under PP-OCR.
+    #[test]
+    fn warm_pipeline_reads_the_pdf_options() {
+        let got = warm_pipeline_config(&ConverterOptions {
+            ocr_engine: Some("tesseract".into()),
+            ocr_lang: Some("por+eng".into()),
+            ocr_mode: Some("full_page".into()),
+            ocr_scale: Some(3.0),
+            images_scale: Some(1.5),
+            page_images: Some(true),
+            skip_ocr: Some(true),
+            force_full_page_ocr: Some(true),
+            no_text_panels: Some(true),
+            heading_hierarchy: Some(true),
+            pages: Some("2-3".into()),
+            do_formula_enrichment: Some(true),
+            ..Default::default()
+        })
+        .expect("valid options");
+        assert_eq!(got.ocr_engine, Some(docling::OcrEngine::Tesseract));
+        assert_eq!(got.tesseract_lang.as_deref(), Some("por+eng"));
+        assert_eq!(got.ocr_lang, None, "under Tesseract ocrLang is its -l list");
+        assert_eq!(got.ocr_mode, Some(docling::OcrMode::FullPage));
+        assert_eq!(got.ocr_scale, Some(3.0));
+        assert_eq!(
+            got.images,
+            docling::ImageOutput {
+                scale: Some(1.5),
+                page_images: true
+            }
+        );
+        // `skipOcr` is read as `noOcr` (its pre-2.0 name, #611).
+        assert!(got.no_ocr);
+        assert!(!got.text_layer_only);
+        assert!(got.force_full_page_ocr);
+        assert!(got.no_text_panels);
+        assert!(got.heading_hierarchy);
+        assert_eq!(got.page_range, Some((2, 3)));
+        assert!(got.enrich.formula);
+        assert!(!got.enrich.code);
+
+        let got = warm_pipeline_config(&ConverterOptions {
+            ocr_engine: Some("ppocr".into()),
+            ocr_lang: Some("zh-Hans".into()),
+            ..Default::default()
+        })
+        .expect("valid options");
+        assert_eq!(got.ocr_engine, Some(docling::OcrEngine::PpOcr));
+        assert_eq!(got.ocr_lang, Some(docling::OcrLang::Ch));
+        assert_eq!(got.tesseract_lang, None, "PP-OCR takes no Tesseract list");
+    }
+
+    /// No option → `None` everywhere, so the engine keeps its own defaults
+    /// (`DOCLING_RS_OCR_*`, the 2.0 px/pt render) exactly as before #471.
+    #[test]
+    fn warm_pipeline_defaults_choose_nothing() {
+        let got = warm_pipeline_config(&ConverterOptions::default()).expect("defaults");
+        assert_eq!(
+            got,
+            WarmPipelineConfig {
+                no_ocr: false,
+                text_layer_only: false,
+                password: None,
+                no_table_former: false,
+                force_full_page_ocr: false,
+                no_text_panels: false,
+                heading_hierarchy: false,
+                page_range: None,
+                document_timeout: None,
+                ocr_engine: None,
+                ocr_lang: None,
+                tesseract_lang: None,
+                ocr_mode: None,
+                ocr_scale: None,
+                ocr_textline_orientation: None,
+                images: docling::ImageOutput::default(),
+                enrich: docling::EnrichmentOptions::default(),
+            }
+        );
+    }
+
+    /// The two classes share one validation contract: whatever
+    /// `new DocumentConverter(o)` throws on, `new Pipeline(o)` throws on too —
+    /// #471's `new Pipeline({ ocrEngine: 'tesseract', ocrLang: 'xx' })` used
+    /// to construct fine and OCR in English.
+    #[test]
+    fn warm_pipeline_rejects_what_document_converter_rejects() {
+        let bad = [
+            ConverterOptions {
+                ocr_engine: Some("bogus".into()),
+                ..Default::default()
+            },
+            ConverterOptions {
+                ocr_engine: Some("tesseract".into()),
+                ocr_lang: Some("xx".into()),
+                ..Default::default()
+            },
+            ConverterOptions {
+                ocr_engine: Some("ppocr".into()),
+                ocr_lang: Some("deu".into()),
+                ..Default::default()
+            },
+            ConverterOptions {
+                ocr_mode: Some("sideways".into()),
+                ..Default::default()
+            },
+            ConverterOptions {
+                ocr_scale: Some(0.0),
+                ..Default::default()
+            },
+            ConverterOptions {
+                images_scale: Some(9.0),
+                ..Default::default()
+            },
+            ConverterOptions {
+                pages: Some("3-1".into()),
+                ..Default::default()
+            },
+        ];
+        for o in bad {
+            assert!(
+                DocumentConverter::new(Some(o.clone())).is_err(),
+                "DocumentConverter should reject {o:?}"
+            );
+            assert!(
+                warm_pipeline_config(&o).is_err(),
+                "Pipeline must reject what DocumentConverter rejects: {o:?}"
+            );
+        }
     }
 }

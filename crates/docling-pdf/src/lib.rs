@@ -20,6 +20,8 @@
 pub mod assemble;
 #[cfg(not(feature = "ocr-prep"))]
 mod assemble;
+// Vector checkbox squares from the text parser's path walk (#609).
+pub mod checkbox;
 mod dp_lines;
 #[cfg(feature = "ml")]
 pub mod enrich;
@@ -32,13 +34,19 @@ pub use docling_onnx as ep;
 // Heading-hierarchy stage (#302): PDF font-name style parsing, outline
 // extraction (pure lopdf), and the level-assignment pass. No feature gate on
 // the logic itself — only the glyph style pass needs pdfium (`ml`).
+#[cfg(feature = "ml")]
+pub mod dparse_render;
 mod font_style;
 mod heading_hierarchy;
 pub mod layout;
 #[cfg(feature = "ml")]
 mod mets;
+#[cfg(feature = "ner")]
+pub mod ner;
 #[cfg(feature = "ml")]
 mod ocr;
+#[cfg(feature = "ml")]
+mod ocr_cls;
 #[cfg(any(feature = "ml", feature = "ocr-prep"))]
 pub mod ocr_det;
 #[cfg(feature = "ocr-prep")]
@@ -48,8 +56,12 @@ mod orient;
 pub mod outline;
 pub mod pdfium_backend;
 #[cfg(feature = "ml")]
+pub mod picture;
+#[cfg(feature = "ml")]
 pub mod quality;
 mod reading_order;
+#[cfg(feature = "ml")]
+mod redact_ocr;
 // Pure-Rust region resampling (page→1024px box-average, crop→448 bilinear) —
 // available to the browser TableFormer path (#157 stage 3), not just `ml`.
 #[cfg(feature = "ocr-prep")]
@@ -58,6 +70,11 @@ pub mod resample;
 pub mod scanned;
 // Built-in standard-14 font metrics for the pure-Rust text parser (#187) —
 // no feature gate: the wasm/pdf-text path needs them like the native one.
+pub mod pdf_meta;
+#[cfg(feature = "ml")]
+pub mod raster;
+#[cfg(feature = "ml")]
+pub mod render;
 mod std14;
 #[cfg(feature = "ml")]
 pub mod tableformer;
@@ -105,6 +122,7 @@ compile_error!(
 );
 
 use docling_core::DoclingDocument;
+pub use docling_core::EncryptionError;
 // The env-knob helpers only gate ML-pipeline diagnostics and tuning; the
 // pure text-layer (wasm) build has no call sites.
 #[cfg(feature = "ml")]
@@ -129,32 +147,116 @@ pub use pdfium_backend::{render_pages, RenderedPage};
 /// Errors from the PDF backend. Detailed and surfaced (never silently skipped).
 #[derive(Debug)]
 pub enum PdfError {
-    /// pdfium failed to bind, open, or read the document.
+    /// pdfium failed to bind, open, or read the document (and, historically,
+    /// any pipeline error outside the models).
     Pdfium(String),
+    /// The document itself: an object model lopdf cannot read, a page no
+    /// renderer can draw, a page range outside it.
+    Document(String),
     /// The layout ONNX model failed to load or run.
     Layout(String),
     /// The OCR ONNX model failed to load or run.
     Ocr(String),
+    /// The document budget ([`Pipeline::document_timeout`]) ran out between
+    /// two pages. Internally the sentinel that stops the page walk; a caller
+    /// never sees it from [`Pipeline::convert`] — the conversion returns the
+    /// pages it finished and reports the cut through [`Completion`].
+    Timeout(String),
+    /// The document is encrypted and the password given (or none) does not
+    /// open it (#636) — the typed value a caller prompts for a password on,
+    /// reachable through [`std::error::Error::source`] too. Its text is the
+    /// one docling raises.
+    Encrypted(EncryptionError),
 }
 
 impl fmt::Display for PdfError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             PdfError::Pdfium(m) => write!(f, "pdf: pdfium error: {m}"),
+            PdfError::Document(m) => write!(f, "pdf: {m}"),
             PdfError::Layout(m) => write!(f, "pdf: {m}"),
             PdfError::Ocr(m) => write!(f, "pdf: {m}"),
+            PdfError::Timeout(m) => write!(f, "pdf: {m}"),
+            PdfError::Encrypted(EncryptionError::WrongPassword) => {
+                f.write_str("pdf: the PDF is encrypted and the password is wrong")
+            }
+            PdfError::Encrypted(EncryptionError::NeedPassword) => {
+                f.write_str("pdf: the PDF is encrypted: a password is required")
+            }
+            PdfError::Encrypted(e) => write!(f, "pdf: the PDF is encrypted: {e}"),
         }
     }
 }
 
-impl std::error::Error for PdfError {}
+/// How a conversion ended: every selected page, or the pages that fit the
+/// document budget (docling's `document_timeout`, `PARTIAL_SUCCESS`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Completion {
+    /// Every selected page was processed.
+    Complete,
+    /// The budget ran out: `pages_done` of `pages_selected` pages are in the
+    /// document, the rest were never rendered (or never processed).
+    TimedOut {
+        pages_done: usize,
+        pages_selected: usize,
+        budget: std::time::Duration,
+    },
+}
 
-#[cfg(feature = "ml")]
+impl Completion {
+    pub fn timed_out(&self) -> bool {
+        matches!(self, Completion::TimedOut { .. })
+    }
+
+    /// docling's `ErrorItem.error_message` for the cut, `None` when complete.
+    pub fn message(&self) -> Option<String> {
+        match self {
+            Completion::Complete => None,
+            Completion::TimedOut {
+                pages_done,
+                pages_selected,
+                budget,
+            } => Some(format!(
+                "document timeout of {:.3}s exceeded after {pages_done} of {pages_selected} \
+                 pages; the output holds the pages processed",
+                budget.as_secs_f64()
+            )),
+        }
+    }
+}
+
+/// A converted document and how its conversion ended ([`Completion`]).
+#[derive(Debug, Clone)]
+pub struct Converted {
+    pub document: DoclingDocument,
+    pub completion: Completion,
+}
+
+/// Has the document budget run out?
+fn expired(deadline: Option<std::time::Instant>) -> bool {
+    deadline.is_some_and(|d| std::time::Instant::now() >= d)
+}
+
+/// The sentinel the page walks stop on once the budget is gone.
+fn timeout_sentinel() -> PdfError {
+    PdfError::Timeout("document timeout exceeded".into())
+}
+
+impl std::error::Error for PdfError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            PdfError::Encrypted(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(feature = "pdfium")]
 impl From<pdfium_render::prelude::PdfiumError> for PdfError {
     fn from(e: pdfium_render::prelude::PdfiumError) -> Self {
-        // A failed dlopen means pdfium was never installed — the #1 first-run
-        // failure after a bare `cargo install` (which ships no runtime
-        // assets). Say what to do instead of leaking the raw loader error.
+        // A failed dlopen means the library this build was asked to use
+        // (`pdfium` feature) is not there. Say what to do instead of leaking
+        // the raw loader error.
         if matches!(e, pdfium_render::prelude::PdfiumError::LoadLibraryError(_)) {
             // The loader error pretty-prints over several lines; compact it.
             let detail = e
@@ -163,24 +265,22 @@ impl From<pdfium_render::prelude::PdfiumError> for PdfError {
                 .collect::<Vec<_>>()
                 .join(" ");
             return PdfError::Pdfium(format!(
-                "the pdfium library is not installed. PDF/image conversion needs \
-                 pdfium + the ONNX models: fetch both with \
-                 scripts/install/download_dependencies.sh from a docling.rs \
-                 checkout (https://github.com/docling-project/docling.rs), or \
-                 point PDFIUM_DYNAMIC_LIB_PATH at a directory containing the \
-                 pdfium library. A digital PDF's embedded text layer converts \
-                 without either in no-OCR mode (CLI: --no-ocr). Declarative \
-                 formats (DOCX, HTML, Markdown, …) never need them. [{detail}]"
+                "the pdfium library is not installed. This build's `pdfium` feature \
+                 was asked for it (DOCLING_RS_RENDERER=pdfium, or a file the pure-Rust \
+                 object model cannot read): point PDFIUM_DYNAMIC_LIB_PATH at a directory \
+                 containing the pdfium library, or unset DOCLING_RS_RENDERER — the \
+                 default renderer needs no library. Declarative formats (DOCX, HTML, \
+                 Markdown, …) never need it. [{detail}]"
             ));
         }
         PdfError::Pdfium(e.to_string())
     }
 }
 
-/// Convert a PDF's **embedded text layer only** — no pdfium, no ONNX, no
+/// Convert a PDF's **embedded text layer only** — no ONNX, no
 /// threads: the pure-Rust content-stream parser ([`textparse`]) feeds the same
 /// orphan-region assembly the `no_ocr` pipeline flag uses, so text-layer PDFs
-/// come out identical to `--no-ocr` (flat, line-grouped paragraphs in reading
+/// come out identical to `--text-layer-only` (flat, line-grouped paragraphs in reading
 /// order; no headings/lists/tables/pictures, and no hyperlink recovery).
 ///
 /// This is the only conversion entry compiled without the `ml` feature (it is
@@ -190,6 +290,12 @@ impl From<pdfium_render::prelude::PdfiumError> for PdfError {
 pub fn convert_text_layer(bytes: &[u8], name: &str) -> Result<DoclingDocument, PdfError> {
     convert_text_layer_pages(bytes, name, None)
 }
+
+/// The error for bytes no reader here can parse as a PDF — not a PDF at
+/// all, or one damaged past the parser's repairs. Said about the file, not
+/// about a missing renderer or text layer: no library would read it either.
+pub(crate) const UNREADABLE: &str =
+    "not a readable PDF: the file is damaged or not a PDF (its structure could not be parsed)";
 
 /// [`convert_text_layer`] restricted to a **1-based inclusive** page window
 /// (issue #80's `--pages`); `None` converts everything. The window is
@@ -208,30 +314,45 @@ pub fn convert_text_layer_pages(
         }
     }
     let mut doc = DoclingDocument::new(name);
-    let mut total = 0usize;
-    let parsed = textparse::pdf_text_pages(bytes);
-    // A vestigial layer (a few typed-in form fields over scanned pages) is not
-    // the document's text: return the empty document, which callers already
-    // report as "no text layer" — so an OCR-capable caller falls back to OCR
-    // instead of proudly extracting thirteen characters.
-    if textparse::text_layer_is_vestigial(&parsed) {
-        return Ok(doc);
-    }
-    for (i, page) in parsed.into_iter().enumerate() {
-        total += 1;
-        if let Some((first, last)) = pages {
-            if i + 1 < first || i + 1 > last {
-                continue;
-            }
+    // A file nothing can open is an error, not a PDF that merely has no
+    // text layer (the caller's "scanned? needs OCR" hint).
+    let Some(mut parser) = textparse::PageTextParser::open(bytes) else {
+        return Err(PdfError::Document(UNREADABLE.into()));
+    };
+    // Pages are parsed, assembled and dropped one at a time: holding every
+    // page's cells until the end made the peak scale with the whole file —
+    // and a page window still paid for every page outside it.
+    let total = parser.page_count();
+    let mut tally = textparse::TextLayerTally::default();
+    for i in 0..total {
+        let selected = pages.is_none_or(|(first, last)| (first..=last).contains(&(i + 1)));
+        // A page outside the window only feeds the vestigial verdict below,
+        // so it is parsed only until that verdict is settled (on any real
+        // text layer, by the first page or two).
+        if !selected && tally.proves_text(total) {
+            continue;
+        }
+        let page = parser.text_page(i);
+        tally.add(&page);
+        if !selected {
+            continue;
         }
         let mut regions = Vec::new();
         assemble::add_orphan_regions(&mut regions, &page.cells);
         let table_rows = vec![None; regions.len()];
         let enrich_out = vec![None; regions.len()];
-        let (mut nodes, links) = assemble::assemble_page(&page, regions, &table_rows, &enrich_out);
+        let (mut nodes, links) =
+            assemble::assemble_page(&page, regions, &table_rows, &enrich_out, None);
         assemble::stamp_page_no(&mut nodes, i + 1);
         doc.nodes.extend(nodes);
         doc.links.extend(links);
+    }
+    // A vestigial layer (a few typed-in form fields over scanned pages) is not
+    // the document's text: return the empty document, which callers already
+    // report as "no text layer" — so an OCR-capable caller falls back to OCR
+    // instead of proudly extracting thirteen characters.
+    if tally.is_vestigial() {
+        return Ok(DoclingDocument::new(name));
     }
     if let Some((first, last)) = pages {
         if first > total {
@@ -241,6 +362,9 @@ pub fn convert_text_layer_pages(
         }
     }
     assemble::merge_continuations(&mut doc.nodes);
+    // Grown a page at a time, the node vector can be up to half spare
+    // capacity — hundreds of MB on a long document, held for its lifetime.
+    doc.nodes.shrink_to_fit();
     Ok(doc)
 }
 
@@ -348,6 +472,7 @@ pub fn model_inventory() -> Vec<ModelEntry> {
         entry("tableformer.bbox", bbx),
         entry("ocr.rec", rec),
         entry("ocr.dict", dict),
+        entry("ocr.textline_ori", ocr_cls::resolve_cls_path()),
         entry("pdfium", pdfium),
     ]
 }
@@ -479,6 +604,21 @@ fn decode_image_with_max_side(bytes: &[u8], max_side: u32) -> Result<image::RgbI
     Ok(img.into_rgb8())
 }
 
+/// Image outputs of the PDF/image pipeline (#519/#520): the scale picture
+/// crops are delivered at and whether each page's render is kept as the
+/// document's page image. See [`Pipeline::images_scale`] /
+/// [`Pipeline::generate_page_images`].
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ImageOutput {
+    /// Pixels per PDF point for picture crops and page images — docling's
+    /// `images_scale`. `None` keeps the pipeline's own page render (2.0
+    /// px/pt), resampling nothing.
+    pub scale: Option<f32>,
+    /// Keep every page's render as the document's page image — docling's
+    /// `generate_page_images`.
+    pub page_images: bool,
+}
+
 #[cfg(feature = "ml")]
 /// One page's assembled output: typed nodes plus the page's hyperlinks (kept
 /// separate so pages processed out of order can be stitched back in page
@@ -487,6 +627,8 @@ type PageOut = (
     Vec<Node>,
     Vec<(String, String)>,
     docling_core::confidence::PageConfidence,
+    // The page image, when page images are requested (#520).
+    Option<docling_core::PictureImage>,
 );
 
 #[cfg(feature = "ml")]
@@ -537,6 +679,21 @@ enum TfSlot {
 }
 
 #[cfg(feature = "ml")]
+impl TfSlot {
+    /// Load TableFormer on the first call: `Ready`, or `Missing` when its
+    /// graphs are absent (the geometric fallback — degradation, not an
+    /// error). Later calls are no-ops either way.
+    fn load(&mut self) {
+        if matches!(self, TfSlot::Unloaded) {
+            *self = match tableformer::TableFormer::load_with(tf_intra()) {
+                Some(tf) => TfSlot::Ready(tf),
+                None => TfSlot::Missing,
+            };
+        }
+    }
+}
+
+#[cfg(feature = "ml")]
 type SharedTables = Arc<Mutex<TfSlot>>;
 
 #[cfg(feature = "ml")]
@@ -576,8 +733,8 @@ impl EnrichmentOptions {
 }
 
 #[cfg(feature = "ml")]
-/// The layout model's input for a page: the docling-exact scale-1.0 page
-/// image when the renderer produced one, else the legacy stretch of the 2×
+/// The layout model's input for a page: the pypdfium2-exact scale-1.0 page
+/// image (#478) when the renderer produced one, else the legacy stretch of the 2×
 /// bitmap (browser / METS paths) — see [`layout::LayoutSrc`]. Public so the
 /// diagnostic examples feed [`layout::LayoutModel::predict`] the same input
 /// the pipeline does.
@@ -586,6 +743,36 @@ pub fn layout_src(page: &PdfPage) -> layout::LayoutSrc<'_> {
         Some(img) => layout::LayoutSrc::PageImage(img),
         None => layout::LayoutSrc::Raw(&page.image),
     }
+}
+
+#[cfg(feature = "ml")]
+/// RapidOCR's longest side (`Global.max_side_len`, 2000): docling renders the
+/// OCR input at `OcrOptions.scale` = 3 and RapidOCR then shrinks what exceeds
+/// this before detecting and recognizing, so that is the resolution its
+/// models actually see.
+pub(crate) const RAPIDOCR_MAX_SIDE: f32 = 2000.0;
+
+#[cfg(feature = "ml")]
+/// The px/pt the OCR reads a page at: the caller's `ocr_scale` when set; else,
+/// for a standalone bitmap input — its own scale-1.0 page, a resolution the
+/// pipeline did not choose — docling's rule (#570): three pixels per point
+/// (`OcrOptions.scale`), shrunk so the longer side stays within RapidOCR's
+/// 2000 px (a 754 × 1000 scanned form reads at 2.0; a 3000 px photo at 0.67,
+/// as RapidOCR would downsample it). `None` for a rendered page (PDF, hOCR),
+/// which keeps its own render — the 2.0 px/pt the conformance baselines are
+/// pinned to. Measured on FUNSD at 1.0 / 2.0 / 3.0 px/pt: 0.825 / 0.856 /
+/// 0.836 word recall — the recognizer likes its crops at the resolution
+/// RapidOCR hands it, no more.
+fn page_ocr_scale(ocr_scale: Option<f32>, width: f32, height: f32, scale: f32) -> Option<f32> {
+    if ocr_scale.is_some() || scale != 1.0 {
+        return ocr_scale;
+    }
+    let longest = width.max(height);
+    if longest <= 0.0 {
+        return None;
+    }
+    let s = 3.0f32.min(RAPIDOCR_MAX_SIDE / longest);
+    ((s - 1.0).abs() > 1e-3).then_some(s)
 }
 
 #[cfg(feature = "ml")]
@@ -664,6 +851,11 @@ struct Worker {
     tesseract_lang: Option<String>,
     /// OCR render scale override (px/pt, #254). See [`Pipeline::ocr_scale`].
     ocr_scale: Option<f32>,
+    /// RapidOCR's line orientation handling (#666), handed to the PP-OCR
+    /// recognizer. See [`Pipeline::ocr_textline_orientation`].
+    textline_orientation: bool,
+    /// Picture-crop scale and page images (#519/#520). See [`ImageOutput`].
+    images: ImageOutput,
 }
 
 #[cfg(feature = "ml")]
@@ -689,15 +881,27 @@ pub(crate) enum Recognizer {
 
 #[cfg(feature = "ml")]
 impl Recognizer {
-    /// See [`ocr::OcrModel::ocr_page`].
+    /// See [`ocr::OcrModel::ocr_page_with`].
     fn ocr_page(
         &mut self,
         img: &image::RgbImage,
         regions: &[layout::Region],
         scale: f32,
     ) -> Result<Vec<(TextCell, f32)>, String> {
+        self.ocr_page_with(img, regions, scale, None)
+    }
+
+    /// [`Self::ocr_page`] with the detector's boxes (#570). Tesseract segments its
+    /// own lines and ignores the detector's boxes.
+    fn ocr_page_with(
+        &mut self,
+        img: &image::RgbImage,
+        regions: &[layout::Region],
+        scale: f32,
+        detected: Option<&[ocr_det::DetBox]>,
+    ) -> Result<Vec<(TextCell, f32)>, String> {
         match self {
-            Self::PpOcr(m) => m.ocr_page(img, regions, scale),
+            Self::PpOcr(m) => m.ocr_page_with(img, regions, scale, detected),
             Self::Tesseract(t) => t.ocr_page(img, regions, scale),
         }
     }
@@ -708,9 +912,10 @@ impl Recognizer {
         img: &image::RgbImage,
         regions: &[layout::Region],
         scale: f32,
+        detected: Option<&[ocr_det::DetBox]>,
     ) -> Result<Vec<(TextCell, f32)>, String> {
         match self {
-            Self::PpOcr(m) => m.ocr_table_words(img, regions, scale),
+            Self::PpOcr(m) => m.ocr_table_words(img, regions, scale, detected),
             Self::Tesseract(t) => t.ocr_table_words(img, regions, scale),
         }
     }
@@ -741,8 +946,11 @@ impl Worker {
         ocr_engine: ocr::OcrEngine,
         tesseract_lang: Option<String>,
         ocr_scale: Option<f32>,
+        textline_orientation: bool,
+        images: ImageOutput,
     ) -> Result<Self, PdfError> {
         Ok(Self {
+            images,
             layout: if no_ocr {
                 None
             } else {
@@ -764,7 +972,17 @@ impl Worker {
             ocr_engine,
             tesseract_lang,
             ocr_scale,
+            textline_orientation,
         })
+    }
+
+    /// Set [`Pipeline::ocr_textline_orientation`] here and on a loaded
+    /// PP-OCR recognizer.
+    fn set_textline_orientation(&mut self, enable: bool) {
+        self.textline_orientation = enable;
+        if let OcrSlot::Ready(Recognizer::PpOcr(m)) = &mut self.ocr {
+            m.set_textline_orientation(enable);
+        }
     }
 
     /// The OCR model, or `None` when this conversion must not (or cannot) OCR:
@@ -780,7 +998,10 @@ impl Worker {
         if matches!(self.ocr, OcrSlot::Unloaded) {
             let loaded = match self.ocr_engine {
                 ocr::OcrEngine::PpOcr => {
-                    ocr::OcrModel::load_with(self.ocr_lang, self.intra).map(Recognizer::PpOcr)
+                    ocr::OcrModel::load_with(self.ocr_lang, self.intra).map(|mut m| {
+                        m.set_textline_orientation(self.textline_orientation);
+                        Recognizer::PpOcr(m)
+                    })
                 }
                 ocr::OcrEngine::Tesseract => tesseract::TesseractOcr::load(
                     tesseract::TesseractOptions::from_env(self.tesseract_lang.clone()),
@@ -860,9 +1081,9 @@ impl Worker {
             let enrich_out = vec![None; regions.len()];
             let conf = quality::page_confidence(parse, &regions, &[]);
             let (nodes, links) = timing::timed("assemble_page", || {
-                assemble::assemble_page(page, regions, &table_rows, &enrich_out)
+                assemble::assemble_page(page, regions, &table_rows, &enrich_out, self.images.scale)
             });
-            return Ok((nodes, links, conf));
+            return Ok((nodes, links, conf, self.page_image(n, page)));
         }
         self.normalize_orientation(n, page)?;
         let det_pages = self.det_candidates(std::slice::from_ref(&(n, &*page)))?;
@@ -883,7 +1104,25 @@ impl Worker {
             })
         }
         .map_err(|e| PdfError::Layout(format!("page {}: {e}", n + 1)))?;
+        // The 2x bitmap, rendered meanwhile (#682): everything from here on
+        // reads it.
+        page.resolve_image()?;
         self.finish_page(n, page, regions)
+    }
+
+    /// The page's render as docling's `PageItem.image` (#520), at
+    /// [`ImageOutput::scale`] — `None` unless page images were requested, or
+    /// when the page has no bitmap (the text-layer-only `no_ocr` path never
+    /// renders one).
+    fn page_image(&self, n: usize, page: &PdfPage) -> Option<docling_core::PictureImage> {
+        if !self.images.page_images {
+            return None;
+        }
+        let image = assemble::page_image(page, self.images.scale);
+        if image.is_none() {
+            docling_core::debug_log!("page {}: no page bitmap for the page image", n + 1);
+        }
+        image
     }
 
     /// The pages of a batch the text detector should sweep (#429): bitmap
@@ -893,9 +1132,13 @@ impl Worker {
         &mut self,
         pages: &[(usize, &'p PdfPage)],
     ) -> Result<Vec<(usize, &'p PdfPage)>, PdfError> {
+        // Pages the orientation pass already detected (#571) are skipped:
+        // their boxes wait in `pending_det`.
         let scanned: Vec<(usize, &PdfPage)> = pages
             .iter()
-            .filter(|(_, p)| p.cells.is_empty() && p.image.width() > 1)
+            .filter(|(n, p)| {
+                p.cells.is_empty() && p.image.width() > 1 && !self.pending_det.contains_key(n)
+            })
             .copied()
             .collect();
         if scanned.is_empty() || self.ocr_model()?.is_none() || self.det_model().is_none() {
@@ -929,7 +1172,12 @@ impl Worker {
                     .iter()
                     .map(|&(n, page)| {
                         let mut view = None;
-                        let (img, _) = ocr_input(&mut view, &page.image, page.scale, ocr_scale);
+                        let (img, _) = ocr_input(
+                            &mut view,
+                            &page.image,
+                            page.scale,
+                            page_ocr_scale(ocr_scale, page.width, page.height, page.scale),
+                        );
                         (n, timing::timed("ocr.det", || det.detect(img)))
                     })
                     .collect::<Vec<_>>()
@@ -965,11 +1213,27 @@ impl Worker {
         }
         // The probe reads text through the OCR model; without one (missing —
         // #244 degradation) the page stays as rendered.
+        if self.ocr_model()?.is_none() {
+            return Ok(());
+        }
+        // The text detector's lines are the probe's crops (#571). Detected on
+        // the page image as rendered; an upright page keeps them for the OCR
+        // pass (`pending_det`) when that pass reads the same bitmap, so the
+        // detector runs once per page as before — a rotated page detects
+        // again on the un-rotated image, alongside layout.
+        let boxes: Vec<ocr_det::DetBox> = match self.det_model() {
+            Some(det) => timing::timed("orient.det", || det.detect(&page.image)).unwrap_or_else(|e| {
+                debug_log!("docling-pdf: page {}: text detection failed ({e}); probing projection strips", n + 1);
+                Vec::new()
+            }),
+            None => Vec::new(),
+        };
+        let ocr_scale = page_ocr_scale(self.ocr_scale, page.width, page.height, page.scale);
         let Some(ocr) = self.ocr_model()? else {
             return Ok(());
         };
         let deg = timing::timed("orient.detect", || {
-            orient::detect(&page.image, ocr, page.scale)
+            orient::detect(&page.image, ocr, page.scale, &boxes)
         });
         if deg != 0 {
             debug_log!(
@@ -978,6 +1242,8 @@ impl Worker {
                 n + 1
             );
             page.unrotate(deg);
+        } else if !boxes.is_empty() && ocr_scale.is_none_or(|s| (s - page.scale).abs() <= 1e-3) {
+            self.pending_det.insert(n, Ok(boxes));
         }
         Ok(())
     }
@@ -1043,7 +1309,11 @@ impl Worker {
             Ok(all) => items
                 .iter_mut()
                 .zip(all)
-                .map(|((n, page), regions)| self.stage_page(*n, page, regions))
+                .map(|((n, page), regions)| {
+                    // The 2x bitmap, rendered meanwhile (#682).
+                    page.resolve_image()?;
+                    self.stage_page(*n, page, regions)
+                })
                 .collect(),
             Err(e) => items
                 .iter()
@@ -1069,12 +1339,35 @@ impl Worker {
         &mut self,
         work_rx: &Mutex<Receiver<(usize, PdfPage)>>,
         layout_batch: usize,
+        deadline: Option<std::time::Instant>,
         mut deliver: impl FnMut(usize, Result<PageOut, PdfError>) -> bool,
     ) {
         use std::sync::mpsc::TryRecvError;
         let mut deferred: std::collections::VecDeque<(usize, PdfPage, Prepared)> =
             std::collections::VecDeque::new();
         loop {
+            // The document budget (#497), checked between pages: once it is
+            // spent, every page still queued or parked is reported as timed
+            // out instead of processed — the renderer stops feeding at the
+            // same check, so the queue drains quickly.
+            if expired(deadline) {
+                while let Some((idx, _, _)) = deferred.pop_front() {
+                    if !deliver(idx, Err(timeout_sentinel())) {
+                        return;
+                    }
+                }
+                let rx = work_rx.lock().unwrap();
+                loop {
+                    match rx.recv() {
+                        Ok((idx, _page)) => {
+                            if !deliver(idx, Err(timeout_sentinel())) {
+                                return;
+                            }
+                        }
+                        Err(_) => return,
+                    }
+                }
+            }
             // Any parked page the slot has since freed up for, oldest first.
             let mut i = 0;
             while i < deferred.len() {
@@ -1200,12 +1493,7 @@ impl Worker {
         regions: &[layout::Region],
     ) -> Vec<Option<tf_core::TableGrid>> {
         let mut table_rows: Vec<Option<tf_core::TableGrid>> = vec![None; regions.len()];
-        if matches!(*guard, TfSlot::Unloaded) {
-            *guard = match tableformer::TableFormer::load_with(tf_intra()) {
-                Some(tf) => TfSlot::Ready(tf),
-                None => TfSlot::Missing,
-            };
-        }
+        guard.load();
         if let TfSlot::Ready(tf) = guard {
             // One 1024-px frame per page, shared by all of its tables, and one
             // call for all of them: with the dynamic-batch decoder their
@@ -1290,7 +1578,7 @@ impl Worker {
         // the page render at the requested px/pt, built lazily on the first
         // OCR use so non-OCR pages never pay for it. Copied out of `self` up
         // front — the OCR sites hold `self.ocr_model()`'s mutable borrow.
-        let ocr_scale = self.ocr_scale;
+        let ocr_scale = page_ocr_scale(self.ocr_scale, page.width, page.height, page.scale);
         let mut ocr_view: Option<image::RgbImage> = None;
         if self.force_full_page_ocr {
             page.cells.clear();
@@ -1353,6 +1641,9 @@ impl Worker {
                 );
             }
         }
+        // A picture the page captions "Table N" and the model also proposed
+        // as a table is read as a table (deliberate deviation).
+        assemble::promote_captioned_table_pictures(&mut regions, &page.cells);
         regions.retain(|r| r.score >= layout::label_threshold(r.label));
         // docling's full-page picture filter and same-label picture dedup run
         // on the thresholded detections, before overlap resolution: a picture
@@ -1371,18 +1662,76 @@ impl Worker {
         // special's child (a cell / in-figure label), not a separate block —
         // remove it so it isn't emitted twice (docling parity).
         assemble::drop_contained_regulars(&mut regions);
+        // A one-line paragraph in the bottom margin under a body-less heading
+        // is that heading's text, not furniture (deliberate deviation).
+        assemble::reclaim_heading_body_footers(&mut regions, page.width);
         // No text layer → recognise text from the page image via OCR.
         let ocred = page.cells.is_empty();
         // Lines the text detector found outside every layout region (#429).
         let mut det_cells: Vec<pdfium_backend::TextCell> = Vec::new();
         if ocred {
+            // Region-scoped OCR recognizes each region's crop, so two regular
+            // regions over the same ink would read it twice — a low-score
+            // paragraph box over the high-score line boxes `greedy` keeps.
+            // Collapse such groups to one region first; a digital
+            // page resolves the same overlap through cell ownership in
+            // `fit_regions_to_cells` and needs nothing here.
+            assemble::merge_overlapping_regulars(&mut regions);
+            // The text detector's lines (#429), fetched before the region
+            // pass: with `det` line mode (#570, the default) they are the
+            // recognizer's crops inside the regions too — RapidOCR's own line
+            // source — not only the supplement outside them. Usually computed
+            // already, alongside layout (see `detect_alongside`); a page that
+            // reached OCR another way detects here. Degradation over failure:
+            // a detector that loaded but cannot run (a damaged file, an
+            // allocation failure) costs the page its detected lines, not its
+            // conversion — the projection segmentation is complete on its own.
+            let detected: Vec<ocr_det::DetBox> = if self.ocr_model()?.is_some() {
+                let (img, _) = ocr_input(&mut ocr_view, &page.image, page.scale, ocr_scale);
+                match self.pending_det.remove(&n) {
+                    Some(result) => result,
+                    None => match self.det_model() {
+                        Some(det) => timing::timed("ocr.det", || det.detect(img)),
+                        None => Ok(Vec::new()),
+                    },
+                }
+                .unwrap_or_else(|e| {
+                    docling_core::debug_log!(
+                        "docling-pdf: page {}: text detection failed ({e}); keeping the \
+                         region-scoped OCR only",
+                        n + 1
+                    );
+                    Vec::new()
+                })
+            } else {
+                Vec::new()
+            };
+            docling_core::debug_log!(
+                "docling-pdf: page {}: text detector found {} line(s): {:?}",
+                n + 1,
+                detected.len(),
+                detected
+                    .iter()
+                    .map(|d| (
+                        d.l.round(),
+                        d.t.round(),
+                        d.r.round(),
+                        d.b.round(),
+                        (d.score * 100.0).round() / 100.0
+                    ))
+                    .collect::<Vec<_>>()
+            );
+            let det_lines =
+                (ocr::det_lines() && !detected.is_empty()).then_some(detected.as_slice());
             // `None` = `skip_ocr` or a missing model (#244): the page keeps
             // its layout regions (and TableFormer structure below) with no
             // recognized text, instead of failing the conversion.
             if let Some(ocr) = self.ocr_model()? {
                 let (img, scl) = ocr_input(&mut ocr_view, &page.image, page.scale, ocr_scale);
-                let cells = timing::timed("ocr.page", || ocr.ocr_page(img, &regions, scl))
-                    .map_err(|e| PdfError::Ocr(format!("page {}: {e}", n + 1)))?;
+                let cells = timing::timed("ocr.page", || {
+                    ocr.ocr_page_with(img, &regions, scl, det_lines)
+                })
+                .map_err(|e| PdfError::Ocr(format!("page {}: {e}", n + 1)))?;
                 ocr_confs.extend(cells.iter().map(|(_, conf)| conf));
                 page.cells = cells.into_iter().map(|(cell, _)| cell).collect();
                 // Table interiors carry no words yet: region-scoped OCR skips
@@ -1395,7 +1744,7 @@ impl Worker {
                 if regions.iter().any(|r| assemble::is_table_like(r.label)) {
                     let (img, scl) = ocr_input(&mut ocr_view, &page.image, page.scale, ocr_scale);
                     let words = timing::timed("ocr.table_words", || {
-                        ocr.ocr_table_words(img, &regions, scl)
+                        ocr.ocr_table_words(img, &regions, scl, det_lines)
                     })
                     .map_err(|e| PdfError::Ocr(format!("page {}: {e}", n + 1)))?;
                     ocr_confs.extend(words.iter().map(|(_, conf)| conf));
@@ -1414,43 +1763,6 @@ impl Worker {
             // that special's silent children, as upstream).
             if self.ocr_model()?.is_some() {
                 let (img, scl) = ocr_input(&mut ocr_view, &page.image, page.scale, ocr_scale);
-                // Usually computed already, alongside layout (see
-                // `detect_alongside`); a page that reached OCR another way
-                // detects here.
-                // Degradation over failure: a detector that loaded but cannot
-                // run (a damaged file, an allocation failure) costs the page
-                // its detected lines, not its conversion — the region-scoped
-                // pass above is complete on its own.
-                let detected = match self.pending_det.remove(&n) {
-                    Some(result) => result,
-                    None => match self.det_model() {
-                        Some(det) => timing::timed("ocr.det", || det.detect(img)),
-                        None => Ok(Vec::new()),
-                    },
-                }
-                .unwrap_or_else(|e| {
-                    docling_core::debug_log!(
-                        "docling-pdf: page {}: text detection failed ({e}); keeping the \
-                         region-scoped OCR only",
-                        n + 1
-                    );
-                    Vec::new()
-                });
-                docling_core::debug_log!(
-                    "docling-pdf: page {}: text detector found {} line(s): {:?}",
-                    n + 1,
-                    detected.len(),
-                    detected
-                        .iter()
-                        .map(|d| (
-                            d.l.round(),
-                            d.t.round(),
-                            d.r.round(),
-                            d.b.round(),
-                            (d.score * 100.0).round() / 100.0
-                        ))
-                        .collect::<Vec<_>>()
-                );
                 let uncovered = ocr_det::uncovered_lines(&detected, scl, &regions, &page.cells);
                 docling_core::debug_log!(
                     "docling-pdf: page {}: {} of {} detected line(s) not covered by the region pass",
@@ -1545,8 +1857,9 @@ impl Worker {
         // containment) survive as text. Emitting *everything* here used to
         // splice a chart's OCR'd axis ticks into the body text right next to
         // the image chunk (#200) — so the orphan pass places the recognized
-        // lines, then the same containment drop that handled the first wave
-        // re-runs to swallow the in-picture ones.
+        // lines, the containment drop re-runs for the in-table ones, and
+        // `assemble_page` nests the in-picture ones under their picture
+        // (JSON-only children, `assemble::picture_parents`).
         if ocred && (!pic_cells.is_empty() || !det_cells.is_empty()) {
             // Pictures (and wrappers) no longer count as claimers (#165), so
             // the plain orphan pass places the recognized lines directly —
@@ -1608,7 +1921,7 @@ impl Worker {
             if let (false, Some(ocr)) = (pic_tables.is_empty(), self.ocr_model()?) {
                 let (img, scl) = ocr_input(&mut ocr_view, &page.image, page.scale, ocr_scale);
                 let words = timing::timed("ocr.table_words", || {
-                    ocr.ocr_table_words(img, &pic_tables, scl)
+                    ocr.ocr_table_words(img, &pic_tables, scl, None)
                 })
                 .map_err(|e| PdfError::Ocr(format!("page {}: {e}", n + 1)))?;
                 ocr_confs.extend(words.iter().map(|(_, conf)| conf));
@@ -1765,12 +2078,20 @@ impl Worker {
             }
         }
         // Score the final region set (docling assigns layout_score over the
-        // postprocessed clusters — the same set assemble_page consumes).
-        let conf = quality::page_confidence(parse, &regions, &ocr_confs);
+        // postprocessed clusters — the page elements assemble_page emits,
+        // which leave out the regulars nested in a picture as its children).
+        let parents = assemble::picture_parents(&regions);
+        let elements: Vec<layout::Region> = regions
+            .iter()
+            .zip(&parents)
+            .filter(|(_, p)| p.is_none())
+            .map(|(r, _)| r.clone())
+            .collect();
+        let conf = quality::page_confidence(parse, &elements, &ocr_confs);
         let (nodes, links) = timing::timed("assemble_page", || {
-            assemble::assemble_page(page, regions, &table_rows, &enrich_out)
+            assemble::assemble_page(page, regions, &table_rows, &enrich_out, self.images.scale)
         });
-        Ok((nodes, links, conf))
+        Ok((nodes, links, conf, self.page_image(n, page)))
     }
 }
 
@@ -1816,9 +2137,12 @@ fn pdf_worker_count() -> usize {
 /// whatever is already rendered gets batched, so batching never *waits* for
 /// pages and adds no latency when rendering is the bottleneck.
 ///
-/// Default: per-page (1) on the CPU provider, 4 when a GPU provider is
-/// selected (#338). The old "4 on 8+ cores" CPU default was a hypothesis —
-/// that single-session amortization pays off with a wider thread budget —
+/// Default: per-page (1) on the CPU provider, 4 when a CUDA-class GPU
+/// provider is selected (#338) — CoreML stays per-page (#602,
+/// [`docling_onnx::prefers_batching`]): only the pinned batch=1 graph is
+/// static, and static partitions are all CoreML is allowed to take. The old
+/// "4 on 8+ cores" CPU default was a hypothesis — that single-session
+/// amortization pays off with a wider thread budget —
 /// and every actual CPU measurement lands the other way: a 4-core x86 box
 /// runs the 9-page 2206.01062 fixture in 8.5 s/conv at batch=1 vs 9.3 s at
 /// batch=4 (re-measured for #338; the original 8.1 vs 9.3 agrees), and the
@@ -1831,18 +2155,39 @@ fn pdf_worker_count() -> usize {
 pub(crate) fn pdf_layout_batch() -> usize {
     env::parse::<usize>("DOCLING_RS_PDF_LAYOUT_BATCH")
         .filter(|&n| n > 0)
-        .unwrap_or_else(|| if docling_onnx::prefers_fp32() { 4 } else { 1 })
+        .unwrap_or_else(|| {
+            if docling_onnx::prefers_batching() {
+                4
+            } else {
+                1
+            }
+        })
 }
 
 #[cfg(feature = "ml")]
-/// Minimum page count before a PDF is worth the parallel worker pool. Below this,
-/// the serial primary (running its model on every core) is faster than fanning out
-/// — the helper pool's one-time model-load cost only pays off once enough pages
-/// share it. `DOCLING_RS_PDF_PARALLEL_MIN` overrides.
+/// Pages the serial path renders ahead of the one being processed
+/// ([`Pipeline::render_ahead`], #682): one in flight on the worker, two
+/// rendered and waiting — a bound on resident page bitmaps, like the
+/// pool's channel.
+const RENDER_AHEAD: usize = 2;
+
+#[cfg(feature = "ml")]
+/// Minimum page count before a PDF goes to the parallel worker pool; below
+/// it the serial primary runs its model on every core. Four since #682 (was
+/// six, from the days of the pool's uncached model load): the layout model's
+/// intra-op scaling is weak (on a 4-core x86 box 4 threads run a page 2.35×
+/// faster than one, 2 threads 1.6×), so two workers of two threads convert
+/// pages faster than one worker of four converts them in turn — 4–5-page
+/// digital documents measured 18% faster than the serial path with its
+/// render-ahead, the pool's load included (the pool is sized to the page
+/// count, [`Pipeline::ensure_pool_for`]). Not lower: the text detector a
+/// scanned page needs scales well with threads, so a 2–3-page scan runs
+/// 15–20% *slower* split across two-thread workers than on the four-thread
+/// primary. `DOCLING_RS_PDF_PARALLEL_MIN` overrides.
 fn pdf_parallel_min() -> usize {
     env::parse::<usize>("DOCLING_RS_PDF_PARALLEL_MIN")
         .filter(|&n| n > 0)
-        .unwrap_or(6)
+        .unwrap_or(4)
 }
 
 #[cfg(feature = "ml")]
@@ -1892,12 +2237,23 @@ pub struct Pipeline {
     ocr_mode: ocr::OcrMode,
     /// OCR render scale override in px/pt (#254). See [`Pipeline::ocr_scale`].
     ocr_scale: Option<f32>,
+    /// Picture OCR scale (#666). See [`Pipeline::picture_ocr_scale`].
+    picture_ocr_scale: Option<f32>,
+    /// RapidOCR's line orientation handling (#666). See
+    /// [`Pipeline::ocr_textline_orientation`].
+    textline_orientation: bool,
+    /// Picture-crop scale and page images (#519/#520). See
+    /// [`Pipeline::images_scale`] / [`Pipeline::generate_page_images`].
+    images: ImageOutput,
     /// Heading-level inference (#302). See [`Pipeline::heading_hierarchy`].
     heading_hierarchy: HeadingHierarchyOptions,
     /// Optional per-page progress hook `(done, selected_total)`, invoked after
     /// each page finishes on both the serial and parallel buffered paths. Set
     /// by the CLI batch mode for dot-progress; `None` costs nothing.
     progress: Option<Arc<dyn Fn(usize, usize) + Send + Sync>>,
+    /// Per-document wall-clock budget (docling's `document_timeout`, #497).
+    /// See [`Pipeline::document_timeout`].
+    document_timeout: Option<std::time::Duration>,
 }
 
 #[cfg(feature = "ml")]
@@ -1926,9 +2282,54 @@ impl Pipeline {
             tesseract_lang: None,
             ocr_mode: ocr::OcrMode::from_env(),
             ocr_scale: ocr::scale_from_env(),
+            picture_ocr_scale: ocr::picture_scale_from_env(),
+            textline_orientation: ocr::textline_orientation_from_env(),
+            images: ImageOutput::default(),
             heading_hierarchy: HeadingHierarchyOptions::default(),
             progress: None,
+            document_timeout: None,
         })
+    }
+
+    /// A wall-clock budget for each document (docling's
+    /// `PipelineOptions.document_timeout`, #497; `None` = unlimited, the
+    /// default). The budget starts when a conversion starts and is checked
+    /// cooperatively between pages: once it is spent, no further page is
+    /// rendered or processed, the pages already finished are assembled into
+    /// the document, and the outcome says so (`Completion::TimedOut`, which
+    /// the converter reports as `PartialSuccess` with a timeout error, the
+    /// way docling does). A page in flight finishes — the check costs
+    /// nothing inside a page, and a single-page document (an image) is never
+    /// cut. For a long-lived pipeline use
+    /// [`set_document_timeout`](Self::set_document_timeout) before each
+    /// conversion.
+    pub fn document_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
+        self.document_timeout = timeout;
+        self
+    }
+
+    /// In-place variant of [`document_timeout`](Self::document_timeout) for a
+    /// warm pipeline — set it before every conversion so no request inherits
+    /// a previous one's budget.
+    pub fn set_document_timeout(&mut self, timeout: Option<std::time::Duration>) {
+        self.document_timeout = timeout;
+    }
+
+    /// The deadline of a conversion starting now, from the configured budget.
+    fn deadline(&self) -> Option<std::time::Instant> {
+        self.document_timeout.map(|t| std::time::Instant::now() + t)
+    }
+
+    /// The [`Completion`] of a walk that processed `done` of `selected` pages.
+    fn completion(&self, timed_out: bool, done: usize, selected: usize) -> Completion {
+        match (timed_out, self.document_timeout) {
+            (true, Some(budget)) => Completion::TimedOut {
+                pages_done: done,
+                pages_selected: selected,
+                budget,
+            },
+            _ => Completion::Complete,
+        }
     }
 
     /// Infer section-header levels after assembly (#302, docling's
@@ -1954,12 +2355,7 @@ impl Pipeline {
     /// on demand, then assign levels in place. `bytes` is `None` on paths
     /// with no PDF behind them (standalone images, METS) — those degrade to
     /// the numbering signal, exactly like docling without parsed pages.
-    fn apply_heading_hierarchy(
-        &self,
-        nodes: &mut [Node],
-        bytes: Option<&[u8]>,
-        password: Option<&str>,
-    ) {
+    fn apply_heading_hierarchy(&self, nodes: &mut [Node], bytes: Option<&[u8]>) {
         let opts = &self.heading_hierarchy;
         if !opts.enabled {
             return;
@@ -1971,7 +2367,7 @@ impl Pipeline {
         let styles = match bytes {
             Some(bytes) if opts.use_style => {
                 let pages = heading_hierarchy::heading_pages(nodes);
-                pdfium_backend::glyph_styles(bytes, password, &pages)
+                textparse::glyph_styles(bytes, &pages)
             }
             _ => Default::default(),
         };
@@ -2215,6 +2611,56 @@ impl Pipeline {
         self.sync_ocr_config();
     }
 
+    /// Resolution of the picture-OCR enrichment (#645) in pixels per
+    /// picture pixel, before RapidOCR's 2000 px longer-side cap (#666) —
+    /// RapidOCR reads a picture at its native pixels (`1.0`) and only
+    /// shrinks what exceeds 2000 px. `None` (default:
+    /// `DOCLING_RS_PICTURE_OCR_SCALE`, else unset) keeps the image-input
+    /// rule pictures shared with scanned images: [`ocr_scale`](Self::ocr_scale)
+    /// when set, else 3 px/pt shrunk to the 2000 px cap — which upscales a
+    /// 720 × 180 screenshot to 2000 × 500. Pages and image inputs are
+    /// unaffected. Non-positive values are ignored.
+    pub fn picture_ocr_scale(mut self, scale: Option<f32>) -> Self {
+        self.set_picture_ocr_scale(scale);
+        self
+    }
+
+    /// In-place [`picture_ocr_scale`](Self::picture_ocr_scale) for a warm
+    /// pipeline.
+    pub fn set_picture_ocr_scale(&mut self, scale: Option<f32>) {
+        self.picture_ocr_scale = scale
+            .filter(|s| s.is_finite() && *s > 0.0)
+            .or_else(ocr::picture_scale_from_env);
+    }
+
+    /// RapidOCR's handling of text-line orientation (#666), off by default
+    /// (`DOCLING_RS_OCR_TEXTLINE_ORIENTATION` sets the process default): each
+    /// detected line is cropped along the detector's rotated rectangle (a
+    /// perspective warp, `get_rotate_crop_image`) instead of its axis-aligned
+    /// box, a crop at least 1.5× taller than wide is turned 90°
+    /// counter-clockwise, and the PP-LCNet text-line orientation classifier
+    /// (`.models/ocr_textline_ori.onnx`, `DOCLING_OCR_TEXTLINE_ORI_ONNX`)
+    /// turns lines it reads as upside down (`180` above 0.9). Vertical axis
+    /// titles, rotated headers, skewed and upside-down lines then read as
+    /// text. Applies to every PP-OCR line read off the detector — pages and
+    /// pictures alike — but not to table words or the projection fallback;
+    /// the reported boxes stay axis-aligned. A missing classifier warns once
+    /// and keeps the crop and the 90° turn. Tesseract orients on its own.
+    pub fn ocr_textline_orientation(mut self, enable: bool) -> Self {
+        self.set_ocr_textline_orientation(Some(enable));
+        self
+    }
+
+    /// In-place [`ocr_textline_orientation`](Self::ocr_textline_orientation)
+    /// for a warm pipeline (serve, the bindings' `Pipeline`), applied to
+    /// loaded workers too; `None` restores the process default
+    /// (`DOCLING_RS_OCR_TEXTLINE_ORIENTATION`), like
+    /// [`set_ocr_scale`](Self::set_ocr_scale).
+    pub fn set_ocr_textline_orientation(&mut self, enable: Option<bool>) {
+        self.textline_orientation = enable.unwrap_or_else(ocr::textline_orientation_from_env);
+        self.sync_ocr_config();
+    }
+
     /// Whether page extraction should decode the text layer at all. Forced
     /// full-page OCR (the flag or `ocr_mode=full_page|layout_regions`) clears
     /// every extracted cell unread, so the decode is skipped outright —
@@ -2229,21 +2675,74 @@ impl Pipeline {
     fn sync_ocr_config(&mut self) {
         let force = self.force_full_page_ocr || self.ocr_mode.forces_full_page();
         let scale = self.ocr_scale;
+        let orient = self.textline_orientation;
         for worker in self.primary.iter_mut().chain(self.pool.iter_mut()) {
             worker.force_full_page_ocr = force;
             worker.ocr_scale = scale;
+            worker.set_textline_orientation(orient);
+        }
+    }
+
+    /// Pixels per PDF point for picture crops and page images — docling's
+    /// `images_scale` (#519/#520). `None` (the default) delivers crops at the
+    /// pipeline's own page render, 2.0 px/pt (144 dpi), untouched. Another
+    /// value resamples that render (CatmullRom, docling's PIL BICUBIC), so
+    /// values above 2.0 upsample rather than re-render. Each picture's
+    /// `dpi` (docling-core's `ImageRef.dpi`) is 72·scale, so consumers mapping
+    /// pixels back to points stay exact. Layout, OCR and TableFormer inputs
+    /// are unaffected. Non-positive values are ignored.
+    pub fn images_scale(mut self, scale: Option<f32>) -> Self {
+        self.set_images(ImageOutput {
+            scale,
+            ..self.images
+        });
+        self
+    }
+
+    /// Keep each page's render as the document's page image — docling's
+    /// `generate_page_images` (#520): the JSON export writes it as the page's
+    /// `image` (docling-core's `PageItem.image`, at [`Self::images_scale`],
+    /// `dpi` = 72·scale), which is what docling-core's
+    /// `TableItem.get_image` / `FormulaItem.get_image` crop from. Off by
+    /// default: a page image is a full-page PNG per page held in memory.
+    /// Pages converted with `no_ocr` (text layer only) are never rendered and
+    /// get none; streaming conversions carry no page map and drop them.
+    pub fn generate_page_images(mut self, enabled: bool) -> Self {
+        self.set_images(ImageOutput {
+            page_images: enabled,
+            ..self.images
+        });
+        self
+    }
+
+    /// Both image outputs at once, also on already-loaded workers — the
+    /// per-request form a warm pipeline (serve, the Node `Pipeline`) uses,
+    /// like [`set_ocr_scale`](Self::set_ocr_scale). A non-finite or
+    /// non-positive scale reads as unset.
+    pub fn set_images(&mut self, images: ImageOutput) {
+        self.images = ImageOutput {
+            scale: images.scale.filter(|s| s.is_finite() && *s > 0.0),
+            ..images
+        };
+        let images = self.images;
+        for worker in self.primary.iter_mut().chain(self.pool.iter_mut()) {
+            worker.images = images;
         }
     }
 
     /// OCR render scale in pixels per PDF point — docling's `OcrOptions.scale`
     /// (#254, upstream docling#3877; their default 3 = 216 dpi). `None`
     /// (default: `DOCLING_RS_OCR_SCALE`, else unset) feeds the recognizer the
-    /// pipeline's own page render (2.0 px/pt = 144 dpi); a different value
-    /// resamples that render for the OCR input only — layout and TableFormer
-    /// keep their pinned-resolution pixels, so the conformance baseline never
-    /// moves. Lower it when the source raster is already high-resolution and
-    /// upscaling degrades recognition; raise it toward docling's 216 dpi for
-    /// parity experiments. Non-positive values are ignored.
+    /// pipeline's own page render (2.0 px/pt = 144 dpi) for a rendered page,
+    /// and for a standalone image input docling's own resolution (#570): 3
+    /// px/pt shrunk so the longer side stays within RapidOCR's 2000 px — what
+    /// its models see after RapidOCR's `max_side_len` pass (a 754 × 1000 scan
+    /// reads at 2.0). A set value resamples the render / image for the OCR
+    /// input only — layout and TableFormer keep their pinned-resolution
+    /// pixels, so the conformance baseline never moves. Lower it when the
+    /// source raster is already high-resolution and upscaling degrades
+    /// recognition; raise it toward docling's 216 dpi for parity experiments.
+    /// Non-positive values are ignored.
     pub fn ocr_scale(mut self, scale: Option<f32>) -> Self {
         self.ocr_scale = scale
             .filter(|s| s.is_finite() && *s > 0.0)
@@ -2282,6 +2781,26 @@ impl Pipeline {
     /// `DocumentConverter.initialize_pipeline`.
     pub fn warm_up(&mut self) -> Result<(), PdfError> {
         self.primary()?;
+        // The shared TableFormer loads on the first table otherwise — a
+        // document with one would still pay for it (#548).
+        if let Some(tables) = self.tables_slot() {
+            tables.lock().unwrap_or_else(|p| p.into_inner()).load();
+        }
+        Ok(())
+    }
+
+    /// [`warm_up`](Self::warm_up) plus the parallel page-worker pool, so the
+    /// first *multi-page* conversion is no slower than later ones either: a
+    /// document of `DOCLING_RS_PDF_PARALLEL_MIN` pages (6) or more fans out across the pool,
+    /// whose workers each load their own layout/OCR sessions on first use
+    /// (#548 — docling-serve's `--warmup` left a 9-page PDF paying that load).
+    /// Costs the pool's memory up front (~0.4 GB a worker); with a pool of one
+    /// worker it is exactly `warm_up`.
+    pub fn warm_up_all(&mut self) -> Result<(), PdfError> {
+        self.warm_up()?;
+        if self.target_workers >= 2 {
+            self.ensure_pool()?;
+        }
         Ok(())
     }
 
@@ -2304,6 +2823,8 @@ impl Pipeline {
                 self.ocr_engine,
                 self.tesseract_lang.clone(),
                 self.ocr_scale,
+                self.textline_orientation,
+                self.images,
             )?);
         }
         Ok(self.primary.as_mut().unwrap())
@@ -2320,18 +2841,36 @@ impl Pipeline {
         password: Option<&str>,
         name: &str,
     ) -> Result<DoclingDocument, PdfError> {
+        self.convert_outcome(bytes, password, name)
+            .map(|c| c.document)
+    }
+
+    /// [`convert`](Self::convert) that also says how the conversion ended —
+    /// whether the [`document_timeout`](Self::document_timeout) cut it short
+    /// and how many pages made it (`Completion`).
+    pub fn convert_outcome(
+        &mut self,
+        bytes: &[u8],
+        password: Option<&str>,
+        name: &str,
+    ) -> Result<Converted, PdfError> {
+        let deadline = self.deadline();
         let pages = pdfium_backend::page_count(bytes, password)?;
         let range = self.resolve_range(pages)?;
         // Serial vs parallel is decided by the pages actually converted: a
         // 3-page window over a 500-page PDF should not pay the pool load.
         let selected = range.map_or(pages, |(a, b)| b - a + 1);
-        let doc = if self.target_workers >= 2 && selected >= self.parallel_min {
-            self.convert_parallel(bytes, password, name, range, selected)?
-        } else {
-            self.convert_serial(bytes, password, name, range, selected)?
-        };
+        let (document, done, timed_out) =
+            if self.target_workers >= 2 && selected >= self.parallel_min {
+                self.convert_parallel(bytes, password, name, range, selected, deadline)?
+            } else {
+                self.convert_serial(bytes, password, name, range, selected, deadline)?
+            };
         timing::report();
-        Ok(doc)
+        Ok(Converted {
+            document,
+            completion: self.completion(timed_out, done, selected),
+        })
     }
 
     /// Stream pages one at a time through the primary worker — render → process →
@@ -2343,7 +2882,8 @@ impl Pipeline {
         name: &str,
         range: Option<(usize, usize)>,
         selected: usize,
-    ) -> Result<DoclingDocument, PdfError> {
+        deadline: Option<std::time::Instant>,
+    ) -> Result<(DoclingDocument, usize, bool), PdfError> {
         let mut doc = DoclingDocument::new(name);
         let mut confs = std::collections::BTreeMap::new();
         let render_image = !self.no_ocr;
@@ -2351,29 +2891,103 @@ impl Pipeline {
         let progress = self.progress.clone();
         let mut done = 0usize;
         let worker = self.primary()?;
-        pdfium_backend::for_each_page(
+        let timed_out = Self::render_ahead(
             bytes,
             password,
             render_image,
             extract_text,
             range,
-            |n, _total, mut page| {
-                let (mut nodes, links, conf) = worker.process(n, &mut page)?;
+            deadline,
+            |n, mut page| {
+                let (mut nodes, links, conf, page_image) = worker.process(n, &mut page)?;
                 assemble::stamp_page_no(&mut nodes, n + 1);
+                if let Some(img) = page_image {
+                    doc.page_images.insert(n + 1, img);
+                }
                 doc.nodes.extend(nodes);
                 doc.links.extend(links);
                 confs.insert(n + 1, conf);
+                done += 1;
                 if let Some(cb) = &progress {
-                    done += 1;
                     cb(done, selected);
                 }
-                Ok::<(), PdfError>(())
+                Ok(())
             },
         )?;
         assemble::merge_continuations(&mut doc.nodes);
-        self.apply_heading_hierarchy(&mut doc.nodes, Some(bytes), password);
+        self.apply_heading_hierarchy(&mut doc.nodes, Some(bytes));
         doc.confidence = Some(docling_core::ConfidenceReport::from_pages(confs));
-        Ok(doc)
+        Ok((doc, done, timed_out))
+    }
+
+    /// The serial path's schedule (#682): pages render on a scoped thread
+    /// and queue through a [`RENDER_AHEAD`]-page channel while the primary
+    /// worker processes the previous one on the calling thread, so a page's
+    /// two rasters (about a third of a digital page's cost) hide behind
+    /// layout and TableFormer instead of preceding them — the render-ahead
+    /// the worker pool always had, for documents too small for the pool.
+    /// One consumer, pages in order: the output is byte-identical to the
+    /// sequential walk. `consume` runs on the calling thread (a streaming
+    /// `emit` need not be `Send`). A spent budget (#497) ends the walk at
+    /// the renderer and the consumer alike; a consumer error closes the
+    /// channel, which stops the renderer, and is the one reported.
+    fn render_ahead<F>(
+        bytes: &[u8],
+        password: Option<&str>,
+        render_image: bool,
+        extract_text: bool,
+        range: Option<(usize, usize)>,
+        deadline: Option<std::time::Instant>,
+        mut consume: F,
+    ) -> Result<bool, PdfError>
+    where
+        F: FnMut(usize, PdfPage) -> Result<(), PdfError>,
+    {
+        let (tx, rx) = sync_channel::<(usize, PdfPage)>(RENDER_AHEAD);
+        std::thread::scope(|s| {
+            let render = s.spawn(move || {
+                pdfium_backend::for_each_page(
+                    bytes,
+                    password,
+                    render_image,
+                    extract_text,
+                    range,
+                    |n, _total, page| {
+                        if expired(deadline) {
+                            return Err(timeout_sentinel());
+                        }
+                        tx.send((n, page))
+                            .map_err(|_| PdfError::Pdfium("page channel closed".into()))
+                    },
+                )
+            });
+            let mut timed_out = false;
+            let mut failed = None;
+            for (n, page) in rx.iter() {
+                if expired(deadline) {
+                    timed_out = true;
+                    break;
+                }
+                if let Err(e) = consume(n, page) {
+                    failed = Some(e);
+                    break;
+                }
+            }
+            // Closing the channel ends a walk still rendering.
+            drop(rx);
+            let walk = render
+                .join()
+                .map_err(|_| PdfError::Pdfium("page render thread panicked".into()))?;
+            if let Some(e) = failed {
+                return Err(e);
+            }
+            match walk {
+                Ok(()) => Ok(timed_out),
+                Err(PdfError::Timeout(_)) => Ok(true),
+                Err(_) if timed_out => Ok(true),
+                Err(e) => Err(e),
+            }
+        })
     }
 
     /// Render pages serially on this thread (pdfium) and process them in parallel
@@ -2388,10 +3002,12 @@ impl Pipeline {
         name: &str,
         range: Option<(usize, usize)>,
         selected: usize,
-    ) -> Result<DoclingDocument, PdfError> {
-        self.ensure_pool()?;
+        deadline: Option<std::time::Instant>,
+    ) -> Result<(DoclingDocument, usize, bool), PdfError> {
+        self.ensure_pool_for(selected)?;
         let progress = self.progress.clone();
         let pages_done = std::sync::atomic::AtomicUsize::new(0);
+        let timed_out = std::sync::atomic::AtomicBool::new(false);
         let n_workers = self.pool.len();
         let render_image = !self.no_ocr;
         let extract_text = self.extract_text_layer();
@@ -2413,17 +3029,23 @@ impl Pipeline {
                 let first_err = Arc::clone(&first_err);
                 let progress = progress.clone();
                 let pages_done = &pages_done;
+                let timed_out = &timed_out;
                 s.spawn(move || {
-                    worker.run_pool(&work_rx, layout_batch, |idx, out| {
+                    worker.run_pool(&work_rx, layout_batch, deadline, |idx, out| {
                         match out {
                             Ok(out) => {
                                 results.lock().unwrap().push((idx, out));
+                                let d = pages_done
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                                    + 1;
                                 if let Some(cb) = &progress {
-                                    let d = pages_done
-                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                                        + 1;
                                     cb(d, selected);
                                 }
+                            }
+                            // The budget ran out before this page's turn: the
+                            // page is left out, the document is partial.
+                            Err(PdfError::Timeout(_)) => {
+                                timed_out.store(true, std::sync::atomic::Ordering::Relaxed);
                             }
                             Err(e) => {
                                 let mut slot = first_err.lock().unwrap();
@@ -2438,7 +3060,8 @@ impl Pipeline {
             }
             // Render on this thread and feed the workers; backpressure blocks here
             // when the channel is full. Dropping `work_tx` afterwards signals the
-            // workers (recv → Err) to finish.
+            // workers (recv → Err) to finish. A spent budget ends the walk before
+            // the next page is rendered.
             let render = pdfium_backend::for_each_page(
                 bytes,
                 password,
@@ -2446,16 +3069,25 @@ impl Pipeline {
                 extract_text,
                 range,
                 |i, _total, page| {
+                    if expired(deadline) {
+                        return Err(timeout_sentinel());
+                    }
                     work_tx
                         .send((i, page))
                         .map_err(|_| PdfError::Pdfium("page-worker channel closed".into()))
                 },
             );
             drop(work_tx);
-            if let Err(e) = render {
-                let mut slot = first_err.lock().unwrap();
-                if slot.is_none() {
-                    *slot = Some(e);
+            match render {
+                Ok(()) => {}
+                Err(PdfError::Timeout(_)) => {
+                    timed_out.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                Err(e) => {
+                    let mut slot = first_err.lock().unwrap();
+                    if slot.is_none() {
+                        *slot = Some(e);
+                    }
                 }
             }
         });
@@ -2470,18 +3102,23 @@ impl Pipeline {
             .into_inner()
             .unwrap();
         results.sort_by_key(|(idx, _)| *idx);
+        let done = results.len();
         let mut doc = DoclingDocument::new(name);
         let mut confs = std::collections::BTreeMap::new();
-        for (idx, (mut nodes, links, conf)) in results {
+        for (idx, (mut nodes, links, conf, page_image)) in results {
             assemble::stamp_page_no(&mut nodes, idx + 1);
+            if let Some(img) = page_image {
+                doc.page_images.insert(idx + 1, img);
+            }
             doc.nodes.extend(nodes);
             doc.links.extend(links);
             confs.insert(idx + 1, conf);
         }
         assemble::merge_continuations(&mut doc.nodes);
-        self.apply_heading_hierarchy(&mut doc.nodes, Some(bytes), password);
+        self.apply_heading_hierarchy(&mut doc.nodes, Some(bytes));
         doc.confidence = Some(docling_core::ConfidenceReport::from_pages(confs));
-        Ok(doc)
+        let timed_out = timed_out.load(std::sync::atomic::Ordering::Relaxed);
+        Ok((doc, done, timed_out))
     }
 
     /// Convert a PDF in **streaming** mode: `emit` is called with each finalized,
@@ -2505,17 +3142,38 @@ impl Pipeline {
     where
         F: FnMut(Vec<Node>, Vec<(String, String)>) -> Result<(), PdfError>,
     {
+        self.convert_streaming_outcome(bytes, password, name, emit)
+            .map(|_| ())
+    }
+
+    /// [`convert_streaming`](Self::convert_streaming) that also says how the
+    /// conversion ended ([`Completion`]): a spent
+    /// [`document_timeout`](Self::document_timeout) stops the walk, the pages
+    /// finished so far are emitted (the tail included) and the outcome is
+    /// `TimedOut` — never an error.
+    pub fn convert_streaming_outcome<F>(
+        &mut self,
+        bytes: &[u8],
+        password: Option<&str>,
+        name: &str,
+        emit: F,
+    ) -> Result<Completion, PdfError>
+    where
+        F: FnMut(Vec<Node>, Vec<(String, String)>) -> Result<(), PdfError>,
+    {
         let _ = name; // page nodes carry no name; the caller owns the document name.
+        let deadline = self.deadline();
         let pages = pdfium_backend::page_count(bytes, password)?;
         let range = self.resolve_range(pages)?;
         let selected = range.map_or(pages, |(a, b)| b - a + 1);
         let r = if self.target_workers >= 2 && selected >= self.parallel_min {
-            self.convert_streaming_parallel(bytes, password, range, emit)
+            self.convert_streaming_parallel(bytes, password, range, deadline, selected, emit)
         } else {
-            self.convert_streaming_serial(bytes, password, range, emit)
+            self.convert_streaming_serial(bytes, password, range, deadline, emit)
         };
         timing::report();
-        r
+        let (done, timed_out) = r?;
+        Ok(self.completion(timed_out, done, selected))
     }
 
     /// Serial streaming: render → process → emit, one page at a time, holding back
@@ -2525,8 +3183,9 @@ impl Pipeline {
         bytes: &[u8],
         password: Option<&str>,
         range: Option<(usize, usize)>,
+        deadline: Option<std::time::Instant>,
         mut emit: F,
-    ) -> Result<(), PdfError>
+    ) -> Result<(usize, bool), PdfError>
     where
         F: FnMut(Vec<Node>, Vec<(String, String)>) -> Result<(), PdfError>,
     {
@@ -2534,21 +3193,25 @@ impl Pipeline {
         let render_image = !self.no_ocr;
         let extract_text = self.extract_text_layer();
         let worker = self.primary()?;
-        pdfium_backend::for_each_page(
+        let mut done = 0usize;
+        let timed_out = Self::render_ahead(
             bytes,
             password,
             render_image,
             extract_text,
             range,
-            |n, _total, mut page| {
+            deadline,
+            |n, mut page| {
                 // Confidence is dropped on the streaming path: the report is
                 // only complete once every page has run, which defeats
                 // page-by-page emission — buffered `convert` carries it.
-                let (nodes, links, _conf) = worker.process(n, &mut page)?;
+                let (nodes, links, _conf, _page_image) = worker.process(n, &mut page)?;
+                done += 1;
                 emit(asm.push(nodes), links)
             },
         )?;
-        emit(asm.finish(), Vec::new())
+        emit(asm.finish(), Vec::new())?;
+        Ok((done, timed_out))
     }
 
     /// Parallel streaming: pages render serially on a dedicated thread (pdfium is
@@ -2562,12 +3225,14 @@ impl Pipeline {
         bytes: &[u8],
         password: Option<&str>,
         range: Option<(usize, usize)>,
+        deadline: Option<std::time::Instant>,
+        selected: usize,
         mut emit: F,
-    ) -> Result<(), PdfError>
+    ) -> Result<(usize, bool), PdfError>
     where
         F: FnMut(Vec<Node>, Vec<(String, String)>) -> Result<(), PdfError>,
     {
-        self.ensure_pool()?;
+        self.ensure_pool_for(selected)?;
         let n_workers = self.pool.len();
         let render_image = !self.no_ocr;
         let extract_text = self.extract_text_layer();
@@ -2585,6 +3250,8 @@ impl Pipeline {
         let mut workers = std::mem::take(&mut self.pool);
         let mut asm = assemble::StreamAssembler::new();
         let mut first_err: Option<PdfError> = None;
+        let mut timed_out = false;
+        let mut done = 0usize;
 
         std::thread::scope(|s| {
             // Workers: pull a batch of pages (whatever is already rendered, up
@@ -2594,14 +3261,15 @@ impl Pipeline {
                 let work_rx = Arc::clone(&work_rx);
                 let res_tx = res_tx.clone();
                 s.spawn(move || {
-                    worker.run_pool(&work_rx, layout_batch, |idx, out| {
+                    worker.run_pool(&work_rx, layout_batch, deadline, |idx, out| {
                         // `false` once the consumer is gone.
                         res_tx.send(out.map(|o| (idx, o))).is_ok()
                     });
                 });
             }
             // Renderer: feed pages to the pool on its own thread (pdfium stays on a
-            // single thread); report a render error through the same channel.
+            // single thread); report a render error through the same channel. A
+            // spent budget ends the walk before the next page is rendered.
             {
                 let res_tx = res_tx.clone();
                 s.spawn(move || {
@@ -2612,6 +3280,9 @@ impl Pipeline {
                         extract_text,
                         range,
                         |i, _total, page| {
+                            if expired(deadline) {
+                                return Err(timeout_sentinel());
+                            }
                             work_tx
                                 .send((i, page))
                                 .map_err(|_| PdfError::Pdfium("page-worker channel closed".into()))
@@ -2628,10 +3299,15 @@ impl Pipeline {
 
             // Collector (this thread): reorder into document order and emit.
             // With a page window, indices start at the window's first page.
+            // A timed-out page leaves a hole in the sequence: everything
+            // before it emits in order, the pages after it stay buffered —
+            // they are the pages the budget did not cover, and the document
+            // ends at the cut like the buffered path's.
             let mut buffer: BTreeMap<usize, PageOut> = BTreeMap::new();
             let mut next = range.map_or(0, |(first, _)| first);
             for msg in res_rx.iter() {
                 match msg {
+                    Err(PdfError::Timeout(_)) => timed_out = true,
                     Err(e) => {
                         if first_err.is_none() {
                             first_err = Some(e);
@@ -2642,15 +3318,24 @@ impl Pipeline {
                         if first_err.is_some() {
                             continue; // keep draining so the threads can exit
                         }
-                        while let Some((nodes, links, _conf)) = buffer.remove(&next) {
+                        // A stream carries Markdown, not the page map: page
+                        // images (#520) have nowhere to go and are dropped.
+                        while let Some((nodes, links, _conf, _page_image)) = buffer.remove(&next) {
                             if let Err(e) = emit(asm.push(nodes), links) {
                                 first_err = Some(e);
                                 break;
                             }
                             next += 1;
+                            done += 1;
                         }
                     }
                 }
+            }
+            // Pages that finished after a hole (a page the budget skipped
+            // before them) cannot follow it in document order; count them
+            // out of the document like the skipped one.
+            if timed_out && !buffer.is_empty() {
+                buffer.clear();
             }
         });
         // Threads have joined; restore the pool for the next conversion.
@@ -2659,14 +3344,24 @@ impl Pipeline {
         if let Some(e) = first_err {
             return Err(e);
         }
-        emit(asm.finish(), Vec::new())
+        emit(asm.finish(), Vec::new())?;
+        Ok((done, timed_out))
     }
 
     /// Lazily grow the pool to `target_workers`, loading the new workers
     /// concurrently (model load is mostly I/O + mmap, so N loads overlap to roughly
     /// one load's wall-time). Cached for reuse across documents.
     fn ensure_pool(&mut self) -> Result<(), PdfError> {
-        let need = self.target_workers.saturating_sub(self.pool.len());
+        self.ensure_pool_for(self.target_workers)
+    }
+
+    /// [`ensure_pool`](Self::ensure_pool) for a document of `pages` pages:
+    /// no more workers than pages (#682 — a two-page document on a 16-core
+    /// host loads two workers, not eight), never fewer than two, and never
+    /// more than `target_workers`; a later, longer document grows the pool.
+    fn ensure_pool_for(&mut self, pages: usize) -> Result<(), PdfError> {
+        let want = pages.max(2).min(self.target_workers);
+        let need = want.saturating_sub(self.pool.len());
         if need == 0 {
             return Ok(());
         }
@@ -2679,6 +3374,8 @@ impl Pipeline {
         let ocr_engine = self.ocr_engine;
         let tesseract_lang = self.tesseract_lang.clone();
         let ocr_scale = self.ocr_scale;
+        let textline_orientation = self.textline_orientation;
+        let images = self.images;
         let enrich = self.enrich;
         let tables = self.tables_slot();
         let enrich_slots = self.enrich_slots();
@@ -2702,6 +3399,8 @@ impl Pipeline {
                             ocr_engine,
                             tesseract_lang,
                             ocr_scale,
+                            textline_orientation,
+                            images,
                         )
                     })
                 })
@@ -2727,6 +3426,7 @@ impl Pipeline {
             scale: 1.0,
             cells: Vec::new(),
             code_cells: Vec::new(),
+            checkboxes: Vec::new(),
             word_cells: Vec::new(),
             // A standalone image *is* its own scale-1.0 page image, so the
             // layout model sees it through the docling-exact PIL kernel.
@@ -2734,6 +3434,7 @@ impl Pipeline {
             image,
             links: Vec::new(),
             rotation: 0,
+            pending_image: None,
         };
         self.process_pages(vec![page], name)
     }
@@ -2751,8 +3452,11 @@ impl Pipeline {
         let mut confs = std::collections::BTreeMap::new();
         let worker = self.primary()?;
         for (n, page) in pages.iter_mut().enumerate() {
-            let (mut nodes, links, conf) = worker.process(n, page)?;
+            let (mut nodes, links, conf, page_image) = worker.process(n, page)?;
             assemble::stamp_page_no(&mut nodes, n + 1);
+            if let Some(img) = page_image {
+                doc.page_images.insert(n + 1, img);
+            }
             doc.nodes.extend(nodes);
             doc.links.extend(links);
             confs.insert(n + 1, conf);
@@ -2761,7 +3465,7 @@ impl Pipeline {
         // No PDF behind these pages (images, METS): the heading-hierarchy
         // stage degrades to the numbering signal — exactly docling without
         // an outline or parsed pages.
-        self.apply_heading_hierarchy(&mut doc.nodes, None, None);
+        self.apply_heading_hierarchy(&mut doc.nodes, None);
         doc.confidence = Some(docling_core::ConfidenceReport::from_pages(confs));
         Ok(doc)
     }
@@ -2771,7 +3475,7 @@ impl Pipeline {
 /// mode prints in its per-document start line.
 #[cfg(feature = "ml")]
 pub fn page_count(bytes: &[u8], password: Option<&str>) -> Result<usize, PdfError> {
-    Ok(pdfium_backend::page_count(bytes, password)?)
+    pdfium_backend::page_count(bytes, password)
 }
 
 #[cfg(feature = "ml")]
@@ -2971,6 +3675,26 @@ mod image_limit_tests {
     }
 }
 
+#[cfg(all(test, feature = "ml"))]
+mod ocr_scale_tests {
+    use super::*;
+
+    /// #570: an explicit scale wins everywhere; a rendered page keeps its
+    /// render; a scale-1.0 image page reads at docling's 3 px/pt, shrunk to
+    /// RapidOCR's 2000 px longer side (a FUNSD scan at 2.0, a 3000 px photo
+    /// downsampled to 0.67), and an image that lands at 1.0 is not resampled.
+    #[test]
+    fn image_inputs_follow_rapidocrs_resolution() {
+        assert_eq!(page_ocr_scale(Some(1.5), 754.0, 1000.0, 1.0), Some(1.5));
+        assert_eq!(page_ocr_scale(None, 612.0, 792.0, 2.0), None);
+        assert_eq!(page_ocr_scale(None, 754.0, 1000.0, 1.0), Some(2.0));
+        assert_eq!(page_ocr_scale(None, 400.0, 600.0, 1.0), Some(3.0));
+        let s = page_ocr_scale(None, 3000.0, 2000.0, 1.0).unwrap();
+        assert!((s - 2.0 / 3.0).abs() < 1e-6, "{s}");
+        assert_eq!(page_ocr_scale(None, 2000.0, 1500.0, 1.0), None);
+    }
+}
+
 #[cfg(test)]
 mod median_tests {
     #[test]
@@ -2981,6 +3705,29 @@ mod median_tests {
         assert_eq!(super::tf_match::median_for_test(&mut []), 0.0);
         assert_eq!(super::tf_match::median_for_test(&mut [4.0, 2.0]), 3.0);
         assert_eq!(super::tf_match::median_for_test(&mut [5.0, 1.0, 3.0]), 3.0);
+    }
+}
+
+#[cfg(test)]
+mod unreadable_tests {
+    /// The text-layer path (the wasm build's only one) tells a file nothing
+    /// can open apart from a PDF that merely has no text layer: garbage is
+    /// an error about the file, a real PDF converts.
+    #[test]
+    fn text_layer_path_reports_an_unreadable_file() {
+        for bytes in [b"garbage".as_slice(), b"", b"%PDF-1.7\n%%EOF\n"] {
+            let err = super::convert_text_layer(bytes, "x.pdf").unwrap_err();
+            assert!(err.to_string().contains("not a readable PDF"), "{err}");
+        }
+        let real = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/data/pdf/sources/multi_page.pdf"),
+        )
+        .unwrap();
+        assert!(!super::convert_text_layer(&real, "multi_page.pdf")
+            .unwrap()
+            .nodes
+            .is_empty());
     }
 }
 

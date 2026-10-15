@@ -31,6 +31,7 @@ pub fn refine_regions(
     crate::assemble::add_orphan_regions(&mut regions, cells);
     crate::assemble::drop_false_pictures(&mut regions, cells, page_w, page_h);
     crate::assemble::drop_contained_regulars(&mut regions);
+    crate::assemble::reclaim_heading_body_footers(&mut regions, page_w);
     // A "picture" that is really a colored text panel reads out as paragraphs
     // instead of shipping as pixels (needs a text layer; pre-OCR this is a
     // no-op and the OCR paths re-run it once cells exist).
@@ -122,7 +123,7 @@ pub fn assemble_page_with_tables(
 ) -> AssembledPage {
     table_rows.resize(regions.len(), None);
     let enrich = vec![None; regions.len()];
-    crate::assemble::assemble_page(page, regions, &table_rows, &enrich)
+    crate::assemble::assemble_page(page, regions, &table_rows, &enrich, None)
 }
 
 /// Stitch per-page results into a document: cross-page paragraph

@@ -31,12 +31,10 @@ BIN="$(pwd)/target/release/docling-rs"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-# The binary resolves .models/.pdfium relative to its CWD (then next to the exe);
-# we run it inside $tmp so the .dclx lands there, so make the assets reachable
+# The binary resolves .models relative to its CWD (then next to the exe); we
+# run it inside $tmp so the .dclx lands there, so make the assets reachable
 # from $tmp. Harmless for declarative formats that load no models.
-export PDFIUM_DYNAMIC_LIB_PATH="$(pwd)/.pdfium/lib"
 [ -d models ]  && ln -sfn "$(pwd)/models"  "$tmp/models"
-[ -d .pdfium ] && ln -sfn "$(pwd)/.pdfium" "$tmp/.pdfium"
 
 declare -a fmts=()
 if [ $# -gt 0 ]; then fmts=("$@"); else
@@ -61,12 +59,14 @@ for fmt in "${fmts[@]}"; do
     else
       unzip -p "$ref" document.xml > "$tmp/ref.xml" 2>/dev/null
       unzip -p "$ours" document.xml > "$tmp/ours.xml" 2>/dev/null
-      # Canonicalize exported image asset names. docling names referenced images
-      # assets/image_NNNNNN_<sha256>.png, where the digest is over the PIL-re-encoded
-      # PNG bytes — not reproducible outside docling. We emit the same structure with
-      # a source-bytes hash, so the index+digest are normalized on both sides here;
-      # only a genuine structural difference (missing/extra <src>) then shows up.
-      sed -E -i 's#image_[0-9]{6}_[0-9a-f]+\.png#image_NORM.png#g' \
+      # Canonicalize the digest of exported image asset names. docling names
+      # referenced images assets/image_NNNNNN_<sha256>.png, the digest over the
+      # decoded pixels (PIL `tobytes()`). We reproduce it for PNG and JPEG
+      # sources (docling-core pixel_digest.rs) and the index for every picture
+      # — every reference in the corpus matches — but a LibreOffice-rendered
+      # EMF/DrawingML picture (docling with soffice installed) cannot, so only
+      # the digest is normalized: a wrong index or a missing/extra <src> shows.
+      sed -E -i 's#(image_[0-9]{6})_[0-9a-f]+\.png#\1_NORM.png#g' \
         "$tmp/ref.xml" "$tmp/ours.xml"
       # Same rationale for base64 data URIs (furniture pictures embed the PIL
       # re-encoded PNG inline): normalize the payload, keep the structure.

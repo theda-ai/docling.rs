@@ -1,11 +1,14 @@
 # Prebuilt `docling-rs` CLI binaries — and the `docling-ffi` C ABI library
-# (#193, cdylib + docling.h) — attached to each GitHub Release.
+# (#193, cdylib + docling.h) — attached to each published GitHub Release.
 # `cargo install docling-cli` means several minutes of compiling on the user's
 # machine; a downloadable binary is the first thing launch-day visitors look
 # for, and FFI embedders (C#/Go/Java/Swift) get a lib + header instead of a
-# full clone-and-build. Runs automatically when ci.yml publishes a release
-# (the release is created with RELEASE_PAT, so the `release: published` event
-# fires for this workflow), or on manual dispatch for an existing tag.
+# full clone-and-build. Runs on manual dispatch for an existing release tag —
+# release.yml runs it, with PyPI, npm and the images, for a release the
+# maintainer picks, then marks that release GitHub's latest. install.sh
+# downloads the binary from the newest release that has it, so the per-merge
+# releases ci.yml cuts (no assets, `--latest=false`) and the asset-only
+# `npm-cuda-v*` / `models-v*` releases never get in its way (#707).
 #
 # macOS prebuilds are omitted for the same reason as in npm-publish.yml:
 # GitHub-hosted macOS runners are blocked in this environment, and darwin
@@ -20,12 +23,19 @@
 # runtime assets (pdfium + models) stay a separate download —
 # scripts/install/download_dependencies.sh — exactly as with a cargo install;
 # the CLI prints that instruction when they are missing.
+#
+# s390x (IBM Z, #504) is cross-compiled from the x86_64 runner with
+# cargo-zigbuild against glibc 2.28 (the distro cross toolchain would pin
+# the binaries to its 2.39 sysroot and shut out RHEL 8/9 mainframes) and
+# built with `ort-load-dynamic`: pyke ships no ONNX Runtime for the target,
+# so the binary `dlopen`s a `libonnxruntime.so` found on the machine
+# (ORT_DYLIB_PATH, .models/onnxruntime/, the library search path) and,
+# without one, converts every format but the ML stages (PDF
+# layout/tables/OCR, ASR).
 
 name: cli-binaries
 
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       tag:
@@ -57,12 +67,19 @@ jobs:
             host: ubuntu-24.04-arm
           - target: x86_64-pc-windows-msvc
             host: windows-latest
+          # IBM Z: no native runner, cross-compiled with cargo-zigbuild (see
+          # the header). `cross` is the binutils prefix used to strip.
+          - target: s390x-unknown-linux-gnu
+            host: ubuntu-24.04
+            cross: s390x-linux-gnu
+            zig: true
+            features: ort-load-dynamic
     env:
-      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      TAG: ${{ inputs.tag }}
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.release.tag_name || inputs.tag }}
+          ref: ${{ inputs.tag }}
 
       # rustup is preinstalled on GitHub-hosted runners; the org allowlists only
       # GitHub-owned / vetted actions, so no marketplace toolchain action.
@@ -72,6 +89,15 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
           rustup target add ${{ matrix.target }}
+
+      - name: Install cargo-zigbuild and the target binutils
+        if: matrix.zig
+        shell: bash
+        run: |
+          python3 -m pip install --user --break-system-packages ziglang cargo-zigbuild
+          cargo zigbuild --help >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends binutils-${{ matrix.cross }}
 
       - uses: actions/cache@v6
         with:
@@ -86,23 +112,30 @@ jobs:
       - name: Build
         shell: bash
         run: |
-          cargo build --release --locked -p docling-cli --target ${{ matrix.target }}
+          features="${{ matrix.features }}"
+          if [ -n "${{ matrix.zig }}" ]; then
+            build="cargo zigbuild"; target="${{ matrix.target }}.2.28"
+          else
+            build="cargo build"; target="${{ matrix.target }}"
+          fi
+          $build --release --locked -p docling-cli --target "$target" ${features:+--features $features}
           # The C ABI shared library (#193) rides the same job: the docling
           # dependency tree is already compiled, only the thin FFI layer adds.
-          cargo build --release --locked -p docling-ffi --target ${{ matrix.target }}
+          $build --release --locked -p docling-ffi --target "$target" ${features:+--features $features}
 
       - name: Package (unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
+          strip="${{ matrix.cross && format('{0}-strip', matrix.cross) || 'strip' }}"
           bin="target/${{ matrix.target }}/release/docling-rs"
-          strip "$bin"
+          "$strip" "$bin"
           tar -czf "docling-rs-$TAG-${{ matrix.target }}.tar.gz" -C "$(dirname "$bin")" docling-rs
           # FFI: the cdylib + the committed cbindgen header. The staticlib is
           # not shipped (it inlines the whole ONNX runtime; static embedders
           # build from source).
           lib="target/${{ matrix.target }}/release/libdocling_ffi.so"
-          strip "$lib"
+          "$strip" "$lib"
           staging=$(mktemp -d)
           cp "$lib" crates/docling-ffi/include/docling.h "$staging/"
           tar -czf "docling-ffi-$TAG-${{ matrix.target }}.tar.gz" -C "$staging" libdocling_ffi.so docling.h
@@ -143,5 +176,5 @@ jobs:
       - name: Upload to the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          TAG: ${{ inputs.tag }}
         run: gh release upload "$TAG" assets/* --repo "${{ github.repository }}" --clobber

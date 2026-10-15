@@ -14,7 +14,13 @@
 //!   index (`OutlineTextRefAtom`), a plain textbox embeds its own text atoms.
 //!
 //! Shapes are walked with their anchors, SLWT references are resolved, and
-//! items are emitted in geometric order (top-to-bottom, left-to-right).
+//! items are emitted in docling's reading order (rows by top edge with a
+//! 0.05" tolerance, left to right within a row — [`by_position`]). A
+//! paragraph's bullet is its own `StyleTextPropAtom` flag when it sets one,
+//! else the one its master's `TextMasterStyleAtom` gives its text type and
+//! indent level — how PowerPoint stores an untouched body placeholder's
+//! bullets, and how LibreOffice (docling's `.ppt` reader) resolves them
+//! (#627).
 //! A **group** of shapes whose child anchors tile a ≥2×≥2 grid is
 //! reconstructed into a [`Node::Table`] — this is how legacy PPT stores
 //! tables (a table *is* a shape group), so docling's PPTX table output has a
@@ -42,6 +48,9 @@ const RT_TEXT_BYTES_ATOM: u16 = 0x0FA8;
 const RT_STYLE_TEXT_PROP_ATOM: u16 = 0x0FA1;
 const RT_STYLE_TEXT_PROP9_ATOM: u16 = 0x0FAC;
 const RT_BINARY_TAG_DATA: u16 = 0x138B;
+const RT_MAIN_MASTER: u16 = 0x03F8;
+const RT_SLIDE_ATOM: u16 = 0x03EF;
+const RT_TEXT_MASTER_STYLE_ATOM: u16 = 0x0FA3;
 const OA_CLIENT_DATA: u16 = 0xF011;
 
 // OfficeArt ([MS-ODRAW]) record types.
@@ -61,13 +70,28 @@ pub struct PptBackend;
 
 impl DeclarativeBackend for PptBackend {
     fn convert(&self, source: &SourceDocument) -> Result<DoclingDocument, ConversionError> {
-        let cfb = CompoundFile::open(&source.bytes)
-            .ok_or_else(|| ConversionError::Parse("ppt: not a compound file".into()))?;
-        let stream = cfb
-            .stream("PowerPoint Document")
-            .ok_or_else(|| ConversionError::Parse("ppt: no PowerPoint Document stream".into()))?;
-        if cfb.stream("EncryptedSummary").is_some() {
-            return Err(ConversionError::Parse("ppt: document is encrypted".into()));
+        let cfb = CompoundFile::open(&source.bytes).ok_or_else(|| {
+            ConversionError::Parse(CompoundFile::open_error("ppt", &source.bytes))
+        })?;
+        let stream = cfb.stream("PowerPoint Document").ok_or_else(|| {
+            ConversionError::Parse(cfb.stream_error("ppt", "PowerPoint Document"))
+        })?;
+        // #624: an encrypted presentation used to convert to an empty
+        // document — its records are ciphertext, so the walk below found no
+        // slide. `EncryptedSummary` alone never fired on PowerPoint's own
+        // files; the reliable marker is the current edit's reference to a
+        // `CryptSession10Container`.
+        // `EncryptedSummary` decides only when there is no edit chain to read:
+        // a decrypted file (#625) keeps the stream, but no longer the
+        // reference.
+        let current_user = cfb.stream("Current User").unwrap_or_default();
+        let edits = UserEdits::read(&current_user, &stream);
+        let encrypted = match &edits {
+            Some(edits) => edits.encrypted(),
+            None => cfb.stream("EncryptedSummary").is_some(),
+        };
+        if encrypted {
+            return Err(crate::backend::offcrypto::encrypted("ppt"));
         }
 
         // SLWT text blocks per slide, in presentation order.
@@ -84,10 +108,21 @@ impl DeclarativeBackend for PptBackend {
             }
         }
 
-        // Shape items per slide, from each Slide container's drawing.
-        let slide_shapes: Vec<Vec<ShapeItem>> = Records::new(&stream)
+        // Shape items per slide, from each Slide container's drawing, with
+        // the text styles of the master the slide follows.
+        let masters = master_styles(&stream, edits.as_ref());
+        let fallback = Records::new(&stream)
+            .find(|(h, _)| h.rec_type == RT_MAIN_MASTER)
+            .map(|(_, body)| MasterStyles::read(body))
+            .unwrap_or_default();
+        let slide_shapes: Vec<(Vec<ShapeItem>, &MasterStyles)> = Records::new(&stream)
             .filter(|(h, _)| h.rec_type == RT_SLIDE)
-            .map(|(_, body)| slide_items(body))
+            .map(|(_, body)| {
+                let master = master_id_ref(body)
+                    .and_then(|id| masters.get(&id))
+                    .unwrap_or(&fallback);
+                (slide_items(body), master)
+            })
             .collect();
 
         let n = slwt.len().max(slide_shapes.len());
@@ -95,8 +130,10 @@ impl DeclarativeBackend for PptBackend {
         let mut first = true;
         for i in 0..n {
             let blocks = slwt.get(i).cloned().unwrap_or_default();
-            let shapes = slide_shapes.get(i).cloned().unwrap_or_default();
-            let nodes = assemble_slide(blocks, shapes);
+            let (shapes, master) = slide_shapes
+                .get(i)
+                .map_or((Vec::new(), &fallback), |(s, m)| (s.clone(), *m));
+            let nodes = assemble_slide(blocks, shapes, master);
             if nodes.is_empty() {
                 continue;
             }
@@ -112,10 +149,179 @@ impl DeclarativeBackend for PptBackend {
     }
 }
 
+/// A slide's (or title master's) `SlideAtom.masterIdRef` — the master's
+/// slide id ([MS-PPT] 2.4.3).
+fn master_id_ref(slide_body: &[u8]) -> Option<u32> {
+    Records::new(slide_body)
+        .find(|(h, _)| h.rec_type == RT_SLIDE_ATOM)
+        .and_then(|(_, b)| Some(u32::from_le_bytes(b.get(12..16)?.try_into().ok()?)))
+}
+
+/// The text styles of every master, by master id: the master list
+/// (`SlideListWithText` instance 1) names each master's persist object and
+/// id, and the persist directory says where it lives. PowerPoint 2007 and
+/// later write each slide layout as a master of its own, so slides of one
+/// deck follow different ones. A title master (a `SlideContainer` in the
+/// list) carries no text styles of its own and takes its main master's.
+fn master_styles(
+    stream: &[u8],
+    edits: Option<&UserEdits>,
+) -> std::collections::HashMap<u32, MasterStyles> {
+    let mut styles = std::collections::HashMap::new();
+    let Some(edits) = edits else {
+        return styles;
+    };
+    let mut title_masters = Vec::new();
+    for (header, body) in Records::new(stream) {
+        if header.rec_type != RT_DOCUMENT {
+            continue;
+        }
+        for (h, list) in Records::new(body) {
+            if h.rec_type != RT_SLIDE_LIST_WITH_TEXT || h.instance != 1 {
+                continue;
+            }
+            for (h2, atom) in Records::new(list) {
+                if h2.rec_type != RT_SLIDE_PERSIST_ATOM || atom.len() < 16 {
+                    continue;
+                }
+                let persist = u32::from_le_bytes(atom[0..4].try_into().unwrap());
+                let id = u32::from_le_bytes(atom[12..16].try_into().unwrap());
+                let Some(&off) = edits.persist.get(&persist) else {
+                    continue;
+                };
+                let Some((h3, master)) = stream
+                    .get(off as usize..)
+                    .and_then(|d| Records::new(d).next())
+                else {
+                    continue;
+                };
+                match h3.rec_type {
+                    RT_MAIN_MASTER => {
+                        styles.insert(id, MasterStyles::read(master));
+                    }
+                    RT_SLIDE => title_masters.extend(master_id_ref(master).map(|m| (id, m))),
+                    _ => {}
+                }
+            }
+        }
+    }
+    for (id, main) in title_masters {
+        if let Some(main) = styles.get(&main).cloned() {
+            styles.insert(id, main);
+        }
+    }
+    styles
+}
+
+const RT_USER_EDIT_ATOM: u16 = 0x0FF5;
+const RT_PERSIST_DIRECTORY_ATOM: u16 = 0x1772;
+const RT_CRYPT_SESSION10_CONTAINER: u16 = 0x2F14;
+
+/// The user-edit chain of a `PowerPoint Document` stream ([MS-PPT] 2.3.2,
+/// 2.3.4): the `Current User` stream's `CurrentUserAtom` names the newest
+/// `UserEditAtom`, each edit points to the one before it and to its
+/// `PersistDirectoryAtom`, and the persist directory maps persist object ids
+/// to stream offsets — the newest edit's mapping of an id wins. None of
+/// these records is encrypted in an encrypted file (2.3.7), which is what
+/// makes them the place to look for the encryption.
+pub(crate) struct UserEdits {
+    /// Persist object id → offset in the stream, the newest edit's wins.
+    persist: std::collections::HashMap<u32, u32>,
+    /// Every edit's (persist id, offset) pairs, superseded ones included —
+    /// decryption (#625) must reach every object the stream holds.
+    pub(crate) objects: Vec<(u32, u32)>,
+    /// The newest edit's `encryptSessionPersistIdRef` — present only when
+    /// that `UserEditAtom` is 0x20 bytes long, i.e. the file is encrypted.
+    encrypt_ref: Option<u32>,
+    /// Where that field sits in the stream.
+    encrypt_ref_at: Option<usize>,
+}
+
+impl UserEdits {
+    pub(crate) fn read(current_user: &[u8], doc: &[u8]) -> Option<Self> {
+        let u32_at =
+            |d: &[u8], o: usize| Some(u32::from_le_bytes(d.get(o..o + 4)?.try_into().ok()?));
+        // CurrentUserAtom: 8-byte header, size, headerToken, offsetToCurrentEdit.
+        let mut off = u32_at(current_user, 16)? as usize;
+        let mut edits = Self {
+            persist: std::collections::HashMap::new(),
+            objects: Vec::new(),
+            encrypt_ref: None,
+            encrypt_ref_at: None,
+        };
+        // Each edit lies before the previous one's offset in a well-formed
+        // file; the hop count bounds a cyclic chain either way.
+        for hop in 0..doc.len() / 40 + 1 {
+            let (header, body) = Records::new(doc.get(off..)?).next()?;
+            if header.rec_type != RT_USER_EDIT_ATOM || body.len() < 28 {
+                return (hop > 0).then_some(edits);
+            }
+            if hop == 0 && body.len() >= 32 {
+                edits.encrypt_ref = u32_at(body, 28);
+                edits.encrypt_ref_at = Some(off + 8 + 28);
+            }
+            let dir_off = u32_at(body, 12)? as usize;
+            if let Some((h, dir)) = doc.get(dir_off..).and_then(|d| Records::new(d).next()) {
+                if h.rec_type == RT_PERSIST_DIRECTORY_ATOM {
+                    // PersistDirectoryEntry: persistId (20 bits) + cPersist
+                    // (12 bits), then cPersist offsets for consecutive ids.
+                    let mut p = 0;
+                    while let Some(v) = u32_at(dir, p) {
+                        let (id, count) = (v & 0xF_FFFF, (v >> 20) as usize);
+                        for k in 0..count {
+                            let Some(o) = u32_at(dir, p + 4 + k * 4) else {
+                                break;
+                            };
+                            edits.persist.entry(id + k as u32).or_insert(o);
+                            edits.objects.push((id + k as u32, o));
+                        }
+                        p += 4 + count * 4;
+                    }
+                }
+            }
+            match u32_at(body, 8)? as usize {
+                0 => break,
+                prev => off = prev,
+            }
+        }
+        Some(edits)
+    }
+
+    /// The `CryptSession10Container` body the newest edit references — the
+    /// file's `EncryptionInfo` ([MS-PPT] 2.3.7).
+    pub(crate) fn crypt_session<'a>(&self, doc: &'a [u8]) -> Option<&'a [u8]> {
+        let off = *self.persist.get(&self.encrypt_ref?)? as usize;
+        let (header, body) = Records::new(doc.get(off..)?).next()?;
+        (header.rec_type == RT_CRYPT_SESSION10_CONTAINER).then_some(body)
+    }
+
+    /// The stream offset of the `CryptSession10Container` (left in the
+    /// clear by encryption, so decryption skips it).
+    pub(crate) fn session_offset(&self) -> Option<usize> {
+        self.persist.get(&self.encrypt_ref?).map(|&o| o as usize)
+    }
+
+    /// Where the newest edit's `encryptSessionPersistIdRef` sits in the
+    /// stream — decryption zeroes it, after which the file reads as plain.
+    pub(crate) fn encrypt_ref_offset(&self) -> Option<usize> {
+        self.encrypt_ref_at
+    }
+
+    /// Whether the presentation is encrypted: the newest edit references an
+    /// encryption session. A reference the persist directory cannot resolve
+    /// still counts — no unencrypted writer sets one.
+    pub(crate) fn encrypted(&self) -> bool {
+        self.encrypt_ref.is_some_and(|r| r != 0)
+    }
+}
+
 /// One SLWT text block: title flag + raw text (runs already concatenated).
 #[derive(Clone, Default)]
 struct TextBlock {
     is_title: bool,
+    /// The `TextHeaderAtom` text type (`Tx_TYPE_*`), which picks the master
+    /// text style the block inherits from.
+    text_type: u32,
     text: String,
     styles: Vec<ParaStyle>,
     consumed: bool,
@@ -129,7 +335,9 @@ struct ParaStyle {
     /// Characters covered by this run (paragraph text + terminator).
     count: usize,
     indent: u8,
-    bullet: bool,
+    /// The paragraph's own `fHasBullet`, when its `hasBullet` mask is set;
+    /// `None` inherits it from the master text style.
+    bullet: Option<bool>,
     /// `(scheme, start)` when the paragraph auto-numbers (PP9).
     autonum: Option<(u16, u16)>,
 }
@@ -147,56 +355,10 @@ fn parse_para_styles(body: &[u8], text_len: usize) -> Vec<ParaStyle> {
         let count =
             u32::from_le_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]) as usize;
         let indent = u16::from_le_bytes([body[pos + 4], body[pos + 5]]);
-        let masks =
-            u32::from_le_bytes([body[pos + 6], body[pos + 7], body[pos + 8], body[pos + 9]]);
-        pos += 10;
-        let mut bullet = false;
-        // bulletFlags: present when any of hasBullet/font/color/size masks set.
-        if masks & 0x0000_000F != 0 {
-            if pos + 2 > body.len() {
-                break;
-            }
-            bullet = body[pos] & 0x01 != 0;
-            pos += 2;
-        }
-        // Remaining optional fields, in on-disk order, sized per masks.
-        for (bit, size) in [
-            (0x0000_0080u32, 2usize), // bulletChar
-            (0x0000_0010, 2),         // bulletFontRef
-            (0x0000_0040, 2),         // bulletSize
-            (0x0000_0020, 4),         // bulletColor
-            (0x0000_0800, 2),         // textAlignment
-            (0x0000_1000, 2),         // lineSpacing
-            (0x0000_2000, 2),         // spaceBefore
-            (0x0000_4000, 2),         // spaceAfter
-            (0x0000_0100, 2),         // leftMargin
-            (0x0000_0400, 2),         // indent
-            (0x0000_8000, 2),         // defaultTabSize
-        ] {
-            if masks & bit != 0 {
-                pos += size;
-            }
-        }
-        if masks & 0x0010_0000 != 0 {
-            // tabStops: count u16 + count × 4 bytes.
-            if pos + 2 > body.len() {
-                break;
-            }
-            let n = u16::from_le_bytes([body[pos], body[pos + 1]]) as usize;
-            pos += 2 + n * 4;
-        }
-        for (bit, size) in [
-            (0x0001_0000u32, 2usize), // fontAlign
-            (0x000E_0000, 2),         // wrap flags (one field for the three bits)
-            (0x0020_0000, 2),         // textDirection
-        ] {
-            if masks & bit != 0 {
-                pos += size;
-            }
-        }
-        if pos > body.len() {
+        let Some((next, bullet)) = pf_exception(body, pos + 6) else {
             break;
-        }
+        };
+        pos = next;
         covered += count;
         out.push(ParaStyle {
             count,
@@ -206,6 +368,161 @@ fn parse_para_styles(body: &[u8], text_len: usize) -> Vec<ParaStyle> {
         });
     }
     out
+}
+
+/// Walk one `TextPFException` ([MS-PPT] 2.9.18) at `pos`: its optional fields
+/// are sized by its masks, walked exactly so whatever follows starts at the
+/// right offset. Returns the offset past it and the `fHasBullet` it sets —
+/// only when the `hasBullet` mask bit says so (the other three bullet-flag
+/// bits share the field without setting this one), as LibreOffice's
+/// `PPTParaSheet::Read` applies the masked bits alone.
+fn pf_exception(body: &[u8], mut pos: usize) -> Option<(usize, Option<bool>)> {
+    let u16_at = |p: usize| Some(u16::from_le_bytes(body.get(p..p + 2)?.try_into().ok()?));
+    let masks = u32::from_le_bytes(body.get(pos..pos + 4)?.try_into().ok()?);
+    pos += 4;
+    let mut bullet = None;
+    // bulletFlags: present when any of hasBullet/font/color/size masks set.
+    if masks & 0x0000_000F != 0 {
+        let flags = u16_at(pos)?;
+        if masks & 0x0000_0001 != 0 {
+            bullet = Some(flags & 0x01 != 0);
+        }
+        pos += 2;
+    }
+    // Remaining optional fields, in on-disk order, sized per masks.
+    for (bit, size) in [
+        (0x0000_0080u32, 2usize), // bulletChar
+        (0x0000_0010, 2),         // bulletFontRef
+        (0x0000_0040, 2),         // bulletSize
+        (0x0000_0020, 4),         // bulletColor
+        (0x0000_0800, 2),         // textAlignment
+        (0x0000_1000, 2),         // lineSpacing
+        (0x0000_2000, 2),         // spaceBefore
+        (0x0000_4000, 2),         // spaceAfter
+        (0x0000_0100, 2),         // leftMargin
+        (0x0000_0400, 2),         // indent
+        (0x0000_8000, 2),         // defaultTabSize
+    ] {
+        if masks & bit != 0 {
+            pos += size;
+        }
+    }
+    if masks & 0x0010_0000 != 0 {
+        // tabStops: count u16 + count × 4 bytes.
+        pos += 2 + u16_at(pos)? as usize * 4;
+    }
+    for (bit, size) in [
+        (0x0001_0000u32, 2usize), // fontAlign
+        (0x000E_0000, 2),         // wrap flags (one field for the three bits)
+        (0x0020_0000, 2),         // textDirection
+    ] {
+        if masks & bit != 0 {
+            pos += size;
+        }
+    }
+    (pos <= body.len()).then_some((pos, bullet))
+}
+
+/// Walk one `TextCFException` ([MS-PPT] 2.9.13) at `pos`, returning the
+/// offset past it: the character half of a master style level, skipped to
+/// reach the next level's paragraph properties. `fontStyle` is read for any
+/// of the low 16 mask bits, as LibreOffice does.
+fn cf_exception(body: &[u8], mut pos: usize) -> Option<usize> {
+    let masks = u32::from_le_bytes(body.get(pos..pos + 4)?.try_into().ok()?);
+    pos += 4;
+    if masks & 0x0000_FFFF != 0 {
+        pos += 2; // fontStyle
+    }
+    for (bit, size) in [
+        (0x0001_0000u32, 2usize), // fontRef
+        (0x0020_0000, 2),         // oldEAFontRef
+        (0x0040_0000, 2),         // ansiFontRef
+        (0x0080_0000, 2),         // symbolFontRef
+        (0x0002_0000, 2),         // fontSize
+        (0x0004_0000, 4),         // color
+        (0x0008_0000, 2),         // position
+        (0x0010_0000, 4),         // pp10runid + unused
+        (0x0100_0000, 2),         // newEAFontRef
+        (0x0200_0000, 2),         // csFontRef
+        (0x0400_0000, 4),         // pp11ext
+    ] {
+        if masks & bit != 0 {
+            pos += size;
+        }
+    }
+    (pos <= body.len()).then_some(pos)
+}
+
+/// The bullet flags a master's `TextMasterStyleAtom`s declare
+/// ([MS-PPT] 2.9.36): per text type (the atom's instance, `Tx_TYPE_*`), the
+/// `fHasBullet` each indent level sets, `None` where the level leaves it to
+/// inheritance.
+#[derive(Clone, Default)]
+struct MasterStyles {
+    types: std::collections::HashMap<u32, [Option<bool>; 5]>,
+}
+
+impl MasterStyles {
+    /// Read every `TextMasterStyleAtom` directly inside a `MainMaster` body.
+    fn read(master: &[u8]) -> Self {
+        let mut styles = Self::default();
+        for (h, b) in Records::new(master) {
+            if h.rec_type != RT_TEXT_MASTER_STYLE_ATOM {
+                continue;
+            }
+            let inst = h.instance as u32;
+            let mut levels = [None; 5];
+            let Some(n) = b.get(..2).map(|x| u16::from_le_bytes([x[0], x[1]])) else {
+                continue;
+            };
+            let mut pos = 2;
+            for i in 0..n.min(5) as usize {
+                // The center/half/quarter types number their levels.
+                let level = if inst >= 5 {
+                    let Some(l) = b.get(pos..pos + 2) else { break };
+                    pos += 2;
+                    u16::from_le_bytes([l[0], l[1]]) as usize
+                } else {
+                    i
+                };
+                let Some((next, bullet)) = pf_exception(b, pos) else {
+                    break;
+                };
+                let Some(next) = cf_exception(b, next) else {
+                    break;
+                };
+                pos = next;
+                if let Some(slot) = levels.get_mut(level) {
+                    *slot = bullet;
+                }
+            }
+            styles.types.insert(inst, levels);
+        }
+        styles
+    }
+
+    /// Whether a paragraph of `text_type` at `indent` inherits a bullet —
+    /// LibreOffice's `PPTStyleSheet` resolution, which is what docling reads
+    /// a `.ppt` through: a level the style leaves unset takes the level below
+    /// it; the center-body/half-body/quarter-body types start from Body's
+    /// resolved levels and the center title from Title's.
+    fn bullet(&self, text_type: u32, indent: u8) -> bool {
+        let parent = match text_type {
+            5 | 7 | 8 => Some(1),
+            6 => Some(0),
+            _ => None,
+        };
+        let level = (indent as usize).min(4);
+        let own = self.types.get(&text_type);
+        match parent {
+            Some(base) => own
+                .and_then(|l| l[level])
+                .unwrap_or_else(|| self.bullet(base, indent)),
+            None => own
+                .and_then(|l| l[..=level].iter().rev().find_map(|b| *b))
+                .unwrap_or(false),
+        }
+    }
 }
 
 /// Parse a PP9 `StyleTextProp9Atom` (inside the shape's `___PPT9` binary tag):
@@ -279,6 +596,7 @@ fn collect_slwt_slides(body: &[u8], slides: &mut Vec<Vec<TextBlock>>) {
                 if let Some(slide) = slides.last_mut() {
                     slide.push(TextBlock {
                         is_title: tx == TX_TITLE || tx == TX_CENTER_TITLE,
+                        text_type: tx,
                         ..TextBlock::default()
                     });
                 }
@@ -309,6 +627,7 @@ fn collect_slwt_slides(body: &[u8], slides: &mut Vec<Vec<TextBlock>>) {
 #[derive(Clone, Default)]
 struct ShapeText {
     is_title: bool,
+    text_type: u32,
     text: String,
     styles: Vec<ParaStyle>,
     outline_ref: Option<u32>,
@@ -332,12 +651,12 @@ enum ShapeItem {
 /// Extract a slide's drawing items: find the OfficeArtDgContainer, walk its
 /// root group's children — plain shapes become text items, nested groups are
 /// tried as tables (a legacy PPT table *is* a group whose child anchors tile
-/// a grid) and otherwise flattened.
+/// a grid) and otherwise flattened — in reading order ([`by_position`]).
 fn slide_items(slide_body: &[u8]) -> Vec<ShapeItem> {
     let Some(dg) = find_container(slide_body, OA_DG_CONTAINER, 0) else {
         return Vec::new();
     };
-    let mut items = Vec::new();
+    let mut units = Vec::new();
     for (h, b) in Records::new(dg) {
         if h.rec_type == OA_SPGR_CONTAINER {
             // Root group: first SpContainer is the canvas frame (FSPGR).
@@ -345,26 +664,78 @@ fn slide_items(slide_body: &[u8]) -> Vec<ShapeItem> {
                 match h2.rec_type {
                     OA_SP_CONTAINER if !has_record(b2, OA_FSPGR) => {
                         if let Some(item) = shape_item(b2) {
-                            items.push(item);
+                            units.push((shape_anchor(b2), vec![item]));
                         }
                     }
-                    OA_SPGR_CONTAINER => group_items(b2, &mut items, 0),
+                    OA_SPGR_CONTAINER => {
+                        let mut items = Vec::new();
+                        group_items(b2, &mut items, 0);
+                        units.push((group_anchor(b2), items));
+                    }
                     _ => {}
                 }
             }
         }
     }
-    items
+    by_position(units)
+}
+
+/// A group's own anchor: that of its frame, the first `SpContainer`
+/// (the one holding the `FSPGR`).
+fn group_anchor(group_body: &[u8]) -> Option<Anchor> {
+    Records::new(group_body)
+        .find(|(h, b)| h.rec_type == OA_SP_CONTAINER && has_record(b, OA_FSPGR))
+        .and_then(|(_, b)| shape_anchor(b))
+}
+
+/// Shapes (each with the items it yields) in visual reading order — docling's
+/// `_iter_shapes_by_position` (docling#3393), which a `.ppt` reaches through
+/// LibreOffice's PPTX export with the geometry intact: sort by top edge, start
+/// a new row when a top is more than 0.05" below the previous one, and read
+/// each row left to right; shapes without an anchor go last, in drawing
+/// order. A "Section Header" slide puts its body above the title, so docling
+/// reads the body first (#627).
+fn by_position(units: Vec<(Option<Anchor>, Vec<ShapeItem>)>) -> Vec<ShapeItem> {
+    // 0.05" in master units (576 per inch): 28.8, compared in tenths.
+    const ROW_TOLERANCE_TENTHS: i64 = 288;
+    let mut keyed: Vec<(i64, i64, usize, Vec<ShapeItem>)> = units
+        .into_iter()
+        .enumerate()
+        .map(|(index, (anchor, items))| {
+            let (left, top) =
+                anchor.map_or((i64::MAX, i64::MAX), |(l, t, _, _)| (l as i64, t as i64));
+            (top, left, index, items)
+        })
+        .collect();
+    keyed.sort_by_key(|&(top, _, index, _)| (top, index));
+    let mut out = Vec::new();
+    let mut row: Vec<(i64, usize, Vec<ShapeItem>)> = Vec::new();
+    let mut prev_top: Option<i64> = None;
+    let flush = |row: &mut Vec<(i64, usize, Vec<ShapeItem>)>, out: &mut Vec<ShapeItem>| {
+        row.sort_by_key(|&(left, index, _)| (left, index));
+        out.extend(row.drain(..).flat_map(|(_, _, items)| items));
+    };
+    for (top, left, index, items) in keyed {
+        if prev_top.is_some_and(|p| top.saturating_sub(p).saturating_mul(10) > ROW_TOLERANCE_TENTHS)
+        {
+            flush(&mut row, &mut out);
+        }
+        prev_top = Some(top);
+        row.push((left, index, items));
+    }
+    flush(&mut row, &mut out);
+    out
 }
 
 /// Handle one group container: reconstruct a table from the child grid, else
-/// flatten the children as ordinary items (recursing into nested groups).
+/// flatten the children as ordinary items in reading order (recursing into
+/// nested groups).
 fn group_items(group_body: &[u8], out: &mut Vec<ShapeItem>, depth: usize) {
     if depth > 16 {
         return;
     }
     let mut cells: Vec<(Anchor, ShapeText)> = Vec::new();
-    let mut children: Vec<ShapeItem> = Vec::new();
+    let mut children = Vec::new();
     for (h, b) in Records::new(group_body) {
         match h.rec_type {
             OA_SP_CONTAINER => {
@@ -380,17 +751,21 @@ fn group_items(group_body: &[u8], out: &mut Vec<ShapeItem>, depth: usize) {
                             cells.push(((l, t, r, b), text.clone()));
                         }
                     }
-                    children.push(ShapeItem::Text { anchor, text });
+                    children.push((anchor, vec![ShapeItem::Text { anchor, text }]));
                 }
             }
-            OA_SPGR_CONTAINER => group_items(b, &mut children, depth + 1),
+            OA_SPGR_CONTAINER => {
+                let mut items = Vec::new();
+                group_items(b, &mut items, depth + 1);
+                children.push((group_anchor(b), items));
+            }
             _ => {}
         }
     }
     if let Some(table) = grid_table(&cells) {
         out.push(ShapeItem::Table { table });
     } else {
-        out.append(&mut children);
+        out.extend(by_position(children));
     }
 }
 
@@ -410,6 +785,7 @@ fn shape_item(sp_body: &[u8]) -> Option<ShapeItem> {
                                 .map(|x| u32::from_le_bytes([x[0], x[1], x[2], x[3]]))
                                 .unwrap_or(u32::MAX);
                             text.is_title = tx == TX_TITLE || tx == TX_CENTER_TITLE;
+                            text.text_type = tx;
                         }
                         RT_OUTLINE_TEXT_REF_ATOM => {
                             text.outline_ref = b2
@@ -573,6 +949,7 @@ fn grid_table(cells: &[(Anchor, ShapeText)]) -> Option<Table> {
         cells: None,
         caption: None,
         caption_parent: Default::default(),
+        caption_location: None,
     })
 }
 
@@ -627,17 +1004,17 @@ fn find_container(body: &[u8], rec_type: u16, depth: usize) -> Option<&[u8]> {
 /// Merge one slide's SLWT blocks and drawing shapes into nodes: shapes emit
 /// in geometric order (resolving outline references into the blocks), then
 /// any block no shape consumed is appended, so nothing is lost.
-fn assemble_slide(mut blocks: Vec<TextBlock>, shapes: Vec<ShapeItem>) -> Vec<Node> {
+fn assemble_slide(
+    mut blocks: Vec<TextBlock>,
+    shapes: Vec<ShapeItem>,
+    master: &MasterStyles,
+) -> Vec<Node> {
     let mut nodes = Vec::new();
-    let mut list = ListState::default();
     for item in shapes {
         match item {
-            ShapeItem::Table { table } => {
-                nodes.push(Node::Table(table));
-                list = ListState::default();
-            }
+            ShapeItem::Table { table } => nodes.push(Node::Table(table)),
             ShapeItem::Text { text, .. } => {
-                let (is_title, content, styles, autonums) = match text.outline_ref {
+                let (is_title, text_type, content, styles, autonums) = match text.outline_ref {
                     Some(ix) => match blocks.get_mut(ix as usize) {
                         Some(block) => {
                             block.consumed = true;
@@ -646,6 +1023,7 @@ fn assemble_slide(mut blocks: Vec<TextBlock>, shapes: Vec<ShapeItem>) -> Vec<Nod
                             let autos: Vec<_> = text.styles.iter().map(|s| s.autonum).collect();
                             (
                                 block.is_title,
+                                block.text_type,
                                 block.text.clone(),
                                 block.styles.clone(),
                                 autos,
@@ -663,49 +1041,90 @@ fn assemble_slide(mut blocks: Vec<TextBlock>, shapes: Vec<ShapeItem>) -> Vec<Nod
                             block.consumed = true;
                         }
                         let autos: Vec<_> = text.styles.iter().map(|s| s.autonum).collect();
-                        (text.is_title, text.text.clone(), text.styles.clone(), autos)
+                        (
+                            text.is_title,
+                            text.text_type,
+                            text.text.clone(),
+                            text.styles.clone(),
+                            autos,
+                        )
                     }
                 };
-                push_text(
-                    &mut nodes, is_title, &content, &styles, &autonums, &mut list,
-                );
+                let para = Paragraphs {
+                    is_title,
+                    text: &content,
+                    styles: &styles,
+                    autonums: &autonums,
+                    inherited: |indent| master.bullet(text_type, indent),
+                };
+                push_text(&mut nodes, para);
             }
         }
     }
     for block in blocks.iter().filter(|b| !b.consumed) {
         let autos: Vec<_> = block.styles.iter().map(|s| s.autonum).collect();
-        push_text(
-            &mut nodes,
-            block.is_title,
-            &block.text,
-            &block.styles,
-            &autos,
-            &mut list,
-        );
+        let para = Paragraphs {
+            is_title: block.is_title,
+            text: &block.text,
+            styles: &block.styles,
+            autonums: &autos,
+            inherited: |indent| master.bullet(block.text_type, indent),
+        };
+        push_text(&mut nodes, para);
     }
     nodes
 }
 
-/// Running list context across a slide's emitted nodes, for `first_in_list`
-/// and ordered-item numbering.
-#[derive(Default)]
-struct ListState {
-    /// `Some(ordered)` while the previous node was a list item.
-    prev: Option<bool>,
-    /// Next number for an ordered run.
-    next_number: u64,
+/// A list still accepting items while a text frame is walked — docling's
+/// `_OpenList` (docling#4397), which a `.ppt` reaches through LibreOffice's
+/// PPTX export: the stack is per text frame, a deeper paragraph nests a new
+/// list under the open one, a shallower one pops back, a non-list paragraph
+/// closes them all, and each list numbers its enumerated items on its own
+/// counter.
+struct OpenList {
+    /// The indent level of the paragraphs this list holds.
+    level: u8,
+    /// Items so far, numbered or not.
+    items: u64,
+    /// Numbering so far — starts at the first enumerated item's PP9
+    /// `startAt` (docling's `_get_auto_number_start`).
+    counter: u64,
+    /// Whether the first item was numbered: docling-core's Markdown numbers
+    /// an unmarked item by its position when its group's first item is
+    /// enumerated (`first_item_is_enumerated`), so a bullet that joins a
+    /// numbered group renders `N.`, not `-`.
+    first_enumerated: Option<bool>,
+}
+
+/// One text block to emit: its paragraphs' text and style runs, and the
+/// master's bullet for an indent level, which a paragraph inherits when its
+/// own style run leaves `fHasBullet` unset.
+struct Paragraphs<'a, F: Fn(u8) -> bool> {
+    is_title: bool,
+    text: &'a str,
+    styles: &'a [ParaStyle],
+    autonums: &'a [Option<(u16, u16)>],
+    inherited: F,
 }
 
 /// Emit a text run as heading/paragraph/list-item nodes, one per
-/// `\r`-separated line, list-classifying each line by its paragraph style.
-fn push_text(
-    nodes: &mut Vec<Node>,
-    is_title: bool,
-    text: &str,
-    styles: &[ParaStyle],
-    autonums: &[Option<(u16, u16)>],
-    list: &mut ListState,
-) {
+/// `\r`-separated line, list-classifying each line by its paragraph style —
+/// the paragraph's own bullet flag, else its master text style's (#627:
+/// PowerPoint leaves a body placeholder's bullets to the master, and
+/// LibreOffice — docling's `.ppt` reader — resolves them from it). List
+/// items nest and number the way docling's PPTX backend does ([`OpenList`]):
+/// the frame's lists are its own, an indent level only nests relative to the
+/// list already open (a level-2 paragraph after plain text starts a flat
+/// list), and a bullet inside a numbered group takes the group's numbering.
+fn push_text<F: Fn(u8) -> bool>(nodes: &mut Vec<Node>, para: Paragraphs<F>) {
+    let Paragraphs {
+        is_title,
+        text,
+        styles,
+        autonums,
+        inherited,
+    } = para;
+    let mut open_lists: Vec<OpenList> = Vec::new();
     // Map each paragraph to its style run by cumulative character position.
     let mut run_ix = 0usize;
     let mut run_left = styles.first().map(|s| s.count).unwrap_or(usize::MAX);
@@ -731,41 +1150,62 @@ fn push_text(
                 level: 1,
                 text: line.to_string(),
             });
-            list.prev = None;
+            open_lists.clear();
             continue;
         }
-        let ordered = autonum.is_some();
-        if style.bullet || ordered {
-            let first = list.prev != Some(ordered);
-            if first && ordered {
-                list.next_number = autonum.map(|(_, start)| start as u64).unwrap_or(1);
-            }
-            let number = if ordered {
-                let n = list.next_number;
-                list.next_number += 1;
-                n
-            } else {
-                1
-            };
-            nodes.push(Node::ListItem {
-                ordered,
-                number,
-                first_in_list: first,
-                text: line.to_string(),
-                level: style.indent,
-                marker: None,
-                location: None,
-                dclx: None,
-                href: None,
-                layer: None,
-            });
-            list.prev = Some(ordered);
-        } else {
+        let numbered = autonum.is_some();
+        let bullet = style.bullet.unwrap_or_else(|| inherited(style.indent));
+        if !bullet && !numbered {
             nodes.push(Node::Paragraph {
                 text: line.to_string(),
             });
-            list.prev = None;
+            open_lists.clear();
+            continue;
         }
+        let level = style.indent;
+        while open_lists.len() > 1 && open_lists.last().is_some_and(|l| l.level > level) {
+            open_lists.pop();
+        }
+        let first_in_list = open_lists.is_empty();
+        if open_lists.is_empty() || open_lists.last().is_some_and(|l| level > l.level) {
+            open_lists.push(OpenList {
+                level,
+                items: 0,
+                counter: 0,
+                first_enumerated: None,
+            });
+        }
+        let depth = open_lists.len() - 1;
+        let current = open_lists.last_mut().expect("a list is open");
+        let n = if numbered {
+            if current.counter == 0 {
+                current.counter = autonum
+                    .map_or(0, |(_, start)| start as u64)
+                    .saturating_sub(1);
+            }
+            current.counter += 1;
+            current.counter
+        } else {
+            0
+        };
+        current.items += 1;
+        let first_enumerated = *current.first_enumerated.get_or_insert(numbered);
+        let (ordered, number) = match (numbered, first_enumerated) {
+            (false, true) => (true, current.items),
+            _ => (numbered, n),
+        };
+        nodes.push(Node::ListItem {
+            ordered,
+            number,
+            first_in_list,
+            text: line.to_string(),
+            level: depth as u8,
+            marker: None,
+            location: None,
+            dclx: None,
+            href: None,
+            layer: None,
+        });
     }
 }
 
@@ -788,51 +1228,51 @@ fn bytes_text(b: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #624: every PowerPoint-encrypted fixture — open password, modify
+    /// password, both, a version 4 file — references a
+    /// `CryptSession10Container` from its current edit, and the plain files
+    /// do not. The `Current User` header token is no marker: B's is the
+    /// plain-file value.
+    #[test]
+    fn user_edit_chain_finds_the_encryption_session() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/encrypted/");
+        let edits = |path: &str| {
+            let data = std::fs::read(path).unwrap();
+            let cfb = CompoundFile::open(&data).unwrap();
+            let doc = cfb.stream("PowerPoint Document").unwrap();
+            let user = cfb.stream("Current User").unwrap();
+            let edits = UserEdits::read(&user, &doc).expect("edit chain");
+            let session = edits.crypt_session(&doc).map(<[u8]>::len);
+            (edits.encrypted(), session)
+        };
+        for name in [
+            "min_encrypted.ppt",
+            "min_writepw.ppt",
+            "B_openpw.ppt",
+            "C_writepw.ppt",
+            "D_both.ppt",
+            "H_A_addpw_save.ppt",
+        ] {
+            let (encrypted, session) = edits(&format!("{dir}{name}"));
+            assert!(encrypted, "{name}");
+            // RC4 CryptoAPI EncryptionInfo: 4.2 version, header, verifier.
+            assert_eq!(session, Some(198), "{name}");
+        }
+        for plain in [
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../tests/data/ppt/sources/powerpoint_sample.ppt"
+            ),
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/data/ppt/sources/ppt_cfb_v4_edit_save.ppt"
+            ),
+        ] {
+            assert_eq!(edits(plain), (false, None), "{plain}");
+        }
+    }
     use crate::InputFormat;
-
-    fn fixture(name: &str) -> SourceDocument {
-        let path = format!(
-            "{}/../../tests/data/ppt/sources/{name}",
-            env!("CARGO_MANIFEST_DIR")
-        );
-        let bytes = std::fs::read(&path).expect("fixture exists");
-        SourceDocument::from_bytes(name, InputFormat::Ppt, bytes)
-    }
-
-    #[test]
-    fn extracts_slide_titles_and_text() {
-        let doc = PptBackend
-            .convert(&fixture("powerpoint_sample.ppt"))
-            .expect("converts");
-        let headings = doc
-            .nodes
-            .iter()
-            .filter(|n| matches!(n, Node::Heading { .. }))
-            .count();
-        assert!(headings > 0, "expected slide titles: {:?}", doc.nodes);
-    }
-
-    #[test]
-    fn reconstructs_grouped_shapes_into_a_table() {
-        let doc = PptBackend
-            .convert(&fixture("powerpoint_sample.ppt"))
-            .expect("converts");
-        let tables: Vec<&Table> = doc
-            .nodes
-            .iter()
-            .filter_map(|n| match n {
-                Node::Table(t) => Some(t),
-                _ => None,
-            })
-            .collect();
-        assert!(!tables.is_empty(), "expected a reconstructed table");
-        let t = tables[0];
-        assert!(
-            t.rows.len() >= 2 && t.rows[0].len() >= 2,
-            "grid too small: {:?}",
-            t.rows
-        );
-    }
 
     #[test]
     fn grid_table_rejects_a_column_of_shapes() {
@@ -868,6 +1308,201 @@ mod tests {
         assert_eq!(t.rows[1], vec!["a".to_string(), "b".to_string()]);
         let s = t.structure.expect("span structure");
         assert!(s.col_continuation[0][1], "top row spans");
+    }
+
+    /// A record: header (version 0, `instance`, `rec_type`, length) + body.
+    fn record(instance: u16, rec_type: u16, body: &[u8]) -> Vec<u8> {
+        let mut out = (instance << 4).to_le_bytes().to_vec();
+        out.extend(rec_type.to_le_bytes());
+        out.extend((body.len() as u32).to_le_bytes());
+        out.extend(body);
+        out
+    }
+
+    /// #627: a paragraph without a bullet flag of its own inherits the
+    /// master's, resolved as LibreOffice's `PPTStyleSheet` does: an unset
+    /// level takes the level below it, the center/half/quarter types start
+    /// from Body's levels, and a type with no style at all from its parent's.
+    /// The levels sit back to back, so each `TextCFException` is sized.
+    #[test]
+    fn master_text_styles_resolve_like_libreoffice() {
+        let pf = |bullet: Option<bool>| -> Vec<u8> {
+            match bullet {
+                Some(b) => [
+                    1u32.to_le_bytes().to_vec(),
+                    (b as u16).to_le_bytes().to_vec(),
+                ]
+                .concat(),
+                None => 0u32.to_le_bytes().to_vec(),
+            }
+        };
+        // fontStyle (2) + color (4): the next level starts after them.
+        let cf = [0x0004_0001u32.to_le_bytes().to_vec(), vec![0; 6]].concat();
+        let mut body_style = 3u16.to_le_bytes().to_vec();
+        for bullet in [Some(true), None, Some(false)] {
+            body_style.extend(pf(bullet));
+            body_style.extend(&cf);
+        }
+        // Center body (instance 5) numbers its one level: level 0, no bullet.
+        let mut center = 1u16.to_le_bytes().to_vec();
+        center.extend(0u16.to_le_bytes());
+        center.extend(pf(Some(false)));
+        center.extend(&cf);
+        let mut other = 1u16.to_le_bytes().to_vec();
+        other.extend(pf(Some(false)));
+        other.extend(&cf);
+        let master = [
+            record(1, RT_TEXT_MASTER_STYLE_ATOM, &body_style),
+            record(5, RT_TEXT_MASTER_STYLE_ATOM, &center),
+            record(4, RT_TEXT_MASTER_STYLE_ATOM, &other),
+        ]
+        .concat();
+        let styles = MasterStyles::read(&master);
+        assert!(styles.bullet(1, 0), "body level 1 bullets");
+        assert!(styles.bullet(1, 1), "unset level 2 takes level 1's");
+        assert!(!styles.bullet(1, 2), "level 3 says no bullet");
+        assert!(!styles.bullet(1, 4), "and level 5 inherits that");
+        assert!(!styles.bullet(5, 0), "the center body's own level 1");
+        assert!(styles.bullet(5, 1), "its unset level 2 is Body's");
+        assert!(styles.bullet(7, 0), "a half body with no style is Body");
+        assert!(!styles.bullet(4, 0), "other text");
+        assert!(!styles.bullet(0, 0), "no title style: no bullet");
+    }
+
+    /// #627: shapes are read in docling's order — by top edge, a row for tops
+    /// within 0.05" (28.8 master units) of the previous one, left to right in
+    /// a row, anchorless shapes last.
+    #[test]
+    fn shapes_are_read_in_rows_then_left_to_right() {
+        let item = |s: &str| ShapeItem::Text {
+            anchor: None,
+            text: ShapeText {
+                text: s.into(),
+                ..ShapeText::default()
+            },
+        };
+        let units = vec![
+            (None, vec![item("anchorless")]),
+            (Some((0, 500, 10, 600)), vec![item("title below")]),
+            (Some((50, 10, 60, 20)), vec![item("row right")]),
+            (
+                Some((0, 38, 10, 48)),
+                vec![item("row left, 28 units lower")],
+            ),
+            (Some((0, 80, 10, 90)), vec![item("next row")]),
+        ];
+        let order: Vec<String> = by_position(units)
+            .into_iter()
+            .map(|i| match i {
+                ShapeItem::Text { text, .. } => text.text,
+                ShapeItem::Table { .. } => unreachable!(),
+            })
+            .collect();
+        assert_eq!(
+            order,
+            [
+                "row left, 28 units lower",
+                "row right",
+                "next row",
+                "title below",
+                "anchorless"
+            ]
+        );
+    }
+
+    /// A body frame's list items nest and number like docling's PPTX backend
+    /// (`_OpenList`, which a `.ppt` reaches through LibreOffice's export): a
+    /// deeper level nests only relative to the open list, plain text closes
+    /// the stack so a later level-2 run is flat, a numbered run starts at its
+    /// PP9 `startAt`, and a bullet joining a numbered group takes its number.
+    #[test]
+    fn lists_nest_and_number_like_docling() {
+        let para = |count: usize, indent: u8, bullet: Option<bool>, autonum| ParaStyle {
+            count,
+            indent,
+            bullet,
+            autonum,
+        };
+        // "one\rtwo\rthree\rfour\rfive": bullet, plain (level 1), two
+        // numbered at level 2, bullet at level 0 — the J deck.
+        let styles = [
+            para(4, 0, Some(true), None),
+            para(4, 1, Some(false), None),
+            para(6, 2, Some(true), Some((3, 1))),
+            para(5, 2, Some(true), Some((3, 1))),
+            para(5, 0, Some(true), None),
+        ];
+        let mut nodes = Vec::new();
+        push_text(
+            &mut nodes,
+            Paragraphs {
+                is_title: false,
+                text: "one\rtwo\rthree\rfour\rfive",
+                styles: &styles,
+                autonums: &[],
+                inherited: |_| false,
+            },
+        );
+        let shape: Vec<(bool, u64, bool, u8)> = nodes
+            .iter()
+            .map(|n| match n {
+                Node::ListItem {
+                    ordered,
+                    number,
+                    first_in_list,
+                    level,
+                    ..
+                } => (*ordered, *number, *first_in_list, *level),
+                Node::Paragraph { .. } => (false, 0, false, u8::MAX),
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                (false, 0, true, 0),
+                (false, 0, false, u8::MAX),
+                (true, 1, true, 0), // flat: nothing is open after plain text
+                (true, 2, false, 0),
+                (true, 3, false, 0), // the bullet joins the numbered group
+            ]
+        );
+
+        // "four\rfive\rbullet": numbered from 4, then a bullet — the K deck;
+        // and a nested bullet under a bullet keeps its depth.
+        let styles = [
+            para(5, 0, Some(true), Some((3, 4))),
+            para(5, 0, Some(true), Some((3, 1))),
+            para(7, 0, Some(true), None),
+            para(7, 1, Some(true), None),
+        ];
+        let mut nodes = Vec::new();
+        push_text(
+            &mut nodes,
+            Paragraphs {
+                is_title: false,
+                text: "four\rfive\rbullet\rnested",
+                styles: &styles,
+                autonums: &[],
+                inherited: |_| false,
+            },
+        );
+        let numbers: Vec<(bool, u64, u8)> = nodes
+            .iter()
+            .map(|n| match n {
+                Node::ListItem {
+                    ordered,
+                    number,
+                    level,
+                    ..
+                } => (*ordered, *number, *level),
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            numbers,
+            vec![(true, 4, 0), (true, 5, 0), (true, 3, 0), (false, 0, 1)]
+        );
     }
 
     #[test]

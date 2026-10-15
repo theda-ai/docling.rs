@@ -51,7 +51,14 @@ const DOCUMENT_DRAWABLES_FIELD: u32 = 20;
 /// `TP.DocumentArchive` — the root object of a Pages document.
 const TP_DOCUMENT_ARCHIVE: u32 = 10000;
 /// `TSWP.StorageArchive` — every piece of rich text in any iWork app.
-const TSWP_STORAGE_ARCHIVE: u32 = 2001;
+pub(crate) const TSWP_STORAGE_ARCHIVE: u32 = 2001;
+/// `TSWP.ShapeInfoArchive`'s reference to the storage holding its text.
+pub(crate) const SHAPE_STORAGE_FIELD: u32 = 2;
+/// `TSD.GeometryArchive`'s position and size, both `TSP.Point`s, and how many
+/// `super` levels a drawable's archive may nest before one is found.
+const GEOMETRY_POSITION_FIELD: u32 = 1;
+const GEOMETRY_SIZE_FIELD: u32 = 2;
+const MAX_DRAWABLE_DEPTH: usize = 6;
 /// `TSWP.ParagraphStyleArchive` — a paragraph style whose `TSS.StyleArchive`
 /// super (field 1) carries the human-facing name ("Body", "Heading 1").
 const TSWP_PARAGRAPH_STYLE: u32 = 2022;
@@ -60,6 +67,10 @@ const DOCUMENT_BODY_FIELD: u32 = 4;
 /// Storage field holding the text pieces.
 const STORAGE_TEXT_FIELD: u32 = 3;
 const STYLE_SUPER_FIELD: u32 = 1;
+/// The `TSS.StyleArchive` super's reference to the style's parent, and how
+/// many parents a chain is followed for.
+const STYLE_PARENT_FIELD: u32 = 3;
+const MAX_STYLE_INHERITANCE: usize = 8;
 const STYLE_NAME_FIELD: u32 = 1;
 /// `TST.TableModelArchive` — table name + data store.
 const TST_TABLE_MODEL: u32 = 6001;
@@ -184,7 +195,7 @@ const STORAGE_LIST_STYLE_FIELD: u32 = 7;
 const LIST_LABEL_TYPES_FIELD: u32 = 11;
 const LIST_STRINGS_FIELD: u32 = 16;
 
-type Objects<'a> = HashMap<u64, &'a Archive>;
+pub(crate) type Objects<'a> = HashMap<u64, &'a Archive>;
 
 fn fail(msg: &str) -> ConversionError {
     ConversionError::Parse(format!("iwork: {msg}"))
@@ -197,27 +208,8 @@ fn fail(msg: &str) -> ConversionError {
 /// value) — reproduced so the body lookup and the drawable order match
 /// upstream exactly.
 pub(crate) fn read_content(pkg: &mut Package) -> Result<Content, ConversionError> {
-    let names: Vec<String> = pkg
-        .names()
-        .filter(|n| n.ends_with(".iwa"))
-        .map(str::to_string)
-        .collect();
-    let mut archives: Vec<Archive> = Vec::new();
-    for name in &names {
-        let Some(bytes) = pkg.read_bytes(name) else {
-            continue;
-        };
-        // Upstream fails the document on a malformed member.
-        let stream = decode_iwa(&bytes)?;
-        parse_archives(&stream, &mut archives, true);
-    }
-    let mut order: Vec<u64> = Vec::new();
-    let mut objects: Objects = HashMap::new();
-    for a in &archives {
-        if objects.insert(a.id, a).is_none() {
-            order.push(a.id);
-        }
-    }
+    let archives = read_archives(pkg)?;
+    let (objects, order) = index_objects(&archives);
 
     let document = order
         .iter()
@@ -235,14 +227,7 @@ pub(crate) fn read_content(pkg: &mut Package) -> Result<Content, ConversionError
         .filter(|a| a.ty == TSWP_STORAGE_ARCHIVE)
         .ok_or_else(|| fail("the Pages document does not reference a body text storage"))?;
 
-    let mut reader = Reader {
-        objects: &objects,
-        order: &order,
-        pkg,
-        data_files: HashMap::new(),
-        emitted: HashSet::new(),
-    };
-    reader.data_files = reader.data_files();
+    let mut reader = Reader::new(&objects, &order, pkg, "");
     let mut blocks = reader.storage_blocks(storage);
     blocks.extend(reader.floating_blocks(document));
     let (headers, footers) = reader.page_furniture(storage);
@@ -253,6 +238,80 @@ pub(crate) fn read_content(pkg: &mut Package) -> Result<Content, ConversionError
         footnotes: reader.footnotes(storage),
         comments: reader.comments(storage),
     })
+}
+
+/// docling's `read_objects`, first half: every archived object of every
+/// `.iwa` member, in archive order and with every message. Upstream fails the
+/// document on a malformed member.
+pub(crate) fn read_archives(pkg: &mut Package) -> Result<Vec<Archive>, ConversionError> {
+    let names: Vec<String> = pkg
+        .names()
+        .filter(|n| n.ends_with(".iwa"))
+        .map(str::to_string)
+        .collect();
+    let mut archives: Vec<Archive> = Vec::new();
+    for name in &names {
+        let Some(bytes) = pkg.read_bytes(name) else {
+            continue;
+        };
+        let stream = decode_iwa(&bytes)?;
+        parse_archives(&stream, &mut archives, true);
+    }
+    Ok(archives)
+}
+
+/// docling's `read_objects`, second half: objects keyed by identifier, later
+/// definitions replacing earlier ones, plus the identifiers in first-seen
+/// order (a Python dict keeps the first key's position with the last value).
+pub(crate) fn index_objects(archives: &[Archive]) -> (Objects<'_>, Vec<u64>) {
+    let mut order: Vec<u64> = Vec::new();
+    let mut objects: Objects = HashMap::new();
+    for a in archives {
+        if objects.insert(a.id, a).is_none() {
+            order.push(a.id);
+        }
+    }
+    (objects, order)
+}
+
+/// docling's `drawable_geometry`: where a drawable sits, wherever its geometry
+/// turns out to be — the archive's own position and size fields, else its
+/// `super` (field 1), down to [`MAX_DRAWABLE_DEPTH`] levels. `None` is what a
+/// drawable that is not positioned, or whose archive this does not
+/// understand, looks like.
+pub(crate) fn drawable_geometry(payload: &[u8]) -> Option<super::keynote::Geometry> {
+    let mut payload = payload;
+    for _ in 0..MAX_DRAWABLE_DEPTH {
+        let position = first_bytes(payload, GEOMETRY_POSITION_FIELD).and_then(read_point);
+        let size = first_bytes(payload, GEOMETRY_SIZE_FIELD).and_then(read_point);
+        if let (Some((left, top)), Some((width, height))) = (position, size) {
+            return Some(super::keynote::Geometry {
+                left,
+                top,
+                width,
+                height,
+            });
+        }
+        payload = first_bytes(payload, 1)?;
+    }
+    None
+}
+
+/// docling's `read_point`: a `TSP.Point`, or `None` when the value is not
+/// one. The check is deliberately strict — exactly the two fields, both
+/// 32-bit floats — because the descent of [`drawable_geometry`] has no schema
+/// to tell it when it has arrived, and a message that merely starts with two
+/// length-delimited fields must not be mistaken for a position.
+pub(crate) fn read_point(raw: &[u8]) -> Option<(f64, f64)> {
+    let (mut x, mut y) = (None, None);
+    for (field, value) in Fields::new(raw) {
+        match (field, value) {
+            (1, Value::Fixed32(v)) if x.is_none() => x = Some(f32::from_bits(v)),
+            (2, Value::Fixed32(v)) if y.is_none() => y = Some(f32::from_bits(v)),
+            _ => return None,
+        }
+    }
+    Some((f64::from(x?), f64::from(y?)))
 }
 
 /// `iwa_style_name`: a paragraph style's name out of its `TSS` super message;
@@ -357,18 +416,35 @@ fn link(payload: &[u8]) -> Option<String> {
 }
 
 /// `iwa_list_style`: a list style as its per-depth label ladder.
-fn list_style(payload: &[u8]) -> Option<ListStyle> {
-    let mut style = ListStyle::default();
-    for (f, v) in Fields::new(payload) {
-        match (f, v) {
-            (LIST_LABEL_TYPES_FIELD, Value::Varint(n)) => style.label_types.push(n),
-            (LIST_STRINGS_FIELD, Value::Bytes(b)) => {
-                style.strings.push(String::from_utf8_lossy(b).into_owned())
+fn list_style(payload: &[u8], objects: &Objects) -> Option<ListStyle> {
+    // A style that carries no ladder of its own inherits the one its parent
+    // carries, so the chain is followed until a ladder turns up. Keynote
+    // relies on that: it leaves the ladder on the theme's style and gives the
+    // text a style holding nothing but a parent, so without the chain a deck
+    // loses every bullet it draws (docling#4330, #466) — the same indirection
+    // iWork '09 spells as `sf:parent-ident`.
+    let mut payload = payload;
+    for _ in 0..MAX_STYLE_INHERITANCE {
+        let mut style = ListStyle::default();
+        for (f, v) in Fields::new(payload) {
+            match (f, v) {
+                (LIST_LABEL_TYPES_FIELD, Value::Varint(n)) => style.label_types.push(n),
+                (LIST_STRINGS_FIELD, Value::Bytes(b)) => {
+                    style.strings.push(String::from_utf8_lossy(b).into_owned())
+                }
+                _ => {}
             }
-            _ => {}
         }
+        if !style.label_types.is_empty() {
+            return Some(style);
+        }
+        let super_message = first_bytes(payload, STYLE_SUPER_FIELD)?;
+        let parent = reference_field(super_message, STYLE_PARENT_FIELD)
+            .and_then(|id| objects.get(&id))
+            .filter(|a| a.ty == TSWP_LIST_STYLE)?;
+        payload = &parent.payload;
     }
-    Some(style)
+    Some(ListStyle::default())
 }
 
 /// `iwa_formatting`: a character style's property map as formatting.
@@ -414,7 +490,7 @@ fn storage_runs(payload: &[u8], objects: &Objects) -> StorageRuns {
             STORAGE_LIST_STYLE_FIELD,
             objects,
             TSWP_LIST_STYLE,
-            list_style,
+            |p| list_style(p, objects),
         ),
         depths: depth_runs(payload),
         links: object_runs(payload, STORAGE_SMART_FIELD, objects, TSWP_LINK_FIELD, link),
@@ -630,13 +706,13 @@ fn read_u32(buffer: &[u8], at: usize) -> Option<u32> {
 
 /// `iwa_reference_field`: the object identifier a message's reference field
 /// points at.
-fn reference_field(payload: &[u8], field: u32) -> Option<u64> {
+pub(crate) fn reference_field(payload: &[u8], field: u32) -> Option<u64> {
     first_bytes(payload, field).and_then(reference)
 }
 
 /// `iwa_reference_list`: the object identifiers a repeated reference field
 /// holds.
-fn reference_list(payload: &[u8], field: u32) -> Vec<u64> {
+pub(crate) fn reference_list(payload: &[u8], field: u32) -> Vec<u64> {
     Fields::new(payload)
         .filter_map(|(f, v)| match v {
             Value::Bytes(b) if f == field => reference(b),
@@ -670,22 +746,51 @@ fn referenced_ids(payload: &[u8], depth: usize, found: &mut HashSet<u64>) {
 /// are anchored in, and once from the document's own list of floating ones —
 /// so every drawable already emitted is remembered. That also bounds the
 /// walk: an object graph may contain cycles.
-struct Reader<'a, 'p> {
+pub(crate) struct Reader<'a, 'p> {
     objects: &'a Objects<'a>,
     /// Identifiers in first-seen order (Python dict iteration order).
     order: &'a [u64],
+    /// The container the images are members of — the outer one when the app
+    /// nested its index in an `Index.zip`.
     pkg: &'p mut Package,
+    /// What the container puts in front of its `Data/` members: empty unless
+    /// the package was flattened into a subdirectory (Keynote 2018+).
+    data_prefix: String,
     /// Data identifier → the `Data/` member holding its bytes.
     data_files: HashMap<u64, String>,
-    emitted: HashSet<u64>,
+    /// Every drawable already emitted (see the type docs).
+    pub(crate) emitted: HashSet<u64>,
+    /// Whether `TSCH.ChartDrawableArchive`s are read — the Keynote reader's
+    /// doing (docling reads only a presentation's charts, "until another
+    /// app's are verified too"); the Pages reader leaves them out.
+    pub(crate) charts: bool,
 }
 
-impl<'a> Reader<'a, '_> {
-    fn object(&self, id: u64) -> Option<&'a Archive> {
+impl<'a, 'p> Reader<'a, 'p> {
+    pub(crate) fn new(
+        objects: &'a Objects<'a>,
+        order: &'a [u64],
+        pkg: &'p mut Package,
+        data_prefix: &str,
+    ) -> Self {
+        let mut reader = Reader {
+            objects,
+            order,
+            pkg,
+            data_prefix: data_prefix.to_string(),
+            data_files: HashMap::new(),
+            emitted: HashSet::new(),
+            charts: false,
+        };
+        reader.data_files = reader.data_files();
+        reader
+    }
+
+    pub(crate) fn object(&self, id: u64) -> Option<&'a Archive> {
         self.objects.get(&id).copied()
     }
 
-    fn typed(&self, id: u64, ty: u32) -> Option<&'a Archive> {
+    pub(crate) fn typed(&self, id: u64, ty: u32) -> Option<&'a Archive> {
         self.object(id).filter(|a| a.ty == ty)
     }
 
@@ -694,7 +799,7 @@ impl<'a> Reader<'a, '_> {
     /// the storage's attachment table says which drawable each one is; the
     /// drawable is emitted straight after the paragraph it is anchored in,
     /// which is where it belongs in the reading order.
-    fn storage_blocks(&mut self, storage: &Archive) -> Vec<Block> {
+    pub(crate) fn storage_blocks(&mut self, storage: &Archive) -> Vec<Block> {
         let text = storage_text(&storage.payload);
         let runs = storage_runs(&storage.payload, self.objects);
         let attachments = attachment_runs(&storage.payload, STORAGE_ATTACHMENT_FIELD);
@@ -813,7 +918,7 @@ impl<'a> Reader<'a, '_> {
 
     /// `_thread`: one comment and its replies, as text prefixed by their
     /// authors.
-    fn thread(&self, head: Option<u64>) -> Vec<String> {
+    pub(crate) fn thread(&self, head: Option<u64>) -> Vec<String> {
         let mut texts = Vec::new();
         let mut pending: std::collections::VecDeque<u64> = head.into_iter().collect();
         let mut seen = HashSet::new();
@@ -846,7 +951,7 @@ impl<'a> Reader<'a, '_> {
 
     /// `_storage_paragraphs`: one storage's paragraphs, ignoring anything
     /// anchored in it.
-    fn storage_paragraphs(&self, identifier: Option<u64>) -> Vec<Paragraph> {
+    pub(crate) fn storage_paragraphs(&self, identifier: Option<u64>) -> Vec<Paragraph> {
         let Some(storage) = identifier.and_then(|id| self.typed(id, TSWP_STORAGE_ARCHIVE)) else {
             return Vec::new();
         };
@@ -857,7 +962,7 @@ impl<'a> Reader<'a, '_> {
     }
 
     /// `_drawable_blocks`: whichever kind of drawable `identifier` names.
-    fn drawable_blocks(&mut self, identifier: u64) -> Vec<Block> {
+    pub(crate) fn drawable_blocks(&mut self, identifier: u64) -> Vec<Block> {
         if !self.emitted.insert(identifier) {
             return Vec::new();
         }
@@ -880,6 +985,13 @@ impl<'a> Reader<'a, '_> {
                 };
                 table(model, self.objects)
                     .map(Block::Table)
+                    .into_iter()
+                    .collect()
+            }
+            // A chart, also when grouped with other shapes on a slide.
+            super::iwork_charts::TSCH_CHART_DRAWABLE if self.charts => {
+                super::iwork_charts::iwa_chart(drawable, self.objects)
+                    .map(Block::Chart)
                     .into_iter()
                     .collect()
             }
@@ -922,7 +1034,10 @@ impl<'a> Reader<'a, '_> {
             if named.is_empty() {
                 named = member.clone();
             }
-            if let Some(data) = self.pkg.read_bytes(&member) {
+            if let Some(data) = self
+                .pkg
+                .read_bytes(&format!("{}{member}", self.data_prefix))
+            {
                 return Picture {
                     data: Some(data),
                     name: member,

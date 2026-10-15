@@ -12,7 +12,7 @@
 //! | GET    | `/v1/result/{id}` | async job result (the sync response, stored)   |
 //! | GET    | `/v1/config`  | server capabilities (`{"allow_url_fetch": bool}`)  |
 //! | GET    | `/health`     | liveness probe                                     |
-//! | GET    | `/ready`      | readiness probe (200 once models are warm)         |
+//! | GET    | `/ready`      | readiness probe (`--warmup`: 200 once models load) |
 //! | GET    | `/metrics`    | Prometheus metrics (#297, see [`o11y`])            |
 //! | GET    | `/openapi.yaml` | OpenAPI 3.1 description of the API               |
 //! | GET    | `/logo.svg`   | the playground's logo                              |
@@ -25,26 +25,45 @@
 //! Options ride along as multipart text parts, JSON fields, or query
 //! parameters (body wins over query):
 //!
-//! - `to` — `md` (default) | `json` | `dclx` | `chunks` | `latex` (#317) | `images` (#243:
-//!   rasterize a PDF's pages to PNG through pdfium — no conversion, no models;
+//! - `to` — `md` (default) | `json` | `html` (#492) | `text` (#613: docling's plain
+//!   text, `export_to_text`) | `dclx` | `chunks` | `latex` (#317) |
+//!   `pandoc` (#515: Pandoc's AST as JSON, for `pandoc -f json`) | `vtt`
+//!   (#614: WebVTT subtitles, a cue per timed text item) | `images` (#243:
+//!   rasterize a PDF's pages to PNG — no conversion, no models;
 //!   the JSON response is `{"pages": [{"page", "width", "height",
 //!   "png_base64"}]}`, combines with `pages` for a window, capped at
 //!   `DOCLING_RS_MAX_RASTER_PAGES` pages per request, default 100)
 //! - `scale` — `to=images` render scale in pixels per PDF point:
 //!   0.1–4.0, default 2.0 (= 144 dpi, the ML pipeline's own render scale)
 //! - `strict` — cleaner Markdown instead of docling-legacy output
-//! - `images` — `placeholder` (default) | `embedded` (Markdown only)
-//! - `no_ocr`, `skip_ocr`, `no_table_former`, `force_full_page_ocr`,
-//!   `no_text_panels`, `heading_hierarchy` — PDF/image pipeline switches (`skip_ocr`, #244: keep
-//!   layout + TableFormer, never OCR — docling's independent `do_ocr=False`;
-//!   `no_ocr` skips the whole ML stack)
+//! - `images` — `placeholder` (default; `embedded` for `to=pandoc`, #537) | `embedded`
+//!   (Markdown, HTML and the Pandoc AST)
+//! - `no_ocr`, `text_layer_only`, `no_table_former`, `force_full_page_ocr`,
+//!   `no_text_panels`, `heading_hierarchy` — PDF/image pipeline switches (`no_ocr`:
+//!   keep layout + TableFormer, never OCR — docling's `do_ocr=False`, its
+//!   `--no-ocr`; `skip_ocr` is its pre-2.0 name, still read; `text_layer_only`
+//!   skips the whole ML stack, what `no_ocr` meant before 2.0, #611)
+//! - `password` — the password of an encrypted PDF or Office document
+//!   (#611, #625; `pdf_password`, docling's name, is read too)
 //! - `do_picture_classification`, `do_code_enrichment`,
 //!   `do_formula_enrichment` — the opt-in enrichment models (#423; docling's
 //!   `PdfPipelineOptions` flags of the same names, the CLI's
 //!   `--enrich-picture-classes` / `--enrich-code` / `--enrich-formula`):
 //!   DocumentFigureClassifier over pictures, CodeFormulaV2 over code / formula
 //!   regions. Off by default; a missing model warns and skips the pass
+//! - `redact_pii`, `redact_mode`, `redact_kinds`, `redact_pattern`,
+//!   `redact_images` — the PII redaction pass (#621, a docling.rs extension):
+//!   personal data is replaced in the document model before any export
+//!   (`label` | `pseudonym` | `fixed:<text>`; comma-separated kinds;
+//!   `NAME=REGEX` lines; `drop` | `box_out` | `keep` for images). A single
+//!   response says what was removed in `X-Docling-Redaction` (counts per
+//!   label, JSON); batch / async items carry `redaction`. Never the values.
 //! - `pages` — PDF page window `A-B` / `N` (1-based inclusive, #80)
+//! - `document_timeout` — per-document budget in seconds for the PDF pipeline
+//!   (docling's `document_timeout`, #497): checked between pages; once spent
+//!   the pages done so far are the document, `status` is `partial_success`
+//!   and `errors` carries the reason (batch / async items); a single
+//!   response says so in `X-Docling-Status` / `X-Docling-Errors`
 //! - `ocr_lang` — OCR recognition language for scanned pages: `en` (default)
 //!   | `ch` (the multilingual docling-conformance model); under
 //!   `ocr_engine=tesseract` a tessdata stem list (`deu+fra`) or BCP-47 tags
@@ -58,15 +77,40 @@
 //! - `ocr_scale` — OCR render scale in px per PDF point (docling's
 //!   `OcrOptions.scale`, #254); unset reads the pipeline's own 2.0 px/pt
 //!   render, docling's default is 3 (216 dpi)
+//! - `ocr_textline_orientation` — RapidOCR's text-line orientation
+//!   handling (#666): oriented line crops, tall lines turned 90°, the 0/180
+//!   classifier (`.models/ocr_textline_ori.onnx`); off by default
+//!   (`DOCLING_RS_OCR_TEXTLINE_ORIENTATION`)
+//! - `picture_ocr_scale` — the picture OCR's resolution (#666) in px per
+//!   picture pixel under RapidOCR's 2000 px cap; `1.0` reads pictures at
+//!   their native pixels, unset keeps the image-input rule
+//! - `images_scale` — picture crops (and page images) in px per PDF point,
+//!   0.1–4.0 (docling's `images_scale`, #520); unset keeps the pipeline's
+//!   2.0 px/pt render. The JSON picture `dpi` is 72·scale (#519)
+//! - `page_images` — keep each page's render as the JSON `pages[n].image`
+//!   (docling's `generate_page_images`, #520; off by default)
 //! - `fetch_images` — resolve external `<img src>` for HTML/EPUB/MHTML/JATS (outbound
-//!   fetch, so honored only under `--allow-url-fetch`)
+//!   fetch, so honored only under `--allow-url-fetch`; the alias of
+//!   `image_sources=remote`)
+//! - `image_sources` — `none` | `embedded` | `local` | `remote` (#646): which image
+//!   references resolve. `remote` without `--allow-url-fetch` is held to
+//!   `embedded`; `local` needs `--allow-local-images` (400 otherwise).
+//!   `image_hosts`, `max_images`, `max_image_bytes`, `max_image_total_mb`,
+//!   `min_image_bytes` bound it.
+//! - `ipynb_outputs` — Jupyter notebooks (#673): `none` (default, the
+//!   notebook as written) | `text` (stream and `text/plain` results as code
+//!   blocks after their cell, image outputs as pictures)
 //! - `skip_empty_cells` — omit empty cells from sparse XLSX/XLS table grids
 //!   (#271; docling.rs extension, off by default)
 //! - `compact_tables` — unpadded `| a | b |` Markdown tables, all formats
 //!   (#271; docling.rs extension, off by default)
-//! - `md_page_break_placeholder` — text inserted between pages in Markdown
-//!   output (docling-serve's option of the same name, docling-core's
-//!   `MarkdownParams.page_break_placeholder`; e.g. `<!-- page break -->`).
+//! - `pandoc_api_version` — the Pandoc API the client's `pandoc` reads (`to=pandoc`,
+//!   #515): only `1.23` is written, so another version is a 400, not a document
+//!   Pandoc would reject
+//! - `page_break_placeholder` (alias `md_page_break_placeholder`, this
+//!   server's historical spelling) — text inserted between pages in Markdown
+//!   output (docling-core's `MarkdownParams.page_break_placeholder`; e.g.
+//!   `<!-- page break -->`).
 //!   A break lands only between two rendered blocks on different pages;
 //!   unset (the default) keeps docling's break-free Markdown
 //! - `list_attachments` — email (.eml/.msg): append an Attachments section
@@ -74,6 +118,10 @@
 //! - `ebcdic_layout` — EBCDIC (#252): the copybook layout as inline
 //!   `EbcdicLayout` JSON (mandatory for the format — the bytes are
 //!   meaningless without it)
+//! - `xbrl_taxonomy` — XBRL (#466): a server-local relative directory holding
+//!   the instance's taxonomy (extension schema and linkbases, taxonomy
+//!   packages), docling's `XBRLBackendOptions.taxonomy`; without it the fact
+//!   graph has no presentation/calculation hierarchy
 //! - `chunker`, `chunk_tokenizer`, `chunk_max_tokens`, `chunk_merge_peers` —
 //!   per-request `to=chunks` configuration (#256, mirroring docling's
 //!   service-datamodel `ChunkerType`/`HybridChunkerOptions`): pick one
@@ -123,7 +171,11 @@
 //! defaults `DOCLING_RS_NO_ARENA=1` — ONNX Runtime's CPU arena grows with
 //! every new page shape and never returns memory; without it (plus a
 //! `malloc_trim` after each conversion) a warm server's retained RSS measured
-//! ~3× lower and stopped ratcheting, at no observed latency cost. A memory
+//! ~3× lower and stopped ratcheting, at no observed latency cost. glibc's
+//! mmap threshold is pinned at startup as well (#669, [`docling::memory`]),
+//! so large buffers are unmapped when freed instead of fragmenting the
+//! per-thread arenas: RSS then holds flat across requests (~590 MB over six
+//! mixed PDFs) where the trim alone let it creep (528 -> 754 MB). A memory
 //! **ceiling** (`--max-memory-mb` / `DOCLING_RS_MAX_MEMORY_MB`, else the
 //! container's cgroup limit; `0` disables) drives admission control: once
 //! process RSS crosses the watermark (85%, `DOCLING_RS_MEMORY_WATERMARK_PCT`)
@@ -138,9 +190,7 @@
 //! authentication: bind to loopback (the default) or front with a policy/auth
 //! proxy before exposing it.
 
-use std::io::Read;
-use std::net::ToSocketAddrs;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
@@ -153,10 +203,11 @@ use docling::{
     ConversionError, DoclingDocument, DocumentConverter, ImageMode, InputFormat, Pipeline,
     SourceDocument,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::Semaphore;
 
+mod compat;
 pub mod o11y;
 mod passthrough;
 
@@ -169,14 +220,21 @@ pub struct ServeConfig {
     pub concurrency: usize,
     /// Maximum accepted request body (multipart upload) in bytes.
     pub max_body_bytes: usize,
-    /// Load the PDF/image models at startup so `/ready` flips only when the
-    /// first conversion would be fast. Off: models load lazily on first use.
+    /// Load the PDF/image models at startup — the serial worker, TableFormer
+    /// and the multi-page worker pool — so `/ready` flips only when the first
+    /// conversion would be fast, and stays unready if they fail to load. Off:
+    /// models load lazily on first use and `/ready` is 200 at once.
     pub warmup: bool,
     /// Allow `{"url": …}` inputs (outbound fetch — SSRF surface). Off by
     /// default: even with the built-in private/loopback/link-local IP guard,
     /// letting a caller name the fetch target is a deliberate exposure that a
     /// deployment must opt into (`--allow-url-fetch`).
     pub allow_url_fetch: bool,
+    /// Allow `image_sources=local` (#646): a request may then make the
+    /// converter read image files next to a server-side source (a URL
+    /// input has none; an upload has none either, so this only matters for
+    /// deployments that mount documents). Off by default — refused with 400.
+    pub allow_local_images: bool,
     /// Default `strict` for requests that don't set it.
     pub strict: bool,
     /// Maximum async jobs (#182) waiting or running at once; further
@@ -193,6 +251,12 @@ pub struct ServeConfig {
     /// answer 503 instead of being accepted and OOM-killing the whole server
     /// (exit 137 takes every in-flight request with it).
     pub max_memory_mb: Option<u64>,
+    /// docling-serve's API key (#615): when set, every `/v1` and `/v1alpha`
+    /// request must carry it as `X-Api-Key` (401 otherwise); health,
+    /// readiness, metrics and the docs page stay open. `None` falls back to
+    /// `DOCLING_SERVE_API_KEY`, upstream's variable — the way to configure it
+    /// without putting the key on a command line.
+    pub api_key: Option<String>,
 }
 
 impl Default for ServeConfig {
@@ -203,10 +267,12 @@ impl Default for ServeConfig {
             max_body_bytes: 256 * 1024 * 1024,
             warmup: false,
             allow_url_fetch: false,
+            allow_local_images: false,
             strict: false,
             queue_size: 16,
             result_ttl_secs: 600,
             max_memory_mb: None,
+            api_key: None,
         }
     }
 }
@@ -219,12 +285,25 @@ struct AppState {
     /// a streaming response's worker and outlive the handler).
     permits: Arc<Semaphore>,
     /// Async conversion jobs (#182), keyed by task id.
-    jobs: Mutex<std::collections::HashMap<String, Job>>,
-    ready: AtomicBool,
+    jobs: Mutex<HashMap<String, Job>>,
+    readiness: Mutex<Readiness>,
     /// The resolved memory ceiling (#263): the configured value, else the
     /// container's cgroup limit, else none. `0` disables.
     memory_ceiling_mb: Option<u64>,
     cfg: ServeConfig,
+}
+
+/// What `/ready` reports (#548). Without `--warmup` the models load lazily
+/// on the first PDF/image request, so the server is ready at once and says
+/// so (`models: lazy`); with it, readiness waits for the models — and stays
+/// unready, with the reason, when they fail to load, instead of turning
+/// ready over an empty pipeline.
+#[derive(Clone, Debug, PartialEq)]
+enum Readiness {
+    Lazy,
+    Warming,
+    Warm,
+    Failed(String),
 }
 
 impl AppState {
@@ -261,11 +340,21 @@ pub fn router(cfg: ServeConfig) -> Router {
     if let Some(c) = memory_ceiling_mb.filter(|&c| c > 0) {
         eprintln!("docling-serve: memory ceiling {c} MB (admission control, #263)");
     }
+    let api_key: Option<Arc<str>> = cfg
+        .api_key
+        .clone()
+        .filter(|k| !k.is_empty())
+        .or_else(|| docling_core::env::nonempty("DOCLING_SERVE_API_KEY"))
+        .map(Arc::from);
     let state = Arc::new(AppState {
         pipeline: Mutex::new(None),
         permits: Arc::new(Semaphore::new(cfg.concurrency.max(1))),
-        jobs: Mutex::new(std::collections::HashMap::new()),
-        ready: AtomicBool::new(!cfg.warmup),
+        jobs: Mutex::new(HashMap::new()),
+        readiness: Mutex::new(if cfg.warmup {
+            Readiness::Warming
+        } else {
+            Readiness::Lazy
+        }),
         memory_ceiling_mb,
         cfg: cfg.clone(),
     });
@@ -273,11 +362,40 @@ pub fn router(cfg: ServeConfig) -> Router {
         let st = state.clone();
         // Blocking model load off the runtime; readiness flips when done.
         tokio::task::spawn_blocking(move || {
-            match Pipeline::new() {
-                Ok(p) => *st.pipeline.lock().unwrap() = Some((PipelineFlags::default(), p)),
-                Err(e) => eprintln!("warmup: pipeline load failed: {e}"),
+            let started = std::time::Instant::now();
+            // Hold the slot while loading: a request that arrives before
+            // `/ready` (a client not behind the probe) waits for these models
+            // instead of loading a second copy of its own.
+            let mut slot = st
+                .pipeline
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // `Pipeline::new` only configures — the models load lazily — so
+            // warm up explicitly, the serial worker *and* the page-worker
+            // pool a multi-page PDF fans out to (#548). A panic in a model
+            // load must not leave `/ready` warming forever.
+            let loaded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut p = Pipeline::new().map_err(|e| e.to_string())?;
+                p.warm_up_all().map_err(|e| e.to_string())?;
+                Ok::<_, String>(p)
+            }));
+            let next = match loaded {
+                Ok(Ok(p)) => {
+                    *slot = Some((PipelineFlags::default(), p));
+                    eprintln!(
+                        "docling-serve: warmup done in {:.1}s",
+                        started.elapsed().as_secs_f64()
+                    );
+                    Readiness::Warm
+                }
+                Ok(Err(e)) => Readiness::Failed(e),
+                Err(_) => Readiness::Failed("model load panicked".into()),
+            };
+            drop(slot);
+            if let Readiness::Failed(e) = &next {
+                eprintln!("docling-serve: warmup failed, /ready stays 503: {e}");
             }
-            st.ready.store(true, Ordering::Release);
+            *st.readiness.lock().unwrap_or_else(|p| p.into_inner()) = next;
         });
     }
     Router::new()
@@ -314,7 +432,25 @@ pub fn router(cfg: ServeConfig) -> Router {
         .route("/v1/convert/async", post(convert_async))
         .route("/v1/status/{id}", get(job_status))
         .route("/v1/result/{id}", get(job_result))
+        // #615: upstream docling-serve's API — what Open WebUI, n8n, Dify
+        // and LangChain's docling-serve client call (`compat.rs`).
+        .route("/v1/convert/file", post(compat::convert_file))
+        .route("/v1/convert/source", post(compat::convert_source))
+        .route("/v1/convert/file/async", post(compat::convert_file_async))
+        .route(
+            "/v1/convert/source/async",
+            post(compat::convert_source_async),
+        )
+        .route("/v1/status/poll/{id}", get(compat::status_poll))
+        .route("/v1alpha/convert/file", post(compat::convert_file))
+        .route("/v1alpha/convert/source", post(compat::convert_source))
+        .route("/v1alpha/status/poll/{id}", get(compat::status_poll))
+        .route("/v1alpha/result/{id}", get(job_result))
         .layer(DefaultBodyLimit::max(cfg.max_body_bytes))
+        .layer(axum::middleware::from_fn_with_state(
+            api_key,
+            compat::require_api_key,
+        ))
         // Request span/log + metrics (#297) — outermost, so it times the whole
         // request including body-limit rejections.
         .layer(axum::middleware::from_fn(o11y::track))
@@ -327,6 +463,11 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), String> {
     // Logging/tracing first (#297): startup diagnostics below already flow
     // through a configured subscriber this way.
     o11y::init();
+    // Large buffers mapped and returned rather than carved from the
+    // per-thread arenas (#669): without it RSS crept 528 -> 754 MB over six
+    // PDF requests despite the trim, with it it held at ~590 MB, at the same
+    // latency. See [`docling::memory`].
+    docling::memory::pin_mmap_threshold();
     let addr = cfg.addr.clone();
     let app = router(cfg);
     let listener = tokio::net::TcpListener::bind(&addr)
@@ -384,6 +525,8 @@ async fn shutdown_signal() {
 async fn config(State(state): State<Arc<AppState>>) -> Response {
     Json(json!({
         "allow_url_fetch": state.cfg.allow_url_fetch,
+        // #646: whether `image_sources=local` is accepted.
+        "allow_local_images": state.cfg.allow_local_images,
         // #263: the resolved memory ceiling (0/absent = none) and live RSS —
         // what admission control compares.
         "max_memory_mb": state.memory_ceiling_mb,
@@ -404,88 +547,46 @@ async fn config(State(state): State<Arc<AppState>>) -> Response {
 }
 
 async fn ready(State(state): State<Arc<AppState>>) -> Response {
-    if state.ready.load(Ordering::Acquire) {
-        Json(json!({"status": "ready"})).into_response()
-    } else {
-        (
+    let readiness = state
+        .readiness
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    match readiness {
+        Readiness::Lazy => Json(json!({"status": "ready", "models": "lazy"})).into_response(),
+        Readiness::Warm => Json(json!({"status": "ready", "models": "warm"})).into_response(),
+        Readiness::Warming => (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({"status": "warming_up"})),
         )
-            .into_response()
+            .into_response(),
+        Readiness::Failed(error) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"status": "warmup_failed", "error": error})),
+        )
+            .into_response(),
     }
 }
 
 /// Request options, merged from query parameters and body fields.
-#[derive(Clone, Debug, Default, Deserialize)]
+/// One request's options: the conversion options every surface shares
+/// ([`docling::ConvertOptions`], #577 — flattened, so its field names are the
+/// wire keys, with `md_page_break_placeholder`, this server's historical
+/// spelling, accepted as the alias of `page_break_placeholder`) plus what
+/// this surface decides about the output. Three sources feed it — the query
+/// string, a JSON body, multipart text parts — through one generic path:
+/// each is a set of `(name, text)` pairs read by [`Self::set_text`], layered
+/// by [`Self::merge_over`]; neither names a field, so an option added to the
+/// shared struct is a request option here with no edit.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct ConvertOptions {
+    #[serde(flatten)]
+    convert: docling::ConvertOptions,
     to: Option<String>,
-    strict: Option<bool>,
     images: Option<String>,
-    no_ocr: Option<bool>,
-    /// Keep layout + TableFormer, never OCR (#244) — docling's independent
-    /// `do_ocr=False`. `no_ocr` (the whole-stack skip) wins when both are set.
-    skip_ocr: Option<bool>,
-    force_full_page_ocr: Option<bool>,
-    no_table_former: Option<bool>,
-    /// Keep text-panel pictures as pictures (#173): disable the #157 demotion
-    /// of uncaptioned dense-text "picture" regions into paragraphs.
-    no_text_panels: Option<bool>,
-    /// Infer PDF/image section-header levels after assembly (#302, docling's
-    /// `HeadingHierarchyModel`: bookmarks > numbering > font style). Off by
-    /// default — headings then keep the flat level the pipeline emits.
-    heading_hierarchy: Option<bool>,
-    /// Opt-in enrichment models (#423), named as docling's
-    /// `PdfPipelineOptions` flags (and Python docling-serve's options):
-    /// classify pictures with DocumentFigureClassifier (26 classes → the JSON
-    /// picture item's `classification` annotation), rewrite code blocks with
-    /// CodeFormulaV2 (+ `code_language`), decode display formulas to LaTeX.
-    /// Each enabled pass lazily loads its model on the first matching region;
-    /// a missing model warns once and the pass is skipped.
-    do_picture_classification: Option<bool>,
-    do_code_enrichment: Option<bool>,
-    do_formula_enrichment: Option<bool>,
-    fetch_images: Option<bool>,
-    /// Email (.eml/.msg): append an Attachments section — names and content
-    /// types only, never the payload (#251).
-    list_attachments: Option<bool>,
-    /// Omit empty cells from sparse XLSX/XLS table grids (#271, opt-in
-    /// docling.rs extension).
-    skip_empty_cells: Option<bool>,
-    /// Compact (unpadded) Markdown tables (#271, opt-in docling.rs extension).
-    compact_tables: Option<bool>,
-    /// Text inserted between pages in Markdown output — docling-serve's
-    /// `md_page_break_placeholder` (docling-core's
-    /// `MarkdownParams.page_break_placeholder`). Unset = no page breaks.
-    md_page_break_placeholder: Option<String>,
-    /// EBCDIC copybook layout (#252): inline `EbcdicLayout` JSON (uploads
-    /// have no filesystem, so the JSON itself rides in the request).
-    ebcdic_layout: Option<String>,
-    asr_model: Option<String>,
-    /// ASR transcription language for audio/video input: a Whisper code
-    /// (`en`, `de`, …) or `auto` (default) — detected from the first
-    /// 30 seconds. Unknown codes fail the conversion with a clear error.
-    asr_lang: Option<String>,
-    /// Character encoding of text inputs (Markdown, CSV, AsciiDoc, WebVTT,
-    /// XML, …) — docling's `TextBackendOptions.encoding`: a WHATWG label
-    /// (`shift_jis`, `koi8-r`, `windows-1251`). Unset = detect (BOM, UTF-8,
-    /// then windows-1252); bytes it cannot decode fail the request.
-    encoding: Option<String>,
-    /// Max frames sampled from a video input (0 = transcript only; needs the
-    /// server to have the ffmpeg binary).
-    video_frames: Option<usize>,
-    /// PDF page window, `"A-B"` or a single `"N"` (1-based inclusive — #80).
-    pages: Option<String>,
-    /// OCR recognition language for scanned pages: `en` (default) | `ch`.
-    ocr_lang: Option<String>,
-    /// Which regions feed the OCR (docling's `OcrMode`, #254): `default` |
-    /// `full_page` | `layout_regions` | `pdf_aware_layout_regions`.
-    ocr_mode: Option<String>,
-    /// Which OCR engine reads scanned pages (#460): `ppocr` (default) |
-    /// `tesseract` (the server's `tesseract` binary).
-    ocr_engine: Option<String>,
-    /// OCR render scale in px per PDF point (docling's `OcrOptions.scale`,
-    /// #254); unset reads the pipeline's own 2.0 px/pt render.
-    ocr_scale: Option<f32>,
+    /// `to=pandoc` (#515): the Pandoc API version the client needs; anything
+    /// but the one written (1.23) is rejected.
+    pandoc_api_version: Option<String>,
     /// `to=images` render scale in pixels per PDF point (#243): default 2.0
     /// (144 dpi, the pipeline's own render scale), accepted range 0.1–4.0.
     scale: Option<f32>,
@@ -505,75 +606,66 @@ struct ConvertOptions {
     /// Hybrid peer-merging for `to=chunks` (docling's `merge_peers`, default
     /// true, #256).
     chunk_merge_peers: Option<bool>,
-    /// Conversion pipeline (#304): `standard` (default) or `vlm` — every PDF
-    /// page / image goes to a remote OpenAI-compatible vision model instead of
-    /// the local ML stack. With `standard` the `vlm_*` options below are
-    /// ignored, not rejected (the Node bindings' contract).
-    pipeline: Option<String>,
-    /// VLM endpoint for `pipeline=vlm`. A request-supplied endpoint is an
-    /// outbound-URL/SSRF surface: it needs `--allow-url-fetch` and passes the
-    /// same private-address check as URL inputs. Unset falls back to the
-    /// operator-pinned `DOCLING_RS_VLM_ENDPOINT` — the safer default: callers
-    /// pick the pipeline, the operator picks where it talks to.
-    vlm_endpoint: Option<String>,
-    /// VLM model name; falls back to `DOCLING_RS_VLM_MODEL`.
-    vlm_model: Option<String>,
-    /// Bearer token for the endpoint; falls back to `DOCLING_RS_VLM_API_KEY`.
-    vlm_api_key: Option<String>,
-    /// Per-page instruction; falls back to `DOCLING_RS_VLM_PROMPT`, else
-    /// docling's DocLang-eliciting default prompt.
-    vlm_prompt: Option<String>,
-    /// `max_tokens` per completion (default 8192).
-    vlm_max_tokens: Option<usize>,
 }
 
 impl ConvertOptions {
+    /// `self` on top of `base`: every option `self` sets wins, the rest
+    /// keep `base`'s — [`docling::merge_options`], no field list.
     fn merge_over(self, base: ConvertOptions) -> ConvertOptions {
-        ConvertOptions {
-            to: self.to.or(base.to),
-            strict: self.strict.or(base.strict),
-            images: self.images.or(base.images),
-            no_ocr: self.no_ocr.or(base.no_ocr),
-            skip_ocr: self.skip_ocr.or(base.skip_ocr),
-            force_full_page_ocr: self.force_full_page_ocr.or(base.force_full_page_ocr),
-            no_table_former: self.no_table_former.or(base.no_table_former),
-            no_text_panels: self.no_text_panels.or(base.no_text_panels),
-            heading_hierarchy: self.heading_hierarchy.or(base.heading_hierarchy),
-            do_picture_classification: self
-                .do_picture_classification
-                .or(base.do_picture_classification),
-            do_code_enrichment: self.do_code_enrichment.or(base.do_code_enrichment),
-            do_formula_enrichment: self.do_formula_enrichment.or(base.do_formula_enrichment),
-            fetch_images: self.fetch_images.or(base.fetch_images),
-            list_attachments: self.list_attachments.or(base.list_attachments),
-            skip_empty_cells: self.skip_empty_cells.or(base.skip_empty_cells),
-            compact_tables: self.compact_tables.or(base.compact_tables),
-            md_page_break_placeholder: self
-                .md_page_break_placeholder
-                .or(base.md_page_break_placeholder),
-            ebcdic_layout: self.ebcdic_layout.or(base.ebcdic_layout),
-            asr_model: self.asr_model.or(base.asr_model),
-            asr_lang: self.asr_lang.or(base.asr_lang),
-            encoding: self.encoding.or(base.encoding),
-            video_frames: self.video_frames.or(base.video_frames),
-            pages: self.pages.or(base.pages),
-            ocr_lang: self.ocr_lang.or(base.ocr_lang),
-            ocr_mode: self.ocr_mode.or(base.ocr_mode),
-            ocr_engine: self.ocr_engine.or(base.ocr_engine),
-            ocr_scale: self.ocr_scale.or(base.ocr_scale),
-            scale: self.scale.or(base.scale),
-            chunker: self.chunker.or(base.chunker),
-            chunk_tokenizer: self.chunk_tokenizer.or(base.chunk_tokenizer),
-            chunk_max_tokens: self.chunk_max_tokens.or(base.chunk_max_tokens),
-            chunk_merge_peers: self.chunk_merge_peers.or(base.chunk_merge_peers),
-            pipeline: self.pipeline.or(base.pipeline),
-            vlm_endpoint: self.vlm_endpoint.or(base.vlm_endpoint),
-            vlm_model: self.vlm_model.or(base.vlm_model),
-            vlm_api_key: self.vlm_api_key.or(base.vlm_api_key),
-            vlm_prompt: self.vlm_prompt.or(base.vlm_prompt),
-            vlm_max_tokens: self.vlm_max_tokens.or(base.vlm_max_tokens),
-        }
+        docling::merge_options(self, base)
     }
+
+    /// Set one option from its text form — a query parameter or a multipart
+    /// text part. The text is tried as the option's type in turn: a string,
+    /// an integer, a decimal number, then a boolean (`1`/`true`/`yes`/`on`
+    /// and `0`/`false`/`no`/`off`); the first reading the option accepts
+    /// lands. An unknown name is ignored (as unknown query parameters always
+    /// were); a value no reading accepts — `document_timeout=soon`,
+    /// `strict=maybe` — is a 400 naming the option.
+    fn set_text(&mut self, name: &str, text: &str) -> Result<(), ApiError> {
+        let trimmed = text.trim();
+        let mut candidates = vec![serde_json::Value::String(text.to_string())];
+        if let Ok(n) = trimmed.parse::<u64>() {
+            candidates.push(serde_json::Value::from(n));
+        } else if let Ok(f) = trimmed.parse::<f64>() {
+            if let Some(n) = serde_json::Number::from_f64(f) {
+                candidates.push(serde_json::Value::Number(n));
+            }
+        }
+        match trimmed.to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => candidates.push(serde_json::Value::Bool(true)),
+            "0" | "false" | "no" | "off" => candidates.push(serde_json::Value::Bool(false)),
+            _ => {}
+        }
+        for value in candidates {
+            let mut patch = serde_json::Map::new();
+            patch.insert(name.to_string(), value);
+            if let Ok(parsed) =
+                serde_json::from_value::<ConvertOptions>(serde_json::Value::Object(patch))
+            {
+                *self = parsed.merge_over(std::mem::take(self));
+                return Ok(());
+            }
+        }
+        Err(ApiError::Bad(format!(
+            "{name}: cannot read {text:?} as that option's value"
+        )))
+    }
+
+    /// The query string's options (`?strict=true&pages=2-5`).
+    fn from_query(query: HashMap<String, String>) -> Result<ConvertOptions, ApiError> {
+        let mut options = ConvertOptions::default();
+        for (name, text) in &query {
+            options.set_text(name, text)?;
+        }
+        Ok(options)
+    }
+}
+
+/// A rejected shared option is this API's 400, with the library's message
+/// (which names the option in its wire spelling).
+fn bad(e: docling::OptionsError) -> ApiError {
+    ApiError::Bad(e.to_string())
 }
 
 /// JSON body: the legacy `{"url": …}` shorthand, or docling's
@@ -595,14 +687,52 @@ struct UrlRequest {
     options: ConvertOptions,
 }
 
+#[derive(Debug)]
 enum ApiError {
     Bad(String),
     Unsupported(String),
+    /// The document is encrypted and the request's password (or none) does
+    /// not open it (#636): a 422 like any document problem, but the body
+    /// carries the typed case as `code` (`password_required`,
+    /// `wrong_password`, `not_decryptable`, `malformed_encryption`) so a
+    /// client prompts for a password instead of matching the message.
+    Encrypted {
+        code: &'static str,
+        message: String,
+    },
     Internal(String),
     /// The async job queue is full (#182) — retry later.
     Busy(String),
     /// The memory ceiling's watermark is crossed (#263) — 503, retry later.
     Overloaded(String),
+    /// The request body is over `--max-body-mb` (#619) — 413.
+    TooLarge(String),
+}
+
+/// A multipart read error: 413 when the body went past `--max-body-mb`
+/// (axum's `DefaultBodyLimit` surfaces it here, inside the extractor we drive
+/// ourselves), 400 for a malformed body.
+fn multipart_error(what: &str, e: axum::extract::multipart::MultipartError) -> ApiError {
+    if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        ApiError::TooLarge(format!("{what}: {e} (the server's --max-body-mb)"))
+    } else {
+        ApiError::Bad(format!("{what}: {e}"))
+    }
+}
+
+/// A body read error (`axum::body::to_bytes` under the server's limit):
+/// 413 when the limit cut it off, 400 otherwise. The limit error is
+/// `http_body_util::LengthLimitError` somewhere in the source chain; it is
+/// recognized by its message so the crate needs no direct dependency.
+fn body_error(what: &str, e: axum::Error) -> ApiError {
+    let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(&e);
+    while let Some(c) = cause {
+        if c.to_string().contains("length limit exceeded") {
+            return ApiError::TooLarge(format!("{what}: {e} (the server's --max-body-mb)"));
+        }
+        cause = c.source();
+    }
+    ApiError::Bad(format!("{what}: {e}"))
 }
 
 /// The HTTP status + message an [`ApiError`] answers with (also stored on a
@@ -610,18 +740,40 @@ enum ApiError {
 fn api_error_parts(e: ApiError) -> (StatusCode, String) {
     match e {
         ApiError::Bad(m) => (StatusCode::BAD_REQUEST, m),
-        ApiError::Unsupported(m) => (StatusCode::UNPROCESSABLE_ENTITY, m),
+        ApiError::Unsupported(m) | ApiError::Encrypted { message: m, .. } => {
+            (StatusCode::UNPROCESSABLE_ENTITY, m)
+        }
         ApiError::Internal(m) => (StatusCode::INTERNAL_SERVER_ERROR, m),
         ApiError::Busy(m) => (StatusCode::TOO_MANY_REQUESTS, m),
         ApiError::Overloaded(m) => (StatusCode::SERVICE_UNAVAILABLE, m),
+        ApiError::TooLarge(m) => (StatusCode::PAYLOAD_TOO_LARGE, m),
     }
+}
+
+/// The machine-readable `code` an error body carries besides `error` —
+/// today only an encrypted document's case (#636).
+fn api_error_code(e: &ApiError) -> Option<&'static str> {
+    match e {
+        ApiError::Encrypted { code, .. } => Some(code),
+        _ => None,
+    }
+}
+
+/// `{"error": msg}` plus `"code"` when the error has one.
+fn error_body(msg: &str, code: Option<&'static str>) -> Json<serde_json::Value> {
+    let mut body = json!({"error": msg});
+    if let Some(code) = code {
+        body["code"] = json!(code);
+    }
+    Json(body)
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let overloaded = matches!(self, ApiError::Overloaded(_));
+        let code = api_error_code(&self);
         let (status, msg) = api_error_parts(self);
-        let mut response = (status, Json(json!({"error": msg}))).into_response();
+        let mut response = (status, error_body(&msg, code)).into_response();
         if overloaded {
             // A hint for well-behaved clients; conversions run seconds, not ms.
             response
@@ -675,7 +827,7 @@ async fn parse_convert_request(
     } else if content_type.starts_with("application/json") {
         let bytes = axum::body::to_bytes(body.into_body(), state.cfg.max_body_bytes)
             .await
-            .map_err(|e| ApiError::Bad(format!("bad body: {e}")))?;
+            .map_err(|e| body_error("bad body", e))?;
         let req: UrlRequest = serde_json::from_slice(&bytes)
             .map_err(|e| ApiError::Bad(format!("bad JSON body: {e}")))?;
         let options = req.options.clone().merge_over(query);
@@ -765,18 +917,13 @@ async fn parse_source_specs(
             passthrough::SourceSpec::File {
                 base64_string,
                 filename,
-            } => {
-                let item = match docling::base64::decode(base64_string.trim()) {
-                    Some(bytes) => {
-                        source_from_named_bytes(&filename, bytes).map_err(|e| (filename.clone(), e))
-                    }
-                    None => Err((
-                        filename.clone(),
-                        ApiError::Bad(format!("file source {filename:?}: bad base64")),
-                    )),
-                };
-                items.push(item);
-            }
+            } => match docling::base64::decode(base64_string.trim()) {
+                Some(bytes) => items.extend(sources_from_named_bytes(&filename, bytes)),
+                None => items.push(Err((
+                    filename.clone(),
+                    ApiError::Bad(format!("file source {filename:?}: bad base64")),
+                ))),
+            },
             passthrough::SourceSpec::Http { url, headers } => {
                 require_outbound(state, "URL inputs")?;
                 let header_vec: Vec<(String, String)> = headers.into_iter().collect();
@@ -802,7 +949,7 @@ async fn parse_source_specs(
                     .await
                     .map_err(ApiError::Bad)?;
                 for (name, bytes) in fetched {
-                    items.push(source_from_named_bytes(&name, bytes).map_err(|e| (name, e)));
+                    items.extend(sources_from_named_bytes(&name, bytes));
                 }
             }
         }
@@ -814,15 +961,27 @@ async fn parse_source_specs(
 /// submission fails fast instead of parking a doomed job in the queue).
 fn validate_output(options: &ConvertOptions) -> Result<(String, ImageMode), ApiError> {
     let to = options.to.clone().unwrap_or_else(|| "md".into());
-    if !matches!(
-        to.as_str(),
-        "md" | "markdown" | "json" | "dclx" | "chunks" | "images" | "latex"
-    ) {
+    // The CLI's `--to` list (#603: one source, `docling::OUTPUT_FORMATS`),
+    // plus the `markdown` alias of `md`.
+    if to != "markdown" && !docling::OUTPUT_FORMATS.contains(&to.as_str()) {
         return Err(ApiError::Bad(format!(
-            "unknown to='{to}' (expected: md, json, dclx, chunks, images, latex)"
+            "unknown to='{to}' (expected: {})",
+            docling::OUTPUT_FORMATS.join(", ")
         )));
     }
-    let image_mode = match options.images.as_deref().unwrap_or("placeholder") {
+    if let Some(v) = &options.pandoc_api_version {
+        docling::pandoc::check_api_version(v)
+            .map_err(|e| ApiError::Bad(format!("pandoc_api_version: {e}")))?;
+    }
+    // #537: `to=pandoc` embeds its pictures unless `images` says otherwise —
+    // the AST is fed to `pandoc -t docx`, whose writers drop a target-less
+    // picture.
+    let default_images = if to == "pandoc" {
+        "embedded"
+    } else {
+        "placeholder"
+    };
+    let image_mode = match options.images.as_deref().unwrap_or(default_images) {
         "placeholder" => ImageMode::Placeholder,
         "embedded" => ImageMode::Embedded,
         other => {
@@ -831,13 +990,10 @@ fn validate_output(options: &ConvertOptions) -> Result<(String, ImageMode), ApiE
             )))
         }
     };
-    // OCR mode/scale (#254) validate here too — before the conversion starts —
+    // The shared options validate here too — before the conversion starts —
     // because the streaming path flattens later errors into a mid-stream 422,
     // and a bad option deserves a plain 400 up front.
-    parse_ocr_mode(options.ocr_mode.as_deref())?;
-    parse_ocr_scale(options.ocr_scale)?;
-    parse_ocr_engine(options.ocr_engine.as_deref())?;
-    parse_ocr_lang(options)?;
+    options.convert.validate().map_err(bad)?;
     parse_chunk_options(options)?;
     Ok((to, image_mode))
 }
@@ -880,15 +1036,17 @@ fn parse_chunk_options(
 
 async fn convert(
     State(state): State<Arc<AppState>>,
-    Query(query): Query<ConvertOptions>,
+    Query(query): Query<HashMap<String, String>>,
     headers: HeaderMap,
     body: axum::extract::Request,
 ) -> Result<Response, ApiError> {
+    let query = ConvertOptions::from_query(query)?;
     let (sources, options, target) = parse_convert_request(&state, query, headers, body).await?;
     let (to, image_mode) = validate_output(&options)?;
     // #304: bad pipeline/vlm options are a 400/422 up front (no DNS here —
     // the endpoint's SSRF resolution check runs on the blocking pool).
     resolve_vlm_options(&state, &options, false)?;
+    check_picture_description(&state, &options, false)?;
     validate_target(&to, target.as_ref())?;
     // Admission control (#263): shed load before taking a conversion slot.
     if let Some(msg) = state.overloaded() {
@@ -962,9 +1120,9 @@ enum JobState {
     Pending,
     Started,
     Success(StoredResponse),
-    /// The HTTP status the sync endpoint would have answered with, plus the
-    /// error message.
-    Failure(StatusCode, String),
+    /// The HTTP status the sync endpoint would have answered with, the
+    /// error message, and its `code` when it has one (#636).
+    Failure(StatusCode, String, Option<&'static str>),
 }
 
 impl JobState {
@@ -981,7 +1139,7 @@ impl JobState {
 /// Evict finished jobs whose result has outlived the TTL. Called from the job
 /// endpoints — no background sweeper thread needed, since memory only ever
 /// accumulates through those same endpoints' submissions.
-fn purge_expired(jobs: &mut std::collections::HashMap<String, Job>, ttl_secs: u64) {
+fn purge_expired(jobs: &mut HashMap<String, Job>, ttl_secs: u64) {
     let ttl = std::time::Duration::from_secs(ttl_secs);
     jobs.retain(|_, job| job.done_at.is_none_or(|done| done.elapsed() < ttl));
 }
@@ -1007,15 +1165,17 @@ fn task_id() -> String {
 /// `GET /v1/result/{id}`.
 async fn convert_async(
     State(state): State<Arc<AppState>>,
-    Query(query): Query<ConvertOptions>,
+    Query(query): Query<HashMap<String, String>>,
     headers: HeaderMap,
     body: axum::extract::Request,
 ) -> Result<Response, ApiError> {
+    let query = ConvertOptions::from_query(query)?;
     let (mut sources, options, target) =
         parse_convert_request(&state, query, headers, body).await?;
     let (to, image_mode) = validate_output(&options)?;
     // #304: fail an async submission fast instead of parking a doomed job.
     resolve_vlm_options(&state, &options, false)?;
+    check_picture_description(&state, &options, false)?;
     validate_target(&to, target.as_ref())?;
     // Admission control (#263) applies to async submissions too — a queued
     // job holds its upload bytes and will run into the same ceiling.
@@ -1030,6 +1190,29 @@ async fn convert_async(
         return Err(e);
     }
 
+    let id = submit_job(&state, move |st, rt| {
+        run_conversion(st, sources, &options, &to, image_mode, target.as_ref(), rt)
+    })?;
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({ "task_id": id, "task_status": "pending" })),
+    )
+        .into_response())
+}
+
+/// Queue `work` as an async job (#182): a task id now, the work later on
+/// the shared conversion semaphore (so it reuses the warm pipeline and
+/// counts against the same concurrency as sync requests), its outcome kept
+/// for `/v1/result/{id}` until the TTL evicts it. Refused with 429 when the
+/// job map is full. Shared by `/v1/convert/async` and the upstream-shaped
+/// async routes (#615).
+fn submit_job<F>(state: &Arc<AppState>, work: F) -> Result<String, ApiError>
+where
+    F: FnOnce(&AppState, &tokio::runtime::Handle) -> Result<StoredResponse, ApiError>
+        + Send
+        + 'static,
+{
     let id = task_id();
     {
         let mut jobs = state.jobs.lock().unwrap();
@@ -1067,10 +1250,9 @@ async fn convert_async(
             return; // evicted while queued (TTL abuse would need days)
         }
         let stx = st.clone();
-        let opts = options;
         let rt = tokio::runtime::Handle::current();
         let outcome = tokio::task::spawn_blocking(move || {
-            let out = run_conversion(&stx, sources, &opts, &to, image_mode, target.as_ref(), &rt);
+            let out = work(&stx, &rt);
             trim_heap();
             out
         })
@@ -1082,19 +1264,15 @@ async fn convert_async(
             job.state = match outcome {
                 Ok(stored) => JobState::Success(stored),
                 Err(e) => {
+                    let code = api_error_code(&e);
                     let (status, msg) = api_error_parts(e);
-                    JobState::Failure(status, msg)
+                    JobState::Failure(status, msg, code)
                 }
             };
             job.done_at = Some(std::time::Instant::now());
         }
     });
-
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(json!({ "task_id": id, "task_status": "pending" })),
-    )
-        .into_response())
+    Ok(id)
 }
 
 /// `GET /v1/status/{id}` (#182).
@@ -1112,8 +1290,11 @@ async fn job_status(
             .into_response(),
         Some(job) => {
             let mut body = json!({ "task_id": id, "task_status": job.state.as_str() });
-            if let JobState::Failure(_, msg) = &job.state {
+            if let JobState::Failure(_, msg, code) = &job.state {
                 body["error"] = json!(msg);
+                if let Some(code) = code {
+                    body["code"] = json!(code);
+                }
             }
             Json(body).into_response()
         }
@@ -1142,16 +1323,18 @@ async fn job_result(
                 Json(json!({ "task_id": id, "task_status": job.state.as_str() })),
             )
                 .into_response(),
-            JobState::Failure(status, msg) => {
-                (*status, Json(json!({"error": msg}))).into_response()
+            JobState::Failure(status, msg, code) => {
+                (*status, error_body(msg, *code)).into_response()
             }
             // Clone rather than remove: the result stays re-fetchable until
             // the TTL evicts it (a client retrying a dropped response must not
             // find a 404).
             JobState::Success(stored) => StoredResponse {
+                errors: Vec::new(),
                 content_type: stored.content_type,
                 disposition: stored.disposition.clone(),
                 confidence: stored.confidence.clone(),
+                redaction: stored.redaction.clone(),
                 body: stored.body.clone(),
             }
             .into_response(),
@@ -1168,12 +1351,32 @@ struct StoredResponse {
     disposition: Option<String>,
     /// The `X-Docling-Confidence` summary (#183), when the pipeline made one.
     confidence: Option<header::HeaderValue>,
+    /// The `X-Docling-Redaction` counts (#621), when the PII pass ran.
+    redaction: Option<header::HeaderValue>,
     body: Vec<u8>,
+    /// The problems the conversion survived (#497) — a non-empty list is a
+    /// `partial_success`, announced in `X-Docling-Status` / `X-Docling-Errors`
+    /// since the body is the document itself.
+    errors: Vec<docling::ErrorItem>,
 }
 
 impl StoredResponse {
     fn into_response(self) -> Response {
         let mut response = ([(header::CONTENT_TYPE, self.content_type)], self.body).into_response();
+        if !self.errors.is_empty() {
+            let converted = Converted {
+                document: DoclingDocument::new(""),
+                errors: self.errors,
+                redaction: None,
+            };
+            response.headers_mut().insert(
+                "x-docling-status",
+                header::HeaderValue::from_static("partial_success"),
+            );
+            if let Ok(v) = header::HeaderValue::from_str(&converted.errors_json().to_string()) {
+                response.headers_mut().insert("x-docling-errors", v);
+            }
+        }
         if let Some(d) = self.disposition {
             if let Ok(v) = header::HeaderValue::from_str(&d) {
                 response
@@ -1183,6 +1386,9 @@ impl StoredResponse {
         }
         if let Some(v) = self.confidence {
             response.headers_mut().insert("x-docling-confidence", v);
+        }
+        if let Some(v) = self.redaction {
+            response.headers_mut().insert("x-docling-redaction", v);
         }
         response
     }
@@ -1227,16 +1433,21 @@ fn run_conversion(
         if to == "images" {
             let pages = rasterize_pages(state, &source, options)?;
             return Ok(StoredResponse {
+                errors: Vec::new(),
                 content_type: "application/json",
                 disposition: None,
                 confidence: None,
+                redaction: None,
                 body: serde_json::to_vec_pretty(&json!({ "pages": pages }))
                     .expect("page JSON serializes"),
             });
         }
         let name = source.name.clone();
-        let document = convert_document(state, source, options)?;
-        return render_stored(state, to, image_mode, &name, &document, options);
+        let converted = convert_document(state, source, options)?;
+        let mut stored = render_stored(state, to, image_mode, &name, &converted.document, options)?;
+        stored.redaction = converted.redaction_header();
+        stored.errors = converted.errors;
+        return Ok(stored);
     }
     let items: Vec<serde_json::Value> = sources
         .into_iter()
@@ -1267,7 +1478,12 @@ fn run_conversion(
                 };
             }
             match convert_document(state, source, options) {
-                Ok(document) => batch_item(state, to, image_mode, &name, &document, options),
+                Ok(converted) => {
+                    let mut item =
+                        batch_item(state, to, image_mode, &name, &converted.document, options);
+                    mark_partial(&mut item, &converted);
+                    item
+                }
                 Err(e) => json!({
                     "name": name,
                     "status": "failure",
@@ -1277,9 +1493,11 @@ fn run_conversion(
         })
         .collect();
     Ok(StoredResponse {
+        errors: Vec::new(),
         content_type: "application/json",
         disposition: None,
         confidence: None,
+        redaction: None,
         body: serde_json::to_vec_pretty(&json!({ "results": items }))
             .expect("batch JSON serializes"),
     })
@@ -1298,9 +1516,13 @@ impl OutputNames {
         let ext = match to {
             "md" | "markdown" => "md",
             "json" => "json",
+            "html" => "html",
             "chunks" => "chunks.json",
             "dclx" => "dclx",
             "latex" => "tex",
+            "text" => "txt",
+            "pandoc" => "pandoc.json",
+            "vtt" => "vtt",
             _ => unreachable!("validated above"),
         };
         Self {
@@ -1354,7 +1576,7 @@ fn run_conversion_to_target(
             };
             let name = source.name.clone();
             let rendered = convert_document(state, source, options)
-                .and_then(|doc| render_stored(state, to, image_mode, &name, &doc, options));
+                .and_then(|c| render_stored(state, to, image_mode, &name, &c.document, options));
             let stored = match rendered {
                 Ok(stored) => stored,
                 Err(e) => {
@@ -1373,9 +1595,11 @@ fn run_conversion_to_target(
         })
         .collect();
     Ok(StoredResponse {
+        errors: Vec::new(),
         content_type: "application/json",
         disposition: None,
         confidence: None,
+        redaction: None,
         // Upstream's RemoteTargetResult is the bare kind ("no content, the
         // result has been pushed to a remote target"); the credential-free
         // target display and per-item outcomes ride along as extra keys.
@@ -1409,8 +1633,9 @@ fn run_conversion_to_zip(
         let (name, rendered) = match item {
             Ok(source) => {
                 let name = source.name.clone();
-                let rendered = convert_document(state, source, options)
-                    .and_then(|doc| render_stored(state, to, image_mode, &name, &doc, options));
+                let rendered = convert_document(state, source, options).and_then(|c| {
+                    render_stored(state, to, image_mode, &name, &c.document, options)
+                });
                 (name, rendered.map(|stored| stored.body))
             }
             Err((name, e)) => (name, Err(e)),
@@ -1436,9 +1661,11 @@ fn run_conversion_to_zip(
     // name (there is no one stem to speak for it).
     let file_name = archive_stem.map_or_else(|| "converted.zip".into(), |s| format!("{s}.zip"));
     Ok(StoredResponse {
+        errors: Vec::new(),
         content_type: "application/zip",
         disposition: Some(format!("attachment; filename=\"{file_name}\"")),
         confidence: None,
+        redaction: None,
         body: docling::dclx::zip_bytes(entry_refs),
     })
 }
@@ -1482,7 +1709,7 @@ fn run_conversion_to_put(
             };
             let name = source.name.clone();
             let rendered = convert_document(state, source, options)
-                .and_then(|doc| render_stored(state, to, image_mode, &name, &doc, options));
+                .and_then(|c| render_stored(state, to, image_mode, &name, &c.document, options));
             let stored = match rendered {
                 Ok(stored) => stored,
                 Err(e) => {
@@ -1514,9 +1741,11 @@ fn run_conversion_to_put(
         })
         .collect();
     Ok(StoredResponse {
+        errors: Vec::new(),
         content_type: "application/json",
         disposition: None,
         confidence: None,
+        redaction: None,
         // The echoed target drops the query string: pre-signed URLs carry
         // their signature there, and the ack may transit logs and proxies.
         body: serde_json::to_vec_pretty(&json!({
@@ -1545,15 +1774,10 @@ fn redact_url(url: &str) -> String {
 /// churns hundreds of MB of page bitmaps through glibc's allocator, which
 /// keeps the freed arenas mapped — measured here, a warm server sat at
 /// ~2 GB RSS after one big conversion with the actual live data a fraction
-/// of that. `malloc_trim` walks the arenas and gives the free pages back;
-/// admission control (and the operator's dashboards) then see the truth.
-/// glibc-Linux only — a no-op elsewhere (musl/mac allocators don't have the
-/// retention pattern to the same degree, and no trim call to offer).
+/// of that. Giving the free pages back lets admission control (and the
+/// operator's dashboards) see the truth. See [`docling::memory`].
 fn trim_heap() {
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    unsafe {
-        libc::malloc_trim(0);
-    }
+    docling::memory::release_free_memory();
 }
 
 /// Server-side cap on pages rasterized per `to=images` request (#243). A small
@@ -1565,8 +1789,7 @@ fn max_raster_pages() -> usize {
     docling_core::env::parse("DOCLING_RS_MAX_RASTER_PAGES").unwrap_or(100)
 }
 
-/// `to=images` (#243): rasterize a PDF's pages to PNG through pdfium — no
-/// models, no OCR — honoring the request's `pages` window and `scale`. Returns
+/// `to=images` (#243): rasterize a PDF's pages to PNG — no models, no OCR — honoring the request's `pages` window and `scale`. Returns
 /// the response's `pages` array; base64 in JSON mirrors the batch `dclx_base64`
 /// precedent (and survives async job storage unchanged).
 fn rasterize_pages(
@@ -1587,17 +1810,12 @@ fn rasterize_pages(
             "scale {scale} out of range (0.1–4.0 pixels per PDF point; 2.0 = 144 dpi)"
         )));
     }
-    let range = options
-        .pages
-        .as_deref()
-        .map(docling::parse_page_range)
-        .transpose()
-        .map_err(|e| ApiError::Bad(format!("pages: {e}")))?;
+    let range = options.convert.page_range().map_err(bad)?;
     // Enforce the page cap before rendering anything. Count with the window
     // applied — pages=A-B is exactly the documented way to rasterize a slice
     // of a document that exceeds the cap.
     let total = docling::pdf_page_count(&source.bytes, None)
-        .map_err(|e| ApiError::Unsupported(e.to_string()))?;
+        .map_err(|e| pdf_api_error(&e, ApiError::Unsupported))?;
     let selected = match range {
         Some((first, last)) if first <= total => last.min(total) - first + 1,
         Some(_) => 0, // out-of-document start — render_pages reports the error
@@ -1610,15 +1828,16 @@ fn rasterize_pages(
              with pages=A-B (or raise DOCLING_RS_MAX_RASTER_PAGES on the server)"
         )));
     }
-    // pdfium is not thread-safe, and the warm pipeline's mutex is this
-    // process's "who owns pdfium" lock — hold it for the render even though no
-    // models run here, so a rasterization can't race a concurrent PDF/image
-    // conversion inside pdfium.
-    let _pdfium_owner = state
+    // The warm pipeline's mutex serializes this process's PDF work (pdfium,
+    // when the `pdfium` feature renders with it, is not thread-safe) — hold
+    // it for the render even though no models run here, so a rasterization
+    // can't race a concurrent PDF/image conversion.
+    let _pdf_owner = state
         .pipeline
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let pages = docling::render_pdf_pages(&source.bytes, None, range, scale)
+    let password = options.convert.password.as_deref();
+    let pages = docling::render_pdf_pages(&source.bytes, password, range, scale)
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(pages
         .iter()
@@ -1650,9 +1869,11 @@ fn render_stored(
     let confidence = confidence_header(document);
     Ok(match to {
         "md" | "markdown" => StoredResponse {
+            errors: Vec::new(),
             content_type: "text/markdown; charset=utf-8",
             disposition: None,
             confidence,
+            redaction: None,
             body: markdown_string(state, document, image_mode, options).into_bytes(),
         },
         "json" => {
@@ -1661,9 +1882,11 @@ fn render_stored(
                 value["confidence"] = report.to_json();
             }
             StoredResponse {
+                errors: Vec::new(),
                 content_type: "application/json",
                 disposition: None,
                 confidence,
+                redaction: None,
                 body: serde_json::to_vec_pretty(&value).expect("document JSON serializes"),
             }
         }
@@ -1679,27 +1902,84 @@ fn render_stored(
                 records["warnings"] = json!(warnings);
             }
             StoredResponse {
+                errors: Vec::new(),
                 content_type: "application/json",
                 disposition: None,
                 confidence,
+                redaction: None,
                 body: serde_json::to_vec(&records).expect("chunk records serialize"),
             }
         }
         "dclx" => StoredResponse {
+            errors: Vec::new(),
             content_type: "application/octet-stream",
             disposition: Some(format!("attachment; filename=\"{name}.dclx\"")),
             confidence,
+            redaction: None,
             body: docling::dclx::to_dclx_bytes(document),
         },
         // #317: a text body like Markdown (no download disposition).
         "latex" => StoredResponse {
+            errors: Vec::new(),
             content_type: "text/x-tex; charset=utf-8",
             disposition: None,
             confidence,
+            redaction: None,
             body: document.export_to_latex().into_bytes(),
+        },
+        // #613: docling's `--to text`, a text body like Markdown.
+        "text" => StoredResponse {
+            errors: Vec::new(),
+            content_type: "text/plain; charset=utf-8",
+            disposition: None,
+            confidence,
+            redaction: None,
+            body: text_string(state, document, options).into_bytes(),
+        },
+        // #614: docling's `--to vtt`, a text body like Markdown.
+        "vtt" => StoredResponse {
+            errors: Vec::new(),
+            content_type: "text/vtt; charset=utf-8",
+            disposition: None,
+            confidence,
+            redaction: None,
+            body: document.export_to_vtt().into_bytes(),
+        },
+        // #515: Pandoc's AST, for `pandoc -f json`; pictures follow
+        // `images` like HTML.
+        "pandoc" => StoredResponse {
+            errors: Vec::new(),
+            content_type: "application/json",
+            disposition: None,
+            confidence,
+            redaction: None,
+            body: pandoc_string(document, image_mode).into_bytes(),
+        },
+        // #492: docling-core's HTML serializer; pictures follow `images`
+        // exactly as the Markdown body does.
+        "html" => StoredResponse {
+            errors: Vec::new(),
+            content_type: "text/html; charset=utf-8",
+            disposition: None,
+            confidence,
+            redaction: None,
+            body: html_string(document, image_mode).into_bytes(),
         },
         _ => unreachable!("validated above"),
     })
+}
+
+/// Stamp a batch / async item with docling's `partial_success` status and
+/// its `errors` when the conversion survived a problem (#497).
+fn mark_partial(item: &mut serde_json::Value, converted: &Converted) {
+    if !converted.errors.is_empty() {
+        item["status"] = json!(converted.status());
+        item["errors"] = converted.errors_json();
+    }
+    // The PII pass's counts (#621) ride along the same way.
+    if let Some(report) = &converted.redaction {
+        item["redaction"] = report.counts_json();
+    }
 }
 
 /// One batch item (#182) as JSON. Text outputs inline as strings, the
@@ -1756,6 +2036,14 @@ fn batch_item(
             )));
         }
         "latex" => item["latex"] = json!(document.export_to_latex()),
+        "text" => item["text"] = json!(text_string(state, document, options)),
+        "vtt" => item["vtt"] = json!(document.export_to_vtt()),
+        "html" => item["html"] = json!(html_string(document, image_mode)),
+        // #515: the AST inline as an object, like the docling JSON document.
+        "pandoc" => {
+            item["pandoc"] = serde_json::from_str(&pandoc_string(document, image_mode))
+                .expect("the Pandoc export is valid JSON")
+        }
         _ => unreachable!("validated above"),
     }
     if to != "json" {
@@ -1776,8 +2064,8 @@ fn markdown_string(
     options: &ConvertOptions,
 ) -> String {
     let mut doc = document.clone();
-    doc.strict_markdown = options.strict.unwrap_or(state.cfg.strict);
-    doc.page_break_placeholder = options.md_page_break_placeholder.clone();
+    doc.strict_markdown = options.convert.strict.unwrap_or(state.cfg.strict);
+    doc.page_break_placeholder = options.convert.page_break_placeholder.clone();
     match image_mode {
         ImageMode::Placeholder => doc.export_to_markdown(),
         _ => {
@@ -1785,6 +2073,46 @@ fn markdown_string(
                 .0
         }
     }
+}
+
+/// The plain-text body for `to=text` (#613): docling-core's
+/// `export_to_text()`, with the request's `strict` and
+/// `page_break_placeholder` applied as for Markdown (`export_to_text` takes
+/// a `page_break_placeholder` upstream too). Pictures print nothing in any
+/// `images` mode, as upstream's plain serializer has no image output.
+fn text_string(state: &AppState, document: &DoclingDocument, options: &ConvertOptions) -> String {
+    let mut doc = document.clone();
+    doc.strict_markdown = options.convert.strict.unwrap_or(state.cfg.strict);
+    doc.page_break_placeholder = options.convert.page_break_placeholder.clone();
+    doc.export_to_text()
+}
+
+/// The HTML body for `to=html` (#492): the page carries its pictures per
+/// `images` the way the Markdown body does — embedded as `data:` URIs, or
+/// linked under `artifacts/` for `referenced` (the bytes are not served,
+/// exactly as for Markdown).
+fn html_string(document: &DoclingDocument, image_mode: ImageMode) -> String {
+    match image_mode {
+        ImageMode::Placeholder => document.export_to_html(),
+        _ => {
+            document
+                .export_to_html_with_images(image_mode, "artifacts")
+                .0
+        }
+    }
+}
+
+/// The Pandoc AST for `to=pandoc` (#515), pictures per `images` (embedded
+/// `data:` URIs, or captioned figures without image data by default). The
+/// API version was checked by `validate_output`.
+fn pandoc_string(document: &DoclingDocument, image_mode: ImageMode) -> String {
+    document
+        .export_to_pandoc_json_with(&docling::pandoc::PandocExportOptions {
+            image_mode,
+            ..Default::default()
+        })
+        .expect("the Pandoc API version was validated")
+        .0
 }
 
 /// The document-level confidence summary as a header value (compact JSON, no
@@ -1807,7 +2135,7 @@ async fn read_multipart(
     while let Some(field) = multipart
         .next_field()
         .await
-        .map_err(|e| ApiError::Bad(format!("bad multipart field: {e}")))?
+        .map_err(|e| multipart_error("bad multipart field", e))?
     {
         let name = field.name().unwrap_or("").to_string();
         match name.as_str() {
@@ -1819,107 +2147,15 @@ async fn read_multipart(
                 let bytes = field
                     .bytes()
                     .await
-                    .map_err(|e| ApiError::Bad(format!("reading upload: {e}")))?;
+                    .map_err(|e| multipart_error("reading upload", e))?;
                 files.push((file_name, bytes.to_vec()));
             }
-            "to" | "images" => {
+            // Every other text part is an option in its wire spelling —
+            // the shared set and this surface's output options alike.
+            _ => {
                 let v = text_field(field).await?;
-                match name.as_str() {
-                    "to" => body_opts.to = Some(v),
-                    _ => body_opts.images = Some(v),
-                }
+                body_opts.set_text(&name, &v)?;
             }
-            "asr_model" => body_opts.asr_model = Some(text_field(field).await?),
-            "asr_lang" => body_opts.asr_lang = Some(text_field(field).await?),
-            "encoding" => body_opts.encoding = Some(text_field(field).await?),
-            "pages" => body_opts.pages = Some(text_field(field).await?),
-            "ocr_lang" => body_opts.ocr_lang = Some(text_field(field).await?),
-            "ocr_mode" => body_opts.ocr_mode = Some(text_field(field).await?),
-            "ocr_engine" => body_opts.ocr_engine = Some(text_field(field).await?),
-            "ocr_scale" => {
-                let v = text_field(field).await?;
-                body_opts.ocr_scale = Some(v.parse().map_err(|_| {
-                    ApiError::Bad(format!("ocr_scale must be a number, got {v:?}"))
-                })?);
-            }
-            "ebcdic_layout" => body_opts.ebcdic_layout = Some(text_field(field).await?),
-            "md_page_break_placeholder" => {
-                body_opts.md_page_break_placeholder = Some(text_field(field).await?)
-            }
-            "pipeline" => body_opts.pipeline = Some(text_field(field).await?),
-            "vlm_endpoint" => body_opts.vlm_endpoint = Some(text_field(field).await?),
-            "vlm_model" => body_opts.vlm_model = Some(text_field(field).await?),
-            "vlm_api_key" => body_opts.vlm_api_key = Some(text_field(field).await?),
-            "vlm_prompt" => body_opts.vlm_prompt = Some(text_field(field).await?),
-            "vlm_max_tokens" => {
-                let v = text_field(field).await?;
-                body_opts.vlm_max_tokens = Some(v.parse().map_err(|_| {
-                    ApiError::Bad(format!(
-                        "vlm_max_tokens must be a positive integer, got {v:?}"
-                    ))
-                })?);
-            }
-            "chunker" => body_opts.chunker = Some(text_field(field).await?),
-            "chunk_tokenizer" => body_opts.chunk_tokenizer = Some(text_field(field).await?),
-            "chunk_max_tokens" => {
-                let v = text_field(field).await?;
-                body_opts.chunk_max_tokens = Some(v.parse().map_err(|_| {
-                    ApiError::Bad(format!(
-                        "chunk_max_tokens must be a positive integer, got {v:?}"
-                    ))
-                })?);
-            }
-            "scale" => {
-                let v = text_field(field).await?;
-                body_opts.scale =
-                    Some(v.parse().map_err(|_| {
-                        ApiError::Bad(format!("scale must be a number, got {v:?}"))
-                    })?);
-            }
-            "video_frames" => {
-                let v = text_field(field).await?;
-                body_opts.video_frames = Some(v.parse().map_err(|_| {
-                    ApiError::Bad(format!(
-                        "video_frames must be a non-negative integer, got {v:?}"
-                    ))
-                })?);
-            }
-            "strict"
-            | "no_ocr"
-            | "skip_ocr"
-            | "no_table_former"
-            | "force_full_page_ocr"
-            | "no_text_panels"
-            | "heading_hierarchy"
-            | "do_picture_classification"
-            | "do_code_enrichment"
-            | "do_formula_enrichment"
-            | "fetch_images"
-            | "list_attachments"
-            | "skip_empty_cells"
-            | "compact_tables"
-            | "chunk_merge_peers" => {
-                let v = text_field(field).await?;
-                let b = matches!(v.as_str(), "1" | "true" | "yes" | "on");
-                match name.as_str() {
-                    "strict" => body_opts.strict = Some(b),
-                    "no_ocr" => body_opts.no_ocr = Some(b),
-                    "skip_ocr" => body_opts.skip_ocr = Some(b),
-                    "force_full_page_ocr" => body_opts.force_full_page_ocr = Some(b),
-                    "no_table_former" => body_opts.no_table_former = Some(b),
-                    "no_text_panels" => body_opts.no_text_panels = Some(b),
-                    "heading_hierarchy" => body_opts.heading_hierarchy = Some(b),
-                    "do_picture_classification" => body_opts.do_picture_classification = Some(b),
-                    "do_code_enrichment" => body_opts.do_code_enrichment = Some(b),
-                    "do_formula_enrichment" => body_opts.do_formula_enrichment = Some(b),
-                    "list_attachments" => body_opts.list_attachments = Some(b),
-                    "skip_empty_cells" => body_opts.skip_empty_cells = Some(b),
-                    "compact_tables" => body_opts.compact_tables = Some(b),
-                    "chunk_merge_peers" => body_opts.chunk_merge_peers = Some(b),
-                    _ => body_opts.fetch_images = Some(b),
-                }
-            }
-            _ => {} // unknown parts are ignored
         }
     }
     if files.is_empty() {
@@ -1929,9 +2165,7 @@ async fn read_multipart(
     // propagates them as its response, a batch fails only that item.
     let sources = files
         .into_iter()
-        .map(|(file_name, bytes)| {
-            source_from_named_bytes(&file_name, bytes).map_err(|e| (file_name, e))
-        })
+        .flat_map(|(file_name, bytes)| sources_from_named_bytes(&file_name, bytes))
         .collect();
     Ok((sources, body_opts.merge_over(query)))
 }
@@ -1940,7 +2174,56 @@ async fn text_field(field: axum::extract::multipart::Field<'_>) -> Result<String
     field
         .text()
         .await
-        .map_err(|e| ApiError::Bad(format!("reading field: {e}")))
+        .map_err(|e| multipart_error("reading field", e))
+}
+
+/// The sources one named file contributes: itself, or — for a `.zip` — every
+/// document inside it (#557), each its own item, so the request converts them
+/// as a batch. Entries that do not convert (unsupported type, nested archive,
+/// unsafe path, over an [`ArchiveLimits`](docling::ArchiveLimits) bound —
+/// `DOCLING_RS_ZIP_MAX_*`) are logged and left out; an archive that cannot be
+/// read, or holds nothing convertible, is one failed item.
+fn sources_from_named_bytes(file_name: &str, bytes: Vec<u8>) -> Vec<SourceItem> {
+    let is_zip = std::path::Path::new(file_name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("zip"));
+    if !is_zip {
+        return vec![source_from_named_bytes(file_name, bytes).map_err(|e| (file_name.into(), e))];
+    }
+    let limits = docling::ArchiveLimits::from_env();
+    let mut archive = match docling::archive::Archive::open(std::io::Cursor::new(bytes), &limits) {
+        Ok(a) => a,
+        Err(e) => {
+            return vec![Err((
+                file_name.into(),
+                ApiError::Bad(format!("{file_name}: {e}")),
+            ))]
+        }
+    };
+    let entries = archive.entries().to_vec();
+    let mut items: Vec<SourceItem> = Vec::new();
+    for entry in entries {
+        let label = format!("{file_name}:{}", entry.path);
+        if let Some(reason) = &entry.skipped {
+            eprintln!("docling-serve: skipping {label}: {reason}");
+            continue;
+        }
+        items.push(
+            archive
+                .read(entry.index)
+                .map_err(|e| (label, ApiError::Bad(e.to_string()))),
+        );
+    }
+    if items.is_empty() {
+        items.push(Err((
+            file_name.into(),
+            ApiError::Bad(format!(
+                "{file_name}: the archive holds no document to convert"
+            )),
+        )));
+    }
+    items
 }
 
 /// Build a [`SourceDocument`] from a filename (extension → format) and bytes.
@@ -1951,220 +2234,76 @@ fn source_from_named_bytes(file_name: &str, bytes: Vec<u8>) -> Result<SourceDocu
 /// As [`source_from_named_bytes`], with an optional response `Content-Type` used
 /// as a fallback when the name carries no usable extension — a URL like
 /// `…/help/example-domains` has no `.html`, but the server reports
-/// `text/html`, so it still converts.
+/// `text/html`, so it still converts. The resolution (extension, media type,
+/// then the content's own signature — a DjVu upload under a bare name, #434)
+/// is the library's [`SourceDocument::from_named_bytes`]; this maps its
+/// failure onto the status: an extension docling does not know is
+/// unsupported, a name that decides nothing is a bad request.
 fn source_from_named_bytes_ct(
     file_name: &str,
     bytes: Vec<u8>,
     content_type: Option<&str>,
 ) -> Result<SourceDocument, ApiError> {
-    let ext = std::path::Path::new(file_name)
+    let has_ext = std::path::Path::new(file_name)
         .extension()
-        .and_then(|e| e.to_str());
-    let format = ext
-        .and_then(InputFormat::from_extension)
-        .or_else(|| content_type.and_then(format_from_content_type))
-        // A DjVu upload with a bare/renamed file name and a generic
-        // Content-Type is still unambiguous from its `AT&TFORM` magic (#434).
-        .or_else(|| docling::backend::looks_like_djvu(&bytes).then_some(InputFormat::Djvu))
-        .ok_or_else(|| match ext {
-            Some(e) => ApiError::Unsupported(format!("unrecognized extension '.{e}'")),
-            None => ApiError::Bad(format!(
-                "cannot determine the format of '{file_name}': no file extension \
-                 and no recognized Content-Type"
-            )),
-        })?;
-    let stem = std::path::Path::new(file_name)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("document")
-        .to_string();
-    Ok(SourceDocument::from_bytes(stem, format, bytes))
-}
-
-/// Map an HTTP `Content-Type` (its media-type, parameters stripped) to an input
-/// format — the common web types docling can convert. Anything else returns
-/// `None` and the caller reports an unknown-format error.
-fn format_from_content_type(content_type: &str) -> Option<InputFormat> {
-    let mime = content_type
-        .split(';')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_ascii_lowercase();
-    Some(match mime.as_str() {
-        "text/html" | "application/xhtml+xml" => InputFormat::Html,
-        "application/pdf" => InputFormat::Pdf,
-        "text/markdown" | "text/plain" => InputFormat::Md,
-        "text/csv" => InputFormat::Csv,
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => {
-            InputFormat::Docx
+        .and_then(|e| e.to_str())
+        .is_some();
+    SourceDocument::from_named_bytes(file_name, bytes, content_type).map_err(|e| {
+        let msg = match e {
+            docling::ConversionError::UnknownFormat { hint } => hint,
+            other => other.to_string(),
+        };
+        if has_ext {
+            ApiError::Unsupported(msg)
+        } else {
+            ApiError::Bad(msg)
         }
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => {
-            InputFormat::Pptx
-        }
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => InputFormat::Xlsx,
-        "application/epub+zip" => InputFormat::Epub,
-        "image/jpeg" | "image/png" | "image/tiff" | "image/bmp" | "image/webp" => {
-            InputFormat::Image
-        }
-        // SVG (#212) is its own format, not Image: the ML build rasterizes it
-        // first, and OCR-less builds extract its <text> elements instead.
-        "image/svg+xml" => InputFormat::Svg,
-        // DjVu (#434): pure-Rust decode of the hidden text layer (OCR fallback
-        // for scan-only pages). Both registered and legacy MIME spellings.
-        "image/vnd.djvu" | "image/x-djvu" | "image/x.djvu" => InputFormat::Djvu,
-        // Upstream's FormatToMimeType for AUDIO and VIDEO (docling v2.114).
-        "audio/wav" | "audio/x-wav" | "audio/mpeg" | "audio/mp3" | "audio/mp4" | "audio/m4a"
-        | "audio/aac" | "audio/ogg" | "audio/flac" | "audio/x-flac" => InputFormat::Audio,
-        "video/mp4" | "video/avi" | "video/x-msvideo" | "video/quicktime" | "video/x-matroska"
-        | "video/webm" => InputFormat::Video,
-        _ => return None,
     })
 }
 
-/// Largest URL-fetch response accepted (256 MiB default). Unlike the
-/// request-body limit, `read_to_end` on a fetched response is otherwise
-/// unbounded — a hostile URL streaming an endless body would exhaust memory.
-/// Override with `DOCLING_RS_MAX_FETCH_BYTES`.
-fn max_fetch_bytes() -> u64 {
-    docling_core::env::parse("DOCLING_RS_MAX_FETCH_BYTES").unwrap_or(256 * 1024 * 1024)
-}
-
-/// Escape hatch for local development: when `DOCLING_RS_ALLOW_PRIVATE_IP_FETCH`
-/// is set to a truthy value, the SSRF IP block-list is not enforced, so a URL
-/// like `http://localhost:8080/doc.pdf` can be fetched. Off by default —
-/// leave it unset in production.
-fn allow_private_ip_fetch() -> bool {
-    docling_core::env::flag("DOCLING_RS_ALLOW_PRIVATE_IP_FETCH")
-}
-
-/// Reject a resolved IP that points back into the local host or infrastructure.
-/// This is the core SSRF guard: without it, `{"url": "http://169.254.169.254/…"}`
-/// or `http://127.0.0.1:…` would let a caller reach cloud metadata and internal
-/// services from the server's network position.
-fn is_blocked_ip(ip: std::net::IpAddr) -> bool {
-    use std::net::IpAddr;
-    match ip {
-        IpAddr::V4(v4) => {
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-                || v4.is_documentation()
-                // Carrier-grade NAT 100.64.0.0/10.
-                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64)
-        }
-        IpAddr::V6(v6) => {
-            v6.is_loopback()
-                || v6.is_unspecified()
-                // Unique-local fc00::/7 and link-local fe80::/10.
-                || (v6.segments()[0] & 0xfe00) == 0xfc00
-                || (v6.segments()[0] & 0xffc0) == 0xfe80
-                // IPv4-mapped (::ffff:a.b.c.d): re-check the embedded v4.
-                || v6
-                    .to_ipv4_mapped()
-                    .is_some_and(|v4| is_blocked_ip(IpAddr::V4(v4)))
-        }
+/// docling-serve's URL-fetch policy on top of the library's defaults
+/// (`DOCLING_RS_MAX_FETCH_BYTES`, 10 s connect / 300 s total — without
+/// timeouts a slow-drip URL pins one spawn_blocking worker indefinitely, and
+/// a handful of them starves the pool): no redirects, since a public URL
+/// could 30x-bounce to an internal target and defeat the pre-check.
+fn fetch_policy(headers: &[(String, String)]) -> docling::FetchPolicy {
+    docling::FetchPolicy {
+        max_redirects: 0,
+        headers: headers.to_vec(),
+        ..docling::FetchPolicy::default()
     }
 }
 
 /// SSRF pre-check shared by every request-supplied outbound URL — URL inputs
-/// and the `vlm_endpoint` request option (#304): http(s) scheme only, then
-/// resolve the host and reject if it maps to a private/loopback/link-local
-/// address (fetches additionally forbid redirects — a public URL could
-/// 30x-bounce to an internal target, defeating this pre-check). This is a
-/// best-effort mitigation — a DNS-rebinding race between this resolution and
-/// the eventual connect remains theoretically possible; the deployment-level
-/// control is to leave URL fetch disabled unless the network is trusted.
-/// Blocking (DNS) — call on the blocking pool.
+/// and the `vlm_endpoint` request option (#304): the library's
+/// [`docling::fetch::check_outbound_url`] (http(s) only, host resolved and
+/// refused when private/loopback/link-local unless
+/// `DOCLING_RS_ALLOW_PRIVATE_IP_FETCH` lifts it), as a 400. Blocking (DNS) —
+/// call on the blocking pool.
 fn check_outbound_url(url: &str) -> Result<(), ApiError> {
-    if !url.starts_with("http://") && !url.starts_with("https://") {
-        return Err(ApiError::Bad(format!("unsupported URL scheme in '{url}'")));
-    }
-    let parsed =
-        url::Url::parse(url).map_err(|e| ApiError::Bad(format!("bad URL '{url}': {e}")))?;
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| ApiError::Bad(format!("no host in URL '{url}'")))?;
-    let port = parsed.port_or_known_default().unwrap_or(80);
-    let mut resolved = (host, port)
-        .to_socket_addrs()
-        .map_err(|e| ApiError::Bad(format!("cannot resolve {host}: {e}")))?
-        .peekable();
-    if resolved.peek().is_none() {
-        return Err(ApiError::Bad(format!("cannot resolve {host}")));
-    }
-    if !allow_private_ip_fetch() {
-        for addr in resolved {
-            if is_blocked_ip(addr.ip()) {
-                return Err(ApiError::Bad(format!(
-                    "refusing to fetch {url}: resolves to a private/loopback address \
-                     (set DOCLING_RS_ALLOW_PRIVATE_IP_FETCH=1 for local development)"
-                )));
-            }
-        }
-    }
-    Ok(())
+    docling::fetch::check_outbound_url(url, false).map_err(ApiError::Bad)
 }
 
 /// Fetch a URL input (blocking; run on the blocking pool). The name comes
-/// from `file_name` or the URL path's last segment.
+/// from `file_name`, else the response's `Content-Disposition`, else the
+/// URL path's last segment; request headers ride along verbatim (docling's
+/// `HttpSource.headers`, #139 — auth tokens for protected origins).
 fn fetch_url(
     url: &str,
     file_name: Option<&str>,
     headers: &[(String, String)],
 ) -> Result<SourceDocument, ApiError> {
-    check_outbound_url(url)?;
-    // Bounded in time as well as size: without timeouts a slow-drip URL pins
-    // one spawn_blocking worker indefinitely, and a handful of them starves
-    // the pool. Generous global cap — legitimate fetches may be ~256 MiB.
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .max_redirects(0)
-        .timeout_connect(Some(std::time::Duration::from_secs(10)))
-        .timeout_global(Some(std::time::Duration::from_secs(300)))
-        .build()
-        .into();
-    // Request headers ride along verbatim (docling's `HttpSource.headers`,
-    // #139 — auth tokens for protected origins).
-    let mut request = agent.get(url);
-    for (k, v) in headers {
-        request = request.header(k, v);
-    }
-    let mut response = request
-        .call()
-        .map_err(|e| ApiError::Bad(format!("fetching {url}: {e}")))?;
-    // Kept for format detection when the URL/name has no usable extension.
-    let content_type = response
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
-    let max_fetch = max_fetch_bytes();
-    let mut bytes = Vec::new();
-    response
-        .body_mut()
-        .as_reader()
-        .take(max_fetch + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| ApiError::Bad(format!("reading {url}: {e}")))?;
-    if bytes.len() as u64 > max_fetch {
-        return Err(ApiError::Bad(format!(
-            "response from {url} exceeds {max_fetch} bytes"
-        )));
-    }
-    let name = file_name
-        .map(|s| s.to_string())
-        .or_else(|| {
-            url.split('/')
-                .next_back()
-                .map(|s| s.split(['?', '#']).next().unwrap_or(s).to_string())
-                .filter(|s| !s.is_empty())
-        })
-        .unwrap_or_else(|| "document".to_string());
+    let fetched = docling::fetch::fetch(url, &fetch_policy(headers))
+        .map_err(|e| ApiError::Bad(e.to_string()))?;
+    let name = file_name.map(str::to_string).unwrap_or_else(|| {
+        docling::fetch::fetched_name(&fetched.url, fetched.content_disposition.as_deref())
+    });
     // Record the fetch URL as the document's base URL so relative `<img src>`
     // on a fetched web page resolve against its origin when fetch_images is on.
-    Ok(source_from_named_bytes_ct(&name, bytes, content_type.as_deref())?.with_base_url(url))
+    Ok(
+        source_from_named_bytes_ct(&name, fetched.bytes, fetched.content_type.as_deref())?
+            .with_base_url(fetched.url),
+    )
 }
 
 /// Convert to a [`DoclingDocument`], routing PDF/image through the warm
@@ -2177,10 +2316,50 @@ fn convert_document(
     state: &AppState,
     source: SourceDocument,
     options: &ConvertOptions,
-) -> Result<DoclingDocument, ApiError> {
+) -> Result<Converted, ApiError> {
     let result = convert_document_inner(state, source, options);
     o11y::record_conversion(result.is_ok());
     result
+}
+
+/// A converted document with the problems its conversion survived —
+/// docling's `ConversionResult.errors`, non-empty for a `partial_success`
+/// (today: a spent `document_timeout`, #497).
+struct Converted {
+    document: DoclingDocument,
+    errors: Vec<docling::ErrorItem>,
+    /// The PII pass's counts (#621) when the request asked for redaction —
+    /// `X-Docling-Redaction` on a single response, `redaction` on a batch /
+    /// async item. Never the mapping.
+    redaction: Option<docling_core::RedactionReport>,
+}
+
+impl Converted {
+    /// The `X-Docling-Redaction` value: the counts as JSON.
+    fn redaction_header(&self) -> Option<header::HeaderValue> {
+        let report = self.redaction.as_ref()?;
+        header::HeaderValue::from_str(&report.counts_json().to_string()).ok()
+    }
+
+    fn status(&self) -> &'static str {
+        if self.errors.is_empty() {
+            "success"
+        } else {
+            "partial_success"
+        }
+    }
+
+    fn errors_json(&self) -> serde_json::Value {
+        json!(self
+            .errors
+            .iter()
+            .map(|e| json!({
+                "component_type": e.component_type,
+                "module_name": e.module_name,
+                "error_message": e.error_message,
+            }))
+            .collect::<Vec<_>>())
+    }
 }
 
 /// Resolve the request's `pipeline` / `vlm_*` options (#304) into
@@ -2196,84 +2375,102 @@ fn resolve_vlm_options(
     options: &ConvertOptions,
     check_ip: bool,
 ) -> Result<Option<docling::vlm::VlmOptions>, ApiError> {
-    let set = |s: &Option<String>| s.clone().filter(|v| !v.trim().is_empty());
-    match options.pipeline.as_deref() {
-        None | Some("standard") => Ok(None),
-        Some("vlm") => {
-            let endpoint = set(&options.vlm_endpoint);
-            if let Some(url) = endpoint.as_deref() {
-                if !state.cfg.allow_url_fetch {
-                    return Err(ApiError::Unsupported(
-                        "request-supplied vlm_endpoint is disabled; start docling-serve \
-                         with --allow-url-fetch (SSRF surface — see docs/SECURITY.md), \
-                         or pin the endpoint server-side via DOCLING_RS_VLM_ENDPOINT"
-                            .into(),
-                    ));
-                }
-                if check_ip {
-                    check_outbound_url(url)?;
-                }
-            }
-            let mut v = docling::vlm::VlmOptions::resolve(endpoint, set(&options.vlm_model))
-                .map_err(|e| {
-                    // The library's message names the CLI flags; this surface's
-                    // spelling is the request options.
-                    ApiError::Bad(
-                        e.to_string()
-                            .replace("pass --vlm-endpoint", "pass vlm_endpoint")
-                            .replace("pass --vlm-model", "pass vlm_model"),
-                    )
-                })?;
-            if let Some(p) = set(&options.vlm_prompt) {
-                v.prompt = Some(p);
-            }
-            if let Some(k) = set(&options.vlm_api_key) {
-                v.api_key = Some(k);
-            }
-            // Validated like the Node bindings' `vlmMaxTokens`: 0 would have
-            // every page come back empty and surface as a model error.
-            match options.vlm_max_tokens {
-                Some(0) => {
-                    return Err(ApiError::Bad(
-                        "vlm_max_tokens must be greater than 0".into(),
-                    ))
-                }
-                Some(n) => v.max_tokens = n,
-                None => {}
-            }
-            // `pages` composes with the VLM exactly as with the ML pipeline —
-            // only the selected pages are rendered and sent.
-            v.page_range = options
-                .pages
-                .as_deref()
-                .map(docling::parse_page_range)
-                .transpose()
-                .map_err(|e| ApiError::Bad(format!("pages: {e}")))?;
-            Ok(Some(v))
-        }
-        Some(other) => Err(ApiError::Bad(format!(
-            "unknown pipeline '{other}' (expected: standard, vlm)"
-        ))),
+    let o = &options.convert;
+    if o.pipeline().map_err(bad)? != docling::PipelineKind::Vlm {
+        return Ok(None);
     }
+    if let Some(url) = o.vlm_endpoint.as_deref().filter(|v| !v.trim().is_empty()) {
+        if !state.cfg.allow_url_fetch {
+            return Err(ApiError::Unsupported(
+                "request-supplied vlm_endpoint is disabled; start docling-serve \
+                 with --allow-url-fetch (SSRF surface — see docs/SECURITY.md), \
+                 or pin the endpoint server-side via DOCLING_RS_VLM_ENDPOINT"
+                    .into(),
+            ));
+        }
+        if check_ip {
+            check_outbound_url(url)?;
+        }
+    }
+    // The shared resolution (#577): env fallbacks, blank-as-unset, the
+    // `max_tokens` check, `pages` composing like it does with the ML pipeline.
+    o.vlm_options().map_err(bad)
+}
+
+/// The picture-description pass's endpoint (#670) is the same outbound/SSRF
+/// surface as `vlm_endpoint`: a request-supplied one (its own field, or
+/// `vlm_endpoint` standing in for it) needs `--allow-url-fetch` and the
+/// resolution check; the server's `DOCLING_RS_VLM_ENDPOINT` needs neither.
+/// The pass's other options are validated through the shared resolution.
+fn check_picture_description(
+    state: &AppState,
+    options: &ConvertOptions,
+    check_ip: bool,
+) -> Result<(), ApiError> {
+    let o = &options.convert;
+    if o.do_picture_description != Some(true) {
+        return Ok(());
+    }
+    let supplied = o
+        .picture_description_endpoint
+        .as_deref()
+        .or(o.vlm_endpoint.as_deref())
+        .filter(|v| !v.trim().is_empty());
+    if let Some(url) = supplied {
+        if !state.cfg.allow_url_fetch {
+            return Err(ApiError::Unsupported(
+                "request-supplied picture_description_endpoint is disabled; start docling-serve \
+                 with --allow-url-fetch (SSRF surface — see docs/SECURITY.md), or pin the \
+                 endpoint server-side via DOCLING_RS_VLM_ENDPOINT"
+                    .into(),
+            ));
+        }
+        if check_ip {
+            check_outbound_url(url)?;
+        }
+    }
+    o.picture_description_options().map_err(bad)?;
+    Ok(())
 }
 
 fn convert_document_inner(
     state: &AppState,
     source: SourceDocument,
     options: &ConvertOptions,
-) -> Result<DoclingDocument, ApiError> {
+) -> Result<Converted, ApiError> {
     // #304: the VLM pipeline is a sibling path — the remote model does the
     // reading, none of the local ML options apply. Resolved here (on the
     // blocking pool, where the endpoint's DNS check belongs) so every
     // buffered surface — sync, batch item, async job, cloud target — and the
     // streaming path's buffered branch pick it up in one place. A VLM failure
     // is a per-request error like any other, never a server crash.
+    check_picture_description(state, options, true)?;
     if let Some(vlm) = resolve_vlm_options(state, options, true)? {
+        let finish = request_converter(state, options)?;
         return docling::vlm::convert_vlm(&source, &vlm)
-            .map_err(|e| ApiError::Unsupported(e.to_string()));
+            .map_err(|e| conversion_api_error(&e))
+            .and_then(|mut document| {
+                finish.finish_document(&mut document);
+                // The PII pass (#621) on the VLM path too.
+                let redaction = finish
+                    .redact(&mut document)
+                    .map_err(|e| conversion_api_error(&e))?;
+                Ok(Converted {
+                    document,
+                    errors: Vec::new(),
+                    redaction,
+                })
+            });
     }
     match source.format {
         InputFormat::Pdf | InputFormat::Image => {
+            // The warm pipeline bypasses `DocumentConverter::convert`, so the
+            // document-level settings it applies to every other format —
+            // `compact_tables`, `strict`, `md_page_break_placeholder`, derived
+            // table cells — are applied here from the same request converter
+            // (#547: `compact_tables=true` used to come back padded for a
+            // PDF while a DOCX in the same request shape came back compact).
+            let finish = request_converter(state, options)?;
             // Recover from a poisoned lock instead of propagating the panic: a
             // single crafted PDF/image that panics inside `convert` below drops
             // the guard mid-unwind and poisons the mutex. Without this recovery
@@ -2286,47 +2483,69 @@ fn convert_document_inner(
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let pipeline = warm_pipeline(&mut guard, options)?;
-            // The page window (#80) is per-request configuration on the shared
-            // warm pipeline — set it unconditionally so no request inherits a
-            // previous one's window. Images are single-page; no window.
-            let range = options
-                .pages
-                .as_deref()
-                .map(docling::parse_page_range)
-                .transpose()
-                .map_err(|e| ApiError::Bad(format!("pages: {e}")))?;
-            pipeline.set_pages(range);
-            // OCR language likewise applies per request; only a worker whose
-            // cached recognition model mismatches actually reloads anything.
-            pipeline.set_ocr_engine(parse_ocr_engine(options.ocr_engine.as_deref())?);
-            pipeline.set_ocr_lang(parse_ocr_lang(options)?);
-            pipeline.set_tesseract_lang(tesseract_lang(options)?);
-            // Forcing, mode and scale (#254) are pure per-worker configuration
-            // — set unconditionally like the page window. (This also makes
-            // `force_full_page_ocr` effective on the warm path at all: it was
-            // only ever applied to the declarative converter before, which
-            // PDFs never route through.)
-            pipeline.set_force_full_page_ocr(options.force_full_page_ocr.unwrap_or(false));
-            pipeline.set_ocr_mode(parse_ocr_mode(options.ocr_mode.as_deref())?);
-            pipeline.set_ocr_scale(parse_ocr_scale(options.ocr_scale)?);
-            // #302: pure per-request post-processing configuration, set
-            // unconditionally like the page window.
+            // Every per-request setting of the shared warm pipeline, read as
+            // typed values off the validated option set (#577) — set
+            // unconditionally so no request inherits a previous one's: the
+            // page window (#80), the OCR engine / language (only a worker
+            // whose cached recognition model mismatches reloads anything),
+            // forcing, mode and scale (#254), picture-crop scale and page
+            // images (#519/#520), the heading pass (#302), the budget (#497).
+            let o = &options.convert;
+            pipeline.set_pages(o.page_range().map_err(bad)?);
+            pipeline.set_ocr_engine(o.ocr_engine().map_err(bad)?);
+            pipeline.set_ocr_lang(o.ocr_lang().map_err(bad)?);
+            pipeline.set_tesseract_lang(o.tesseract_lang().map_err(bad)?);
+            pipeline.set_force_full_page_ocr(o.force_full_page_ocr.unwrap_or(false));
+            pipeline.set_ocr_mode(o.ocr_mode().map_err(bad)?);
+            pipeline.set_ocr_scale(o.ocr_scale);
+            pipeline.set_ocr_textline_orientation(o.ocr_textline_orientation);
+            pipeline.set_images(o.image_output());
             pipeline.set_heading_hierarchy(docling::HeadingHierarchyOptions::enabled(
-                options.heading_hierarchy.unwrap_or(false),
+                o.heading_hierarchy.unwrap_or(false),
             ));
-            let doc = match source.format {
-                InputFormat::Pdf => pipeline.convert(&source.bytes, None, &source.name),
-                _ => pipeline.convert_image(&source.bytes, &source.name),
+            pipeline.set_document_timeout(o.document_timeout().map_err(bad)?);
+            let mut converted = match source.format {
+                InputFormat::Pdf => pipeline
+                    .convert_outcome(&source.bytes, o.password.as_deref(), &source.name)
+                    .map(|c| Converted {
+                        errors: c
+                            .completion
+                            .message()
+                            .map(docling::ErrorItem::timeout)
+                            .into_iter()
+                            .collect(),
+                        document: c.document,
+                        redaction: None,
+                    }),
+                _ => pipeline
+                    .convert_image(&source.bytes, &source.name)
+                    .map(|document| Converted {
+                        document,
+                        errors: Vec::new(),
+                        redaction: None,
+                    }),
             }
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
-            Ok(doc)
+            // An encrypted PDF is the client's to fix (422 + `code`, #636);
+            // anything else the warm pipeline fails on keeps its status.
+            .map_err(|e| pdf_api_error(&e, ApiError::Internal))?;
+            finish.finish_document(&mut converted.document);
+            // The warm pipeline bypasses `DocumentConverter::convert`, so the
+            // PII pass (#621) is applied here, like the serializer knobs.
+            converted.redaction = finish
+                .redact(&mut converted.document)
+                .map_err(|e| conversion_api_error(&e))?;
+            Ok(converted)
         }
         _ => {
             let converter = request_converter(state, options)?;
             converter
                 .convert(source)
-                .map(|r| r.document)
-                .map_err(|e| ApiError::Unsupported(e.to_string()))
+                .map(|r| Converted {
+                    document: r.document,
+                    errors: r.errors,
+                    redaction: r.redaction,
+                })
+                .map_err(|e| conversion_api_error(&e))
         }
     }
 }
@@ -2345,8 +2564,8 @@ fn convert_document_inner(
 /// models themselves load lazily on the first matching region anyway).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct PipelineFlags {
+    text_layer_only: bool,
     no_ocr: bool,
-    skip_ocr: bool,
     no_table_former: bool,
     no_text_panels: bool,
     enrich: docling::EnrichmentOptions,
@@ -2354,26 +2573,18 @@ struct PipelineFlags {
 
 impl PipelineFlags {
     fn of(options: &ConvertOptions) -> Self {
+        let o = &options.convert;
         Self {
-            no_ocr: options.no_ocr.unwrap_or(false),
-            skip_ocr: options.skip_ocr.unwrap_or(false),
-            no_table_former: options.no_table_former.unwrap_or(false),
-            no_text_panels: options.no_text_panels.unwrap_or(false),
-            enrich: enrichments(options),
+            text_layer_only: o.text_layer_only.unwrap_or(false),
+            no_ocr: o.ocr_disabled(),
+            no_table_former: o.no_table_former.unwrap_or(false),
+            no_text_panels: o.no_text_panels.unwrap_or(false),
+            enrich: o.enrichments(),
         }
     }
 }
 
-/// The request's enrichment passes (#423), all off unless asked for.
-fn enrichments(options: &ConvertOptions) -> docling::EnrichmentOptions {
-    docling::EnrichmentOptions {
-        picture_classification: options.do_picture_classification.unwrap_or(false),
-        code: options.do_code_enrichment.unwrap_or(false),
-        formula: options.do_formula_enrichment.unwrap_or(false),
-    }
-}
-
-/// The lazily-loaded warm pipeline. Pipeline switches (`no_ocr`, `skip_ocr`,
+/// The lazily-loaded warm pipeline. Pipeline switches (`text_layer_only`, `no_ocr`,
 /// `no_table_former`, `no_text_panels`) are per-instance, so the pipeline is
 /// rebuilt exactly when the request's switches differ from the cached
 /// instance's — including back to the default (#246; the old code only
@@ -2388,8 +2599,10 @@ fn warm_pipeline<'a>(
     if slot.as_ref().map(|(built, _)| *built) != Some(flags) {
         let p = Pipeline::new()
             .map_err(|e| ApiError::Internal(e.to_string()))?
-            .no_ocr(flags.no_ocr)
-            .skip_ocr(flags.skip_ocr)
+            // docling-pdf's pre-2.0 names: its `no_ocr` is the text-layer
+            // fast path, its `skip_ocr` docling's do_ocr=False (#611).
+            .no_ocr(flags.text_layer_only)
+            .skip_ocr(flags.no_ocr)
             .no_table_former(flags.no_table_former)
             .no_text_panels(flags.no_text_panels)
             .enrichments(flags.enrich);
@@ -2399,140 +2612,65 @@ fn warm_pipeline<'a>(
 }
 
 /// Per-request declarative converter (construction is cheap — it's
-/// configuration, models don't apply).
+/// configuration, models don't apply): the shared options validated and
+/// applied by [`docling::ConvertOptions::apply`] onto this server's base
+/// (`--strict`), after the two policies only a server has.
 fn request_converter(
     state: &AppState,
     options: &ConvertOptions,
 ) -> Result<DocumentConverter, ApiError> {
-    let mut converter = DocumentConverter::new()
-        .strict(options.strict.unwrap_or(state.cfg.strict))
-        // `fetch_images` pulls external `<img src>` over the network — the same
-        // outbound-fetch / SSRF surface as URL inputs, so it lives behind the
-        // same `--allow-url-fetch` gate. Off by default, it's silently ignored
-        // rather than honored (the UI greys the box; an API caller just gets
-        // placeholder images instead of a surprise outbound fetch).
-        .fetch_images(state.cfg.allow_url_fetch && options.fetch_images.unwrap_or(false))
-        .list_attachments(options.list_attachments.unwrap_or(false))
-        .skip_empty_cells(options.skip_empty_cells.unwrap_or(false))
-        .compact_tables(options.compact_tables.unwrap_or(false))
-        .page_break_placeholder(options.md_page_break_placeholder.clone())
-        .ebcdic_layout_opt(options.ebcdic_layout.clone())
-        .asr_model(options.asr_model.clone())
-        .asr_lang(options.asr_lang.clone())
-        .encoding(options.encoding.clone())
-        .video_frames(
-            options
-                .video_frames
-                .unwrap_or(docling::DEFAULT_VIDEO_FRAMES),
-        )
-        .no_ocr(options.no_ocr.unwrap_or(false))
-        .skip_ocr(options.skip_ocr.unwrap_or(false))
-        .force_full_page_ocr(options.force_full_page_ocr.unwrap_or(false))
-        .no_table_former(options.no_table_former.unwrap_or(false))
-        .no_text_panels(options.no_text_panels.unwrap_or(false))
-        .heading_hierarchy(options.heading_hierarchy.unwrap_or(false))
-        .do_picture_classification(options.do_picture_classification.unwrap_or(false))
-        .do_code_enrichment(options.do_code_enrichment.unwrap_or(false))
-        .do_formula_enrichment(options.do_formula_enrichment.unwrap_or(false));
-    if let Some(pages) = &options.pages {
-        let (first, last) =
-            docling::parse_page_range(pages).map_err(|e| ApiError::Bad(format!("pages: {e}")))?;
-        converter = converter.page_range(first, last);
+    let mut o = options.convert.clone();
+    // The image-source policy (#646). `remote` (and its alias
+    // `fetch_images=true`) pulls external `<img src>` over the network — the
+    // same outbound-fetch / SSRF surface as URL inputs, so it lives behind
+    // the same `--allow-url-fetch` gate: without the flag the request is
+    // held to `embedded` (`data:` URIs and container parts, which need no
+    // network) rather than refused — an API caller gets the safe tier
+    // instead of a surprise outbound fetch (the UI greys the box). `local`
+    // names server-side files, so it is refused unless the operator started
+    // the server with `--allow-local-images`.
+    let requested = o.image_sources().map_err(bad)?.or_else(|| {
+        o.fetch_images
+            .filter(|&f| f)
+            .map(|_| docling::ImageSources::Remote)
+    });
+    match requested {
+        Some(docling::ImageSources::Local) if !state.cfg.allow_local_images => {
+            return Err(ApiError::Unsupported(
+                "image_sources=local reads files next to the source on the server; \
+                 start docling-serve with --allow-local-images to enable it, or use \
+                 image_sources=embedded"
+                    .into(),
+            ));
+        }
+        Some(docling::ImageSources::Remote) if !state.cfg.allow_url_fetch => {
+            o.image_sources = Some(docling::ImageSources::Embedded.to_string());
+            o.fetch_images = Some(false);
+        }
+        Some(sources) => {
+            o.image_sources = Some(sources.to_string());
+            o.fetch_images = None;
+        }
+        None => {}
     }
-    // Validated against the request's engine (#460): `deu` is a language
-    // to Tesseract only.
-    parse_ocr_lang(options)?;
-    if let Some(lang) = &options.ocr_lang {
-        converter = converter.ocr_lang(lang.clone());
+    // A server-local directory, held to the same rule as `chunk_tokenizer`:
+    // relative, no `..` — a request must not name arbitrary server paths.
+    if let Some(dir) = o.xbrl_taxonomy.as_deref() {
+        let path = std::path::Path::new(dir);
+        let unsafe_component = path.components().any(|c| {
+            !matches!(
+                c,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        });
+        if unsafe_component || dir.is_empty() {
+            return Err(ApiError::Bad(format!(
+                "xbrl_taxonomy must be a relative path without '..' components, got {dir:?}"
+            )));
+        }
     }
-    if parse_ocr_engine(options.ocr_engine.as_deref())?.is_some() {
-        converter = converter.ocr_engine(options.ocr_engine.clone().expect("checked above"));
-    }
-    // #254: the converter path reaches the ML pipeline too (rasterized SVG),
-    // so mode/scale plumb here as well — validated up front like ocr_lang.
-    if parse_ocr_mode(options.ocr_mode.as_deref())?.is_some() {
-        converter = converter.ocr_mode(options.ocr_mode.clone().expect("checked above"));
-    }
-    if let Some(s) = parse_ocr_scale(options.ocr_scale)? {
-        converter = converter.ocr_scale(s);
-    }
-    Ok(converter)
-}
-
-/// Validate a request's `ocr_mode` (#254; None passes through — the engine
-/// default).
-fn parse_ocr_mode(raw: Option<&str>) -> Result<Option<docling::OcrMode>, ApiError> {
-    raw.map(|v| {
-        docling::OcrMode::parse(v).ok_or_else(|| {
-            ApiError::Bad(format!(
-                "ocr_mode {v:?} is not \
-                 default|full_page|layout_regions|pdf_aware_layout_regions"
-            ))
-        })
-    })
-    .transpose()
-}
-
-/// Validate a request's `ocr_scale` (#254; None passes through — the engine
-/// default).
-fn parse_ocr_scale(raw: Option<f32>) -> Result<Option<f32>, ApiError> {
-    match raw {
-        Some(s) if !(s.is_finite() && s > 0.0) => Err(ApiError::Bad(format!(
-            "ocr_scale must be a positive number, got {s}"
-        ))),
-        other => Ok(other),
-    }
-}
-
-/// Validate a request's `ocr_engine` (#460; None passes through — the
-/// process default).
-fn parse_ocr_engine(raw: Option<&str>) -> Result<Option<docling::OcrEngine>, ApiError> {
-    raw.map(|v| {
-        docling::OcrEngine::parse(v).ok_or_else(|| {
-            ApiError::Bad(format!(
-                "ocr_engine {v:?} is not {}",
-                docling::OcrEngine::ACCEPTED
-            ))
-        })
-    })
-    .transpose()
-}
-
-/// The engine a request's OCR options are read against: its `ocr_engine`,
-/// else the process default (`DOCLING_RS_OCR_ENGINE`, else PP-OCR).
-fn request_engine(options: &ConvertOptions) -> Result<docling::OcrEngine, ApiError> {
-    Ok(parse_ocr_engine(options.ocr_engine.as_deref())?
-        .unwrap_or_else(docling::OcrEngine::from_env))
-}
-
-/// Validate a request's `ocr_lang` against its engine (None passes through —
-/// the engine default) and return the PP-OCR model it selects; under
-/// Tesseract the value is that engine's language list ([`tesseract_lang`])
-/// and no PP-OCR model is selected.
-fn parse_ocr_lang(options: &ConvertOptions) -> Result<Option<docling::OcrLang>, ApiError> {
-    let Some(v) = options.ocr_lang.as_deref() else {
-        return Ok(None);
-    };
-    let engine = request_engine(options)?;
-    engine.validate_lang(v).map_err(ApiError::Bad)?;
-    Ok(match engine {
-        docling::OcrEngine::PpOcr => docling::OcrLang::parse(v),
-        docling::OcrEngine::Tesseract => None,
-    })
-}
-
-/// Tesseract's `-l` argument from a request's `ocr_lang` (#460), `None`
-/// under PP-OCR or without a language.
-fn tesseract_lang(options: &ConvertOptions) -> Result<Option<String>, ApiError> {
-    let Some(v) = options.ocr_lang.as_deref() else {
-        return Ok(None);
-    };
-    match request_engine(options)? {
-        docling::OcrEngine::Tesseract => docling::tesseract_lang_arg(v)
-            .map(Some)
-            .map_err(ApiError::Bad),
-        docling::OcrEngine::PpOcr => Ok(None),
-    }
+    o.apply(DocumentConverter::new().strict(state.cfg.strict))
+        .map_err(bad)
 }
 
 /// Markdown response: converted through the streaming serializer, body sent
@@ -2570,7 +2708,7 @@ async fn stream_markdown(
         // per-page remote conversion, and its "wrong input format" rejection
         // must reach the client instead of the declarative streamer running a
         // standard conversion the caller didn't ask for.
-        let buffered = options.pipeline.as_deref() == Some("vlm")
+        let buffered = options.convert.pipeline().ok() == Some(docling::PipelineKind::Vlm)
             || matches!(source.format, InputFormat::Pdf | InputFormat::Image);
         if buffered {
             // Buffered document → streamed serialization is pointless for
@@ -2580,9 +2718,15 @@ async fn stream_markdown(
             // streaming holds the model mutex anyway, so the wall-clock
             // is the same; the client still gets incremental output.)
             match convert_document(&st, source, &options) {
-                Ok(mut doc) => {
-                    doc.strict_markdown = options.strict.unwrap_or(st.cfg.strict);
-                    doc.page_break_placeholder = options.md_page_break_placeholder.clone();
+                Ok(converted) => {
+                    // A partial document (#497) streams like a whole one; the
+                    // body is already on its way, so the reason is only logged.
+                    for e in &converted.errors {
+                        eprintln!("docling-serve: partial document: {}", e.error_message);
+                    }
+                    let mut doc = converted.document;
+                    doc.strict_markdown = options.convert.strict.unwrap_or(st.cfg.strict);
+                    doc.page_break_placeholder = options.convert.page_break_placeholder.clone();
                     let md = match image_mode {
                         ImageMode::Placeholder => doc.export_to_markdown(),
                         _ => {
@@ -2617,6 +2761,14 @@ async fn stream_markdown(
                                 if !send(Ok((s, None))) {
                                     return;
                                 }
+                            }
+                            // The stream's last item on a spent document
+                            // budget (#497): the chunks before it are the
+                            // partial document and the body is already on
+                            // its way, so this ends the stream cleanly.
+                            Err(ConversionError::Timeout(msg)) => {
+                                eprintln!("docling-serve: partial document: {msg}");
+                                break;
                             }
                             Err(e) => {
                                 o11y::record_conversion(false);
@@ -2682,7 +2834,27 @@ async fn stream_markdown(
 fn conversion_api_error(e: &ConversionError) -> ApiError {
     match e {
         ConversionError::Panic(msg) => ApiError::Internal(msg.clone()),
-        other => ApiError::Unsupported(other.to_string()),
+        // Still a 422 — the body names the case (#636).
+        other => match other.encryption() {
+            Some(kind) => ApiError::Encrypted {
+                code: kind.code(),
+                message: other.to_string(),
+            },
+            None => ApiError::Unsupported(other.to_string()),
+        },
+    }
+}
+
+/// The HTTP shape of the PDF pipeline's own error, reached where the warm
+/// pipeline bypasses `DocumentConverter`: an encrypted document is the typed
+/// 422 (#636), everything else goes through `fallback` with its message.
+fn pdf_api_error(e: &docling::PdfError, fallback: fn(String) -> ApiError) -> ApiError {
+    match e {
+        docling::PdfError::Encrypted(kind) => ApiError::Encrypted {
+            code: kind.code(),
+            message: e.to_string(),
+        },
+        other => fallback(other.to_string()),
     }
 }
 
@@ -2697,19 +2869,25 @@ mod pipeline_flag_tests {
     /// #246: the cached pipeline must be rebuilt whenever the request's
     /// switches differ from the ones it was built with — in BOTH directions.
     /// The old code only rebuilt toward reduced configurations, so a
-    /// `no_ocr=true` request permanently degraded the shared instance for
+    /// `text_layer_only=true` request permanently degraded the shared instance for
     /// every later default request. (`Pipeline::new()` loads no models —
     /// they're lazy — so this runs in plain CI.)
     #[test]
     fn warm_pipeline_rebuilds_in_both_directions() {
         let mut slot = None;
         let default_opts = ConvertOptions::default();
-        let no_ocr_opts = ConvertOptions {
-            no_ocr: Some(true),
+        let text_layer_opts = ConvertOptions {
+            convert: docling::ConvertOptions {
+                text_layer_only: Some(true),
+                ..Default::default()
+            },
             ..ConvertOptions::default()
         };
-        assert!(warm_pipeline(&mut slot, &no_ocr_opts).is_ok());
-        assert_eq!(slot.as_ref().unwrap().0, PipelineFlags::of(&no_ocr_opts));
+        assert!(warm_pipeline(&mut slot, &text_layer_opts).is_ok());
+        assert_eq!(
+            slot.as_ref().unwrap().0,
+            PipelineFlags::of(&text_layer_opts)
+        );
         // Back to default: the degraded instance must not be reused.
         assert!(warm_pipeline(&mut slot, &default_opts).is_ok());
         assert_eq!(slot.as_ref().unwrap().0, PipelineFlags::default());
@@ -2728,8 +2906,11 @@ mod pipeline_flag_tests {
     fn enrichment_flags_are_part_of_the_rebuild_guard() {
         let mut slot = None;
         let enriched = ConvertOptions {
-            do_picture_classification: Some(true),
-            do_formula_enrichment: Some(true),
+            convert: docling::ConvertOptions {
+                do_picture_classification: Some(true),
+                do_formula_enrichment: Some(true),
+                ..Default::default()
+            },
             ..ConvertOptions::default()
         };
         assert!(warm_pipeline(&mut slot, &enriched).is_ok());
@@ -2739,7 +2920,10 @@ mod pipeline_flag_tests {
         assert_ne!(built, PipelineFlags::default());
         // Explicit `false` and unset mean the same thing: off.
         let off = ConvertOptions {
-            do_code_enrichment: Some(false),
+            convert: docling::ConvertOptions {
+                do_code_enrichment: Some(false),
+                ..Default::default()
+            },
             ..ConvertOptions::default()
         };
         assert_eq!(PipelineFlags::of(&off), PipelineFlags::default());
@@ -2750,49 +2934,6 @@ mod pipeline_flag_tests {
 
 #[cfg(test)]
 mod ssrf_tests {
-    use super::is_blocked_ip;
-    use std::net::IpAddr;
-
-    fn ip(s: &str) -> IpAddr {
-        s.parse().unwrap()
-    }
-
-    #[test]
-    fn blocks_internal_targets() {
-        // Loopback, private ranges, link-local (incl. cloud metadata),
-        // unspecified, CGNAT, and the IPv4-mapped IPv6 forms must all be
-        // refused as SSRF targets.
-        for s in [
-            "127.0.0.1",
-            "127.5.5.5",
-            "10.0.0.1",
-            "172.16.0.1",
-            "192.168.1.1",
-            "169.254.169.254", // AWS/GCP metadata
-            "0.0.0.0",
-            "100.64.0.1", // carrier-grade NAT
-            "::1",
-            "fe80::1",          // link-local
-            "fc00::1",          // unique-local
-            "::ffff:127.0.0.1", // IPv4-mapped loopback
-            "::ffff:169.254.169.254",
-        ] {
-            assert!(is_blocked_ip(ip(s)), "{s} should be blocked");
-        }
-    }
-
-    #[test]
-    fn allows_public_targets() {
-        for s in [
-            "8.8.8.8",
-            "1.1.1.1",
-            "93.184.216.34",
-            "2606:4700:4700::1111",
-        ] {
-            assert!(!is_blocked_ip(ip(s)), "{s} should be allowed");
-        }
-    }
-
     #[test]
     fn url_fetch_off_by_default() {
         assert!(!super::ServeConfig::default().allow_url_fetch);
@@ -2822,9 +2963,22 @@ mod ssrf_tests {
             )),
             Some(InputFormat::Pdf)
         );
-        // Neither an extension nor a known Content-Type → a 4xx (Bad), not a 500.
+        // Neither an extension nor a known Content-Type: text bytes are
+        // plain text (#671); binary bytes a 4xx (Bad), not a 500.
+        assert_eq!(
+            fmt(source_from_named_bytes_ct(
+                "noext",
+                b"x".to_vec(),
+                Some("application/octet-stream")
+            )),
+            Some(InputFormat::Text)
+        );
         assert!(matches!(
-            source_from_named_bytes_ct("noext", b"x".to_vec(), Some("application/octet-stream")),
+            source_from_named_bytes_ct(
+                "noext",
+                vec![0, 1, 2, 255, 254, 0],
+                Some("application/octet-stream")
+            ),
             Err(ApiError::Bad(_))
         ));
     }
@@ -2841,17 +2995,10 @@ mod ssrf_tests {
         // so the block-list is enforced by default. (Set within this test only,
         // then cleared, to avoid leaking to sibling tests.)
         std::env::remove_var("DOCLING_RS_ALLOW_PRIVATE_IP_FETCH");
-        assert!(!super::allow_private_ip_fetch());
-        for (val, want) in [
-            ("1", true),
-            ("true", true),
-            ("0", false),
-            ("false", false),
-            ("", false),
-        ] {
-            std::env::set_var("DOCLING_RS_ALLOW_PRIVATE_IP_FETCH", val);
-            assert_eq!(super::allow_private_ip_fetch(), want, "value {val:?}");
-        }
+        assert!(!docling::fetch::allow_private_ip_fetch());
+        // The accepted spellings are `docling_core::env::flag`'s, tested there.
+        std::env::set_var("DOCLING_RS_ALLOW_PRIVATE_IP_FETCH", "1");
+        assert!(docling::fetch::allow_private_ip_fetch());
         std::env::remove_var("DOCLING_RS_ALLOW_PRIVATE_IP_FETCH");
     }
 }
@@ -2862,7 +3009,6 @@ mod ssrf_tests {
 #[cfg(test)]
 mod vlm_tests {
     use super::{resolve_vlm_options, ApiError, AppState, ConvertOptions, ServeConfig};
-    use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
     use tokio::sync::Semaphore;
 
@@ -2871,7 +3017,7 @@ mod vlm_tests {
             pipeline: Mutex::new(None),
             permits: Arc::new(Semaphore::new(1)),
             jobs: Mutex::new(Default::default()),
-            ready: AtomicBool::new(true),
+            readiness: Mutex::new(super::Readiness::Lazy),
             memory_ceiling_mb: None,
             cfg: ServeConfig {
                 allow_url_fetch,
@@ -2882,9 +3028,12 @@ mod vlm_tests {
 
     fn vlm_opts(endpoint: Option<&str>) -> ConvertOptions {
         ConvertOptions {
-            pipeline: Some("vlm".into()),
-            vlm_endpoint: endpoint.map(str::to_string),
-            vlm_model: Some("m".into()),
+            convert: docling::ConvertOptions {
+                pipeline: Some("vlm".into()),
+                vlm_endpoint: endpoint.map(str::to_string),
+                vlm_model: Some("m".into()),
+                ..Default::default()
+            },
             ..ConvertOptions::default()
         }
     }
@@ -2894,38 +3043,10 @@ mod vlm_tests {
         // Same contract as the Node bindings: no `pipeline=vlm`, no VLM — the
         // stray options are ignored, not rejected, and nothing is resolved.
         for pipeline in [None, Some("standard".to_string())] {
-            let options = ConvertOptions {
-                pipeline,
-                ..vlm_opts(Some("http://127.0.0.1:9/v1"))
-            };
+            let mut options = vlm_opts(Some("http://127.0.0.1:9/v1"));
+            options.convert.pipeline = pipeline;
             let resolved = resolve_vlm_options(&state(false), &options, true);
             assert!(matches!(resolved, Ok(None)));
-        }
-    }
-
-    #[test]
-    fn unknown_pipeline_is_rejected() {
-        let options = ConvertOptions {
-            pipeline: Some("magic".into()),
-            ..ConvertOptions::default()
-        };
-        match resolve_vlm_options(&state(true), &options, false) {
-            Err(ApiError::Bad(m)) => assert!(m.contains("unknown pipeline"), "{m}"),
-            _ => panic!("expected Bad"),
-        }
-    }
-
-    #[test]
-    fn request_endpoint_is_gated_behind_allow_url_fetch() {
-        // Without --allow-url-fetch a caller must not steer the server's
-        // outbound traffic; the operator-pinned env mode is the alternative.
-        match resolve_vlm_options(
-            &state(false),
-            &vlm_opts(Some("http://example.com/v1")),
-            false,
-        ) {
-            Err(ApiError::Unsupported(m)) => assert!(m.contains("--allow-url-fetch"), "{m}"),
-            _ => panic!("expected Unsupported"),
         }
     }
 
@@ -2968,22 +3089,20 @@ mod vlm_tests {
         assert_eq!(v.model, "m");
     }
 
+    /// Without any endpoint the error names this surface's option spelling
+    /// (`vlm_endpoint`), not the CLI flag. The option rules themselves are
+    /// `docling::ConvertOptions`' and tested there (`options.rs`).
     #[test]
-    fn vlm_max_tokens_zero_is_rejected_and_options_land() {
+    fn missing_endpoint_names_the_serve_option() {
         let _env = super::ssrf_tests::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("DOCLING_RS_VLM_ENDPOINT");
-        let mut options = vlm_opts(Some("http://example.com/v1"));
-        options.vlm_max_tokens = Some(0);
-        match resolve_vlm_options(&state(true), &options, false) {
-            Err(ApiError::Bad(m)) => assert!(m.contains("vlm_max_tokens"), "{m}"),
-            _ => panic!("expected Bad"),
-        }
-        // And without any endpoint at all, the error names this surface's
-        // option spelling, not the CLI flag.
         let none = ConvertOptions {
-            pipeline: Some("vlm".into()),
+            convert: docling::ConvertOptions {
+                pipeline: Some("vlm".into()),
+                ..Default::default()
+            },
             ..ConvertOptions::default()
         };
         match resolve_vlm_options(&state(true), &none, false) {
@@ -2993,19 +3112,5 @@ mod vlm_tests {
             }
             _ => panic!("expected Bad"),
         }
-        // The full option set reaches the resolved struct.
-        let mut options = vlm_opts(Some("http://example.com/v1"));
-        options.vlm_api_key = Some("sk-test".into());
-        options.vlm_prompt = Some("Read the page.".into());
-        options.vlm_max_tokens = Some(512);
-        options.pages = Some("2-5".into());
-        let v = resolve_vlm_options(&state(true), &options, false)
-            .ok()
-            .flatten()
-            .expect("resolves");
-        assert_eq!(v.api_key.as_deref(), Some("sk-test"));
-        assert_eq!(v.prompt.as_deref(), Some("Read the page."));
-        assert_eq!(v.max_tokens, 512);
-        assert_eq!(v.page_range, Some((2, 5)));
     }
 }

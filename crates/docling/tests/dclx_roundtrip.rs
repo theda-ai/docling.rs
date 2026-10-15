@@ -46,6 +46,7 @@ fn tag_shaped_cell_text_round_trips() {
         cells: None,
         caption: None,
         caption_parent: Default::default(),
+        caption_location: None,
     }));
     let back = roundtrip(&doc);
     let md = back.export_to_markdown();
@@ -83,5 +84,73 @@ fn deep_headings_round_trip_clamped() {
         back.export_to_markdown().contains("###### Deeper"),
         "{}",
         back.export_to_markdown()
+    );
+}
+
+/// Picture assets travel inside the archive as docling stores them: one
+/// `assets/image_NNNNNN_<sha256>.png` part per `<src>`, PNG whatever the
+/// source encoding (a JPEG re-encoded from its libjpeg pixels, a GIF through
+/// the `image` crate), written between `_rels/` and `document.xml` — and the
+/// reader resolves them back into the pictures.
+#[test]
+fn picture_assets_are_packaged_and_read_back() {
+    let jpg = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../docling-pdf/tests/data/jpeg/rgb_420.jpg"),
+    )
+    .expect("libjpeg fixture");
+    let mut gif = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(3, 2, image::Rgb([9, 99, 199])))
+        .write_to(&mut gif, image::ImageFormat::Gif)
+        .unwrap();
+    let mut doc = DoclingDocument::new("t");
+    for (mimetype, data) in [("image/jpeg", jpg), ("image/gif", gif.into_inner())] {
+        let img = image::load_from_memory(&data).unwrap();
+        doc.push(Node::Picture {
+            caption: None,
+            caption_href: None,
+            image: Some(docling_core::PictureImage {
+                mimetype: mimetype.into(),
+                width: img.width(),
+                height: img.height(),
+                data,
+                dpi: docling_core::PictureImage::DEFAULT_DPI,
+            }),
+            classification: None,
+            description: None,
+            caption_parent: Default::default(),
+            caption_location: None,
+        });
+    }
+    let bytes = docling::dclx::to_dclx_bytes(&doc);
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+    let names: Vec<String> = zip.file_names().map(str::to_string).collect();
+    let mut sorted = names.clone();
+    sorted.sort();
+    assert_eq!(names, sorted, "lexicographic part order");
+    let assets: Vec<&String> = names.iter().filter(|n| n.starts_with("assets/")).collect();
+    assert_eq!(assets.len(), 2, "{names:?}");
+    // rgb_420.jpg's digest is Pillow's: sha256(Image.open(f).tobytes()).
+    assert_eq!(
+        assets[0].as_str(),
+        "assets/image_000000_50690f45a9c80a48b5e2e0e38008cd3ac26b8d92af24f2acddbdabcb6ec0c4c1.png"
+    );
+    assert!(assets[1].starts_with("assets/image_000001_"));
+    for name in &assets {
+        let mut part = Vec::new();
+        std::io::Read::read_to_end(&mut zip.by_name(name).unwrap(), &mut part).unwrap();
+        assert!(
+            part.starts_with(b"\x89PNG\r\n\x1a\n"),
+            "{name} is not a PNG"
+        );
+    }
+
+    // The reader resolves `<src>` into the item tree (docling's
+    // `media_root`): both pictures carry their PNG payload in the JSON.
+    let json = roundtrip(&doc).export_to_json();
+    assert_eq!(
+        json.matches("data:image/png;base64,").count(),
+        2,
+        "assets resolve back into the pictures"
     );
 }

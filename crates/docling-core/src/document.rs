@@ -49,6 +49,13 @@ pub struct DoclingDocument {
     /// item numbering, inline groups, formatting and content layers. Every
     /// other serializer reads `nodes`. See [`crate::tree`].
     pub tree: Option<crate::tree::ItemTree>,
+    /// Rendered page images by 1-based page number — docling's
+    /// `PageItem.image`, filled by the PDF/image pipeline only when page
+    /// images are requested (docling's `generate_page_images`, #520). The
+    /// JSON export writes each as the page's `image`, so docling-core's
+    /// `TableItem.get_image` / `FormulaItem.get_image` can crop from it.
+    /// Empty otherwise; no other export reads it.
+    pub page_images: std::collections::BTreeMap<usize, PictureImage>,
 }
 
 /// A single piece of document content.
@@ -138,9 +145,24 @@ pub enum Node {
         /// Serialized as docling's `classification` annotation + `meta` field
         /// on the JSON picture item; Markdown/DocLang output is unaffected.
         classification: Option<Vec<PictureClass>>,
+        /// Text read off the embedded image by the picture-OCR enrichment
+        /// (#645) — docling's `PictureDescriptionData` annotation /
+        /// `meta.description`, which is where upstream's picture-description
+        /// models (VLM captioning) put their text too. JSON and DCLX carry it
+        /// structurally; Markdown prints it between the caption and the
+        /// image placeholder, where docling's picture serializer renders
+        /// annotations. `None` when the enrichment did not run or read no
+        /// text, so every default export stays unchanged.
+        description: Option<PictureDescription>,
         /// Where the caption item hangs in the JSON tree (#390); see
         /// [`CaptionParent`]. Markdown, DocLang and LaTeX ignore it.
         caption_parent: CaptionParent,
+        /// The caption's own box on the picture's page (0–511 grid, like
+        /// [`Node::Located`]) — the PDF pipeline's caption layout region. The
+        /// JSON export writes it as the caption item's `prov` (#609), as
+        /// docling's `ReadingOrderModel._add_caption_or_footnote` does; `None`
+        /// (every declarative backend) leaves the caption without one.
+        caption_location: Option<[u16; 4]>,
     },
     /// A display-math formula item decoded by the CodeFormula enrichment:
     /// `latex` is the model's LaTeX (no `$$` wrapping), `orig` the raw glyph
@@ -160,6 +182,18 @@ pub enum Node {
     /// renders it as `[text](href)`, JSON puts `hyperlink` on the caption
     /// item, DocLang emits the block-form `<caption>` with an `<href>` head.
     Caption { text: String, href: Option<String> },
+    /// A body text item with a docling label of its own and an optional
+    /// hyperlink — the PDF pipeline's `footnote` regions, whose item docling
+    /// keeps as a `footnote` text with the link annotation covering it as its
+    /// `hyperlink` (`PageAssembleModel._match_hyperlink`). The JSON writes
+    /// exactly that (label, raw text, `hyperlink`); every other serializer
+    /// renders it as the paragraph [`Self::labeled_markdown`] spells —
+    /// docling's Markdown wraps a linked item's whole text, `[text](uri)`.
+    LabeledText {
+        label: String,
+        text: String,
+        href: Option<String>,
+    },
     /// A chart (docling's `PictureItem` classified as a chart, carrying a
     /// `PictureTabularChartData` annotation). Markdown and JSON render it exactly
     /// like a [`Node::Picture`] placeholder (an `<!-- image -->` / `picture`
@@ -195,6 +229,17 @@ pub enum Node {
     /// `id`-convention); the serializers render each item's parts as separate
     /// labelled texts (`marker` / `field_key` / `field_value`).
     FieldRegion { items: Vec<FieldItem> },
+    /// docling's `KeyValueItem`: a graph of key and value cells and the links
+    /// between them (docling-core's `GraphData`). The XBRL backend builds one
+    /// from an instance's numeric facts and the presentation and calculation
+    /// hierarchies of its taxonomy. Only the JSON export carries the graph:
+    /// docling's Markdown serializer has no rendering for the item and writes
+    /// its `<!-- missing-key-value-item -->` placeholder, which the Markdown
+    /// export reproduces; the other serializers omit it.
+    KeyValueGraph {
+        cells: Vec<GraphCell>,
+        links: Vec<GraphLink>,
+    },
     /// Rich inline content — docling's `InlineGroup`: a run of styled text
     /// segments that a backend captured with formatting (`<bold>`, `<italic>`,
     /// `<underline>`, `<strikethrough>`, sub/superscript, inline `<code>`) the
@@ -248,6 +293,17 @@ pub enum Node {
         comments: Vec<usize>,
         inner: Box<Node>,
     },
+    /// A text node taken from a time-based track — an ASR segment (#614):
+    /// docling's `TrackSource`. The JSON writes docling's ASR text item — `cue`
+    /// (the segment's words) as its text, `track` as its `source: [{"kind":
+    /// "track", …}]` — which the WebVTT export makes a cue of; every other
+    /// serializer renders `inner` (the `[time: start-end] words` paragraph)
+    /// unchanged.
+    Track {
+        track: crate::tree::TreeTrack,
+        cue: String,
+        inner: Box<Node>,
+    },
     /// A node carrying layout provenance — the four DocLang `<location>` values
     /// (`x0,y0,x1,y1`, normalized to 0–511) docling attaches to elements from
     /// backends with real geometry (e.g. the slide shapes in PPTX). Markdown and
@@ -283,12 +339,32 @@ pub enum Node {
     /// A PDF page header or footer (docling's `page_header`/`page_footer`
     /// furniture): DocLang emits `<page_header>`/`<page_footer>` with a
     /// `<layer value="furniture"/>` head, the four `<location>` tokens, then the
-    /// text. Markdown and JSON omit it like other furniture.
+    /// text. The JSON writes it as a body-parented `page_header`/`page_footer`
+    /// text item on the furniture layer; Markdown omits it.
     PageFurniture {
         footer: bool,
         location: [u16; 4],
         text: String,
     },
+    /// A furniture-layer text item with an explicit docling label — a page
+    /// header / footer paragraph (`page_header` / `page_footer`) or a note
+    /// body (`footnote`) from a backend that builds no item tree (#535: the
+    /// Word 97 `.doc` stories). The JSON writes a body-parented item of that
+    /// label on the furniture layer; DocLang `<{label}>` with a `<layer
+    /// value="furniture"/>` head (docling-core's own shape); Markdown, LaTeX
+    /// and the chunker leave it out like any furniture.
+    FurnitureText { label: String, text: String },
+    /// The text a PDF picture contains, kept the way docling keeps it: every
+    /// regular layout cluster > 80 % inside a picture cluster is that
+    /// `PictureItem`'s child (`LayoutPostprocessor._set_cluster_children`,
+    /// `ReadingOrderModel._add_child_elements`). Emitted right after its
+    /// picture node. The JSON export writes these nodes as items parented to
+    /// that picture, after its caption; docling's Markdown and LaTeX picture
+    /// serializers print only the caption and the image, so every other
+    /// serializer skips it — except the Markdown export asked to
+    /// `traverse_pictures` ([`MarkdownExportOptions`], #599), which renders
+    /// them after the picture like upstream's item walk does.
+    PictureChildren(Vec<Node>),
     /// A page boundary — docling's implicit page break between pages. The PPTX
     /// backend emits one between consecutive slides. DocLang renders it as
     /// `<page_break/>`; Markdown and JSON omit it (matching docling's default
@@ -374,6 +450,233 @@ impl ContentLayer {
     }
 }
 
+/// A set of content layers, `body` included — docling-core's
+/// `set[ContentLayer]` (`HTMLParams.layers`,
+/// `export_to_html(included_content_layers=…)`), where `body` is a member
+/// like any other. [`Default`] is docling's `DEFAULT_CONTENT_LAYERS`: body
+/// only, so an export built with it is unchanged from before layers could
+/// be chosen (#499).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ContentLayers {
+    /// The main content (items without an explicit layer).
+    pub body: bool,
+    /// [`ContentLayer::Furniture`]: page headers/footers, navigation chrome.
+    pub furniture: bool,
+    /// [`ContentLayer::Notes`]: reviewer comments and other editorial notes.
+    pub notes: bool,
+    /// [`ContentLayer::Invisible`]: hidden content (hidden sheets, …).
+    pub invisible: bool,
+}
+
+impl Default for ContentLayers {
+    fn default() -> Self {
+        Self::BODY
+    }
+}
+
+impl ContentLayers {
+    /// Body only — docling's `DEFAULT_CONTENT_LAYERS`.
+    pub const BODY: Self = Self {
+        body: true,
+        furniture: false,
+        notes: false,
+        invisible: false,
+    };
+    /// Every layer — Python's `set(ContentLayer)`.
+    pub const ALL: Self = Self {
+        body: true,
+        furniture: true,
+        notes: true,
+        invisible: true,
+    };
+    /// No layer at all (nothing renders); build a set from it with
+    /// [`with`](Self::with) / [`with_body`](Self::with_body).
+    pub const NONE: Self = Self {
+        body: false,
+        furniture: false,
+        notes: false,
+        invisible: false,
+    };
+
+    /// The set plus `layer`.
+    pub const fn with(mut self, layer: ContentLayer) -> Self {
+        match layer {
+            ContentLayer::Furniture => self.furniture = true,
+            ContentLayer::Notes => self.notes = true,
+            ContentLayer::Invisible => self.invisible = true,
+        }
+        self
+    }
+
+    /// The set plus the body layer.
+    pub const fn with_body(mut self) -> Self {
+        self.body = true;
+        self
+    }
+
+    /// Whether `layer` is in the set; `None` is the body layer.
+    pub fn contains(&self, layer: Option<ContentLayer>) -> bool {
+        match layer {
+            None => self.body,
+            Some(ContentLayer::Furniture) => self.furniture,
+            Some(ContentLayer::Notes) => self.notes,
+            Some(ContentLayer::Invisible) => self.invisible,
+        }
+    }
+
+    /// Whether the layer spelled `name` (`body`, `furniture`, `notes`,
+    /// `invisible` — the JSON `content_layer` values) is in the set; an
+    /// unknown name is not.
+    pub fn contains_name(&self, name: &str) -> bool {
+        match name {
+            "body" => self.body,
+            "furniture" => self.furniture,
+            "notes" => self.notes,
+            "invisible" => self.invisible,
+            _ => false,
+        }
+    }
+
+    /// Parse a comma-separated list of layer names (`body,furniture`;
+    /// whitespace around a name is ignored, `all` is every layer). An
+    /// unknown name is the error. docling-core 2.99's `background` layer
+    /// (watermarks) has no items in this model, so the name is accepted and
+    /// adds nothing — a set written for Python keeps parsing.
+    pub fn parse_list(list: &str) -> Result<Self, String> {
+        let mut set = Self::NONE;
+        for name in list.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+            match name {
+                "body" => set.body = true,
+                "furniture" => set.furniture = true,
+                "notes" => set.notes = true,
+                "invisible" => set.invisible = true,
+                "background" => {}
+                "all" => set = Self::ALL,
+                other => {
+                    return Err(format!(
+                        "unknown content layer `{other}` (expected body, furniture, notes, invisible or all)"
+                    ))
+                }
+            }
+        }
+        Ok(set)
+    }
+}
+
+/// Options of the HTML export ([`DoclingDocument::export_to_html_with`]):
+/// docling-core's `HTMLParams` subset the port honours. [`Default`] is
+/// upstream's default export — placeholder images, `artifacts` as the
+/// referenced-image directory, the body layer only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HtmlExportOptions {
+    /// How pictures render (`HTMLParams.image_mode`): nothing but captions
+    /// and meta for [`ImageMode::Placeholder`], `data:` URIs when embedded,
+    /// `<img src>` paths under [`artifacts_dir`](Self::artifacts_dir) when
+    /// referenced.
+    pub image_mode: ImageMode,
+    /// The directory referenced images are named under, the Markdown
+    /// export's convention (`<artifacts_dir>/image_NNNNNN.<ext>`).
+    pub artifacts_dir: String,
+    /// The content layers rendered (`HTMLParams.layers`, #499): an item on a
+    /// layer outside the set is skipped, its children still walked — exactly
+    /// how docling-core's `get_excluded_refs` reads the set.
+    pub layers: ContentLayers,
+}
+
+impl Default for HtmlExportOptions {
+    fn default() -> Self {
+        Self {
+            image_mode: ImageMode::Placeholder,
+            artifacts_dir: "artifacts".to_string(),
+            layers: ContentLayers::BODY,
+        }
+    }
+}
+
+/// Options of the Markdown export
+/// ([`DoclingDocument::export_to_markdown_with_options`], #599): the
+/// docling-core `MarkdownParams` the port honours beyond the image mode.
+/// [`Default`] is upstream's default export — placeholder images,
+/// `artifacts` as the referenced-image directory, the body layer only, no
+/// picture traversal, HTML and underscore escaping on, `<!-- image -->` —
+/// so a document exported with it is byte-identical to
+/// [`DoclingDocument::export_to_markdown`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkdownExportOptions {
+    /// How pictures render (`MarkdownParams.image_mode`): the placeholder,
+    /// `data:` URIs when embedded, `![Image](<artifacts_dir>/image_NNNNNN.<ext>)`
+    /// when referenced (the bytes come back for the caller to write).
+    pub image_mode: ImageMode,
+    /// The directory referenced images are named under.
+    pub artifacts_dir: String,
+    /// The content layers rendered (`MarkdownParams.layers`,
+    /// `export_to_markdown(included_content_layers=…)`): an item on a layer
+    /// outside the set is skipped, its children still walked. The default
+    /// body-only set drops page headers/footers (`furniture`), reviewer
+    /// comments (`notes`) and hidden sheets (`invisible`), as upstream does; a
+    /// scanned form's running header reads out with
+    /// `ContentLayers::BODY.with(ContentLayer::Furniture)`. The extra items
+    /// render through the body's serializers — a page header is a paragraph.
+    pub layers: ContentLayers,
+    /// `CommonParams.traverse_pictures`: render the text items nested in a
+    /// picture (the PDF pipeline's picture children — a bordered form laid
+    /// out as one picture holds every field as a child) after the picture's
+    /// own caption and image, as upstream yields them. Off, a picture prints
+    /// only its caption and image.
+    pub traverse_pictures: bool,
+    /// `MarkdownParams.escape_html`: `&`, `<` and `>` in text as `&amp;`,
+    /// `&lt;`, `&gt;` (Python's `html.escape(quote=False)`). Off, `R&D` stays
+    /// `R&D`.
+    pub escape_html: bool,
+    /// `MarkdownParams.escape_underscores`: `_` in text as `\_`. Off, the
+    /// text keeps its underscores.
+    pub escape_underscores: bool,
+    /// `MarkdownParams.image_placeholder`: what a picture prints as when it
+    /// renders no image data (the placeholder mode, or a picture without a
+    /// payload); upstream's `<!-- image -->`.
+    pub image_placeholder: String,
+    /// docling-core's `PlainTextDocSerializer` (#613, `export_to_text`,
+    /// docling's `--to text`): the Markdown walk with the decoration turned
+    /// off — headings without `#`, bold/italic/strikethrough markers and
+    /// inline code backticks dropped, a hyperlink reduced to its label, code
+    /// blocks unfenced, no GFM hard line breaks. List bullets/numbers,
+    /// checkbox marks and table grids stay. [`Self::plain_text`] pairs it
+    /// with upstream's `PlainTextParams` (no escaping, an empty image
+    /// placeholder).
+    pub plain_text: bool,
+}
+
+impl MarkdownExportOptions {
+    /// docling-core's `PlainTextParams` defaults (#613): [`Self::plain_text`]
+    /// on, HTML and underscore escaping off, pictures print nothing (their
+    /// captions still do), body layer only, no picture traversal — what
+    /// `DoclingDocument.export_to_text()` and docling's `--to text` write.
+    pub fn plain_text() -> Self {
+        Self {
+            escape_html: false,
+            escape_underscores: false,
+            image_placeholder: String::new(),
+            plain_text: true,
+            ..Self::default()
+        }
+    }
+}
+
+impl Default for MarkdownExportOptions {
+    fn default() -> Self {
+        Self {
+            image_mode: ImageMode::Placeholder,
+            artifacts_dir: "artifacts".to_string(),
+            layers: ContentLayers::BODY,
+            traverse_pictures: false,
+            escape_html: true,
+            escape_underscores: true,
+            image_placeholder: "<!-- image -->".to_string(),
+            plain_text: false,
+        }
+    }
+}
+
 /// DocLang-only content for a [`Node::ListItem`] whose DocLang form differs from
 /// its flat Markdown `text` (see [`Node::ListItem::dclx`]). `ordered` picks the
 /// enclosing `<list>` kind, `marker` the `<ldiv><marker>`; content is `runs`
@@ -385,6 +688,23 @@ pub struct ListItemDclx {
     pub marker: Option<String>,
     pub text: String,
     pub runs: Vec<InlineRun>,
+}
+
+impl Node {
+    /// The paragraph a [`Node::LabeledText`] renders as outside the JSON:
+    /// its text, wrapped as `[text](uri)` when it carries a hyperlink. Any
+    /// other node is returned unchanged.
+    pub fn labeled_as_paragraph(&self) -> std::borrow::Cow<'_, Node> {
+        match self {
+            Node::LabeledText { text, href, .. } => std::borrow::Cow::Owned(Node::Paragraph {
+                text: match href {
+                    Some(uri) => format!("[{text}]({uri})"),
+                    None => text.clone(),
+                },
+            }),
+            other => std::borrow::Cow::Borrowed(other),
+        }
+    }
 }
 
 impl InlineRun {
@@ -437,6 +757,30 @@ pub struct FieldItem {
     pub value_kind: Option<String>,
 }
 
+/// One node of a [`Node::KeyValueGraph`] — docling-core's `GraphCell`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GraphCell {
+    /// docling's `GraphCellLabel` value: `key` or `value` (it also knows
+    /// `unspecified` and `checkbox`).
+    pub label: String,
+    /// The cell's number within its graph, what the links refer to.
+    pub cell_id: usize,
+    pub text: String,
+    /// The text before any cleanup — for an XBRL fact key, the concept's
+    /// qualified name where `text` is its local name.
+    pub orig: String,
+}
+
+/// One edge of a [`Node::KeyValueGraph`] — docling-core's `GraphLink`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GraphLink {
+    /// docling's `GraphLinkLabel` value: `to_value`, `to_child`, `to_parent`
+    /// or `to_key`.
+    pub label: String,
+    pub source_cell_id: usize,
+    pub target_cell_id: usize,
+}
+
 /// One DocumentPictureClassifier prediction — docling-core's
 /// `PictureClassificationClass` (`class_name` + `confidence`).
 #[derive(Debug, Clone, PartialEq)]
@@ -444,6 +788,17 @@ pub struct PictureClass {
     /// e.g. `bar_chart`, `logo`, `signature` (the classifier's 26-label set).
     pub class_name: String,
     pub confidence: f32,
+}
+
+/// A picture's text annotation — docling-core's `PictureDescriptionData`
+/// (`text` + `provenance`), the one shape upstream uses for every model that
+/// writes prose about a picture. The picture-OCR enrichment (#645) fills it
+/// with the lines the OCR engine read off the image, `provenance` naming the
+/// engine (`ppocr` / `tesseract`) the way a VLM description names its model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PictureDescription {
+    pub text: String,
+    pub provenance: String,
 }
 
 /// An extracted picture's raw encoded bytes plus its mimetype and pixel size —
@@ -456,9 +811,25 @@ pub struct PictureImage {
     pub height: u32,
     /// The image file bytes, exactly as embedded (PNG/JPEG/…).
     pub data: Vec<u8>,
+    /// Pixels per inch of the image relative to the page it came from —
+    /// docling-core's `ImageRef.dpi`, which consumers use to map pixels back
+    /// to points. A crop rendered from a PDF page at `s` px/pt is `72·s`
+    /// (docling: `int(72 * images_scale)`, #519); an image embedded in an
+    /// office file has no render scale and keeps docling's `72`
+    /// ([`Self::DEFAULT_DPI`]).
+    pub dpi: u32,
 }
 
 impl PictureImage {
+    /// docling's `ImageRef` default when no render scale applies.
+    pub const DEFAULT_DPI: u32 = 72;
+
+    /// The `dpi` of an image rendered at `scale` pixels per PDF point
+    /// (`72·scale`, rounded — `int()` would floor 143.99… to 143).
+    pub fn dpi_for_scale(scale: f32) -> u32 {
+        (72.0 * scale).round().max(1.0) as u32
+    }
+
     /// A `data:` URI for the image (`data:<mimetype>;base64,<…>`).
     pub fn data_uri(&self) -> String {
         format!(
@@ -558,6 +929,10 @@ pub struct Table {
     /// Where the caption item hangs in the JSON tree (#390); see
     /// [`CaptionParent`]. Only the JSON export reads it.
     pub caption_parent: CaptionParent,
+    /// The caption's own box on the table's page (0–511 grid) — the PDF
+    /// pipeline's caption layout region, written as the caption item's
+    /// `prov` (#609); see [`Node::Picture`]'s field of the same name.
+    pub caption_location: Option<[u16; 4]>,
     /// Optional per-cell bounding boxes, same shape as [`Self::rows`]: `[l, t,
     /// r, b]` in page points with a **top-left** origin (the PDF pipeline's
     /// native space). Set by the ML pipeline's TableFormer paths — a spanned
@@ -680,6 +1055,15 @@ impl Table {
     /// a spanning `<th>` row as `row_header`, not `column_header`, so the
     /// first data row is no longer folded into the header block and the
     /// deviation this port carried for docling-core#765 is gone.
+    ///
+    /// A row also stops the block when it *carries body text* (#604,
+    /// docling-core#766, 2.97): a cell starting on it that is not a column
+    /// header, has non-blank text and does not start in the table's first
+    /// column. A scanned form flags its first-column labels `column_header`
+    /// on every row; without the check each such row folded its values into
+    /// the header, and a table labelled on every row lost its whole body.
+    /// When row 0 itself is stopped that way and no later row carries a
+    /// flag, row 0 is still the header (`1`), as for an unflagged table.
     pub fn header_row_count(&self) -> usize {
         if self.rows.is_empty() {
             return 0;
@@ -692,12 +1076,31 @@ impl Table {
                 &derived
             }
         };
-        if !cells.iter().any(|c| c.column_header) {
+        let first_col = cells.iter().map(|c| c.start_col).min().unwrap_or(0);
+        let is_header_row = |r: usize| {
+            let mut flagged = false;
+            for c in cells.iter().filter(|c| c.start_row == r) {
+                if c.column_header {
+                    flagged = true;
+                } else if c.start_col != first_col && !c.text.trim().is_empty() {
+                    return false;
+                }
+            }
+            flagged
+        };
+        let count = (0..self.rows.len())
+            .take_while(|&r| is_header_row(r))
+            .count();
+        // Upstream's row-0 fallback: no flag on any grid row below the first
+        // (a spanning header cell counts on every row it covers) → row 0.
+        if count == 0
+            && !cells
+                .iter()
+                .any(|c| c.column_header && c.start_row + c.row_span.max(1) > 1)
+        {
             return 1;
         }
-        (0..self.rows.len())
-            .take_while(|&r| cells.iter().any(|c| c.column_header && c.start_row == r))
-            .count()
+        count
     }
 
     /// The first-class cell covering a grid position, if any.
@@ -840,6 +1243,7 @@ impl DoclingDocument {
             links: Vec::new(),
             confidence: None,
             tree: None,
+            page_images: std::collections::BTreeMap::new(),
         }
     }
 
@@ -853,7 +1257,9 @@ impl DoclingDocument {
         fn unwrap_table(n: &Node) -> Option<&Table> {
             match n {
                 Node::Table(t) => Some(t),
-                Node::Located { inner, .. } | Node::Prov { inner, .. } => unwrap_table(inner),
+                Node::Located { inner, .. }
+                | Node::Prov { inner, .. }
+                | Node::Track { inner, .. } => unwrap_table(inner),
                 _ => None,
             }
         }
@@ -868,7 +1274,9 @@ impl DoclingDocument {
         fn unwrap_table(n: &mut Node) -> Option<&mut Table> {
             match n {
                 Node::Table(t) => Some(t),
-                Node::Located { inner, .. } | Node::Prov { inner, .. } => unwrap_table(inner),
+                Node::Located { inner, .. }
+                | Node::Prov { inner, .. }
+                | Node::Track { inner, .. } => unwrap_table(inner),
                 _ => None,
             }
         }
@@ -877,6 +1285,41 @@ impl DoclingDocument {
 
     pub fn push(&mut self, node: Node) {
         self.nodes.push(node);
+    }
+
+    /// Visit every [`Node::Picture`] in the flat node stream, wherever it
+    /// nests — group children, table cell blocks, a picture's own
+    /// children, the located/prov/track/comment/furniture wrappers — so an
+    /// enrichment that reads the embedded images (picture OCR, #645) reaches
+    /// each one. The callback gets the picture node itself.
+    pub fn for_each_picture_mut(&mut self, f: &mut dyn FnMut(&mut Node)) {
+        fn walk(nodes: &mut [Node], f: &mut dyn FnMut(&mut Node)) {
+            for node in nodes {
+                match node {
+                    Node::Picture { .. } => f(node),
+                    Node::Group { children, .. } | Node::PictureChildren(children) => {
+                        walk(children, f)
+                    }
+                    Node::Located { inner, .. }
+                    | Node::Prov { inner, .. }
+                    | Node::Track { inner, .. }
+                    | Node::Furniture { inner, .. }
+                    | Node::Commented { inner, .. }
+                    | Node::DoclangOnly(inner) => walk(std::slice::from_mut(inner), f),
+                    Node::Table(t) => {
+                        if let Some(blocks) = t.cell_blocks.as_mut() {
+                            for row in blocks {
+                                for cell in row {
+                                    walk(cell, f);
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        walk(&mut self.nodes, f);
     }
 
     /// Convenience: append a heading.
@@ -924,15 +1367,34 @@ impl DoclingDocument {
     /// `DoclingDocument.export_to_dict()` / `save_as_json()`. The output loads
     /// back into Python docling-core and round-trips to the same Markdown.
     pub fn export_to_json(&self) -> String {
-        serde_json::to_string_pretty(&self.export_to_json_value())
-            .expect("DoclingDocument JSON is always serializable")
+        let mut out = Vec::new();
+        self.write_json_pretty(&mut out)
+            .expect("DoclingDocument JSON is always serializable");
+        String::from_utf8(out).expect("serde_json writes UTF-8")
     }
 
     /// The same JSON wire format as [`Self::export_to_json`], as a
     /// `serde_json::Value` — for callers that append response-level extras
     /// (docling-serve adds the confidence report, #183) before serializing.
+    ///
+    /// The `Value` is large — ~2.7 KB per text item — so on a long document
+    /// prefer [`Self::write_json`], which writes the same JSON without it.
     pub fn export_to_json_value(&self) -> serde_json::Value {
         crate::json::to_json(self)
+    }
+
+    /// Write the JSON of [`Self::export_to_json_value`] to `writer`, compact
+    /// — byte for byte `serde_json::to_writer(writer, &doc.export_to_json_value())`
+    /// — without building the `Value`: the export holds its text items in a
+    /// compact form and serializes them straight to the writer. Wrap a file
+    /// or socket in a `BufWriter`.
+    pub fn write_json<W: std::io::Write>(&self, writer: W) -> std::io::Result<()> {
+        crate::json::write_json(self, writer, false).map_err(std::io::Error::from)
+    }
+
+    /// [`Self::write_json`], indented as [`Self::export_to_json`] is.
+    pub fn write_json_pretty<W: std::io::Write>(&self, writer: W) -> std::io::Result<()> {
+        crate::json::write_json(self, writer, true).map_err(std::io::Error::from)
     }
 
     /// Serialize to a complete LaTeX document — the Rust counterpart of
@@ -943,12 +1405,43 @@ impl DoclingDocument {
         crate::latex::to_latex(self)
     }
 
+    /// Serialize to Pandoc's AST as JSON (`pandoc -f json`, #515) with the
+    /// default options: pictures as captioned figures without image data,
+    /// body layer only, the [`PANDOC_API_VERSION`](crate::pandoc::PANDOC_API_VERSION)
+    /// API. One line, no trailing newline. See [`crate::pandoc`].
+    pub fn export_to_pandoc_json(&self) -> String {
+        crate::pandoc::to_pandoc(self, &crate::pandoc::PandocExportOptions::default())
+            .expect("the default Pandoc API version is always supported")
+            .0
+    }
+
+    /// Pandoc JSON per `options` (image mode, artifacts directory, content
+    /// layers, required API version). Returns the JSON and, for
+    /// [`ImageMode::Referenced`], the `(path, bytes)` image files; an
+    /// unsupported `api_version` is an error.
+    pub fn export_to_pandoc_json_with(
+        &self,
+        options: &crate::pandoc::PandocExportOptions,
+    ) -> Result<crate::pandoc::PandocOutput, crate::pandoc::PandocError> {
+        crate::pandoc::to_pandoc(self, options)
+    }
+
     /// Serialize to DocLang XML (`<doclang version="0.7">…`), the markup that
     /// lives inside a `.dclx` archive — the Rust counterpart of docling-core's
     /// `export_to_doclang()` with default parameters. No trailing newline; the
     /// archive writer appends exactly one.
     pub fn export_to_doclang(&self) -> String {
         crate::doclang::export_to_doclang(&self.nodes)
+    }
+
+    /// [`Self::export_to_doclang`] plus the picture assets its
+    /// `<src uri="assets/image_….png"/>` references name, as `(path, bytes)`
+    /// in document order — the parts docling's `save_as_doclang_archive`
+    /// stores next to `document.xml`. PNG and JPEG pictures come back as PNG
+    /// (a JPEG re-encoded from its libjpeg-decoded pixels); other encodings
+    /// keep their own bytes for the archive writer to convert.
+    pub fn export_to_doclang_with_assets(&self) -> (String, Vec<(String, Vec<u8>)>) {
+        crate::doclang::export_to_doclang_with_assets(&self.nodes)
     }
 
     /// Serialize to Markdown with an explicit picture [`ImageMode`] (mirrors
@@ -962,6 +1455,120 @@ impl DoclingDocument {
         artifacts_dir: &str,
     ) -> (String, Vec<(String, Vec<u8>)>) {
         to_markdown_images(self, self.strict_markdown, image_mode, artifacts_dir)
+    }
+
+    /// Markdown per `options` (#599) — docling-core's
+    /// `export_to_markdown(included_content_layers=…, image_mode=…,
+    /// image_placeholder=…, escape_html=…, escape_underscores=…,
+    /// traverse_pictures=…)`: the content layers rendered, whether a
+    /// picture's nested text items print, HTML and underscore escaping, the
+    /// image placeholder, and the image mode with its referenced-image
+    /// directory. [`Self::strict_markdown`] still picks the Markdown flavour.
+    /// Returns the Markdown and, for [`ImageMode::Referenced`], the
+    /// `(path, bytes)` artifacts. With [`MarkdownExportOptions::default`]
+    /// the Markdown is [`Self::export_to_markdown`]'s byte for byte.
+    pub fn export_to_markdown_with_options(
+        &self,
+        options: &MarkdownExportOptions,
+    ) -> (String, Vec<(String, Vec<u8>)>) {
+        crate::markdown::to_markdown_with_options(self, self.strict_markdown, options)
+    }
+
+    /// WebVTT (#614) — what docling's `--to vtt` writes
+    /// (`DoclingDocument.save_as_vtt`): a cue per timed text item — a WebVTT
+    /// input's cues, an audio/video transcript's segments — hours always
+    /// written, the `</v>` of a lone voice span omitted. A document without
+    /// timed text is the bare `WEBVTT` header. No trailing newline.
+    pub fn export_to_vtt(&self) -> String {
+        crate::vtt::to_vtt(self, &crate::vtt::VttExportOptions::default())
+    }
+
+    /// [`Self::export_to_vtt`] with docling-core's `WebVTTParams`
+    /// (`omit_hours_if_zero`, `omit_voice_end`).
+    pub fn export_to_vtt_with_options(&self, options: &crate::vtt::VttExportOptions) -> String {
+        crate::vtt::to_vtt(self, options)
+    }
+
+    /// Plain text — docling-core's `DoclingDocument.export_to_text()` with
+    /// its defaults (#613, docling's `--to text` / `<stem>.txt`): the
+    /// Markdown export without decoration ([`MarkdownExportOptions::plain_text`]).
+    /// Lists keep their bullets and numbers, tables their `|` grid. No
+    /// trailing newline: upstream's `serialize().text`, which its CLI
+    /// writes verbatim to `<stem>.txt`.
+    pub fn export_to_text(&self) -> String {
+        let (mut text, _) = crate::markdown::to_markdown_with_options(
+            self,
+            self.strict_markdown,
+            &MarkdownExportOptions::plain_text(),
+        );
+        if text.ends_with('\n') {
+            text.pop();
+        }
+        text
+    }
+
+    /// A complete HTML document — docling-core's `HTMLDocSerializer` with its
+    /// defaults (#492): pictures stay out (`ImageRefMode.PLACEHOLDER`, only
+    /// their captions and meta render). See [`export_to_html_with_images`]
+    /// for the embedded / referenced modes and [`crate::html`]'s module docs
+    /// for what is reproduced.
+    ///
+    /// [`export_to_html_with_images`]: Self::export_to_html_with_images
+    pub fn export_to_html(&self) -> String {
+        crate::html::to_html(self, &HtmlExportOptions::default()).0
+    }
+
+    /// HTML with pictures per `image_mode`: `data:` URIs when embedded, and
+    /// when referenced `<img src>` paths under `artifacts_dir` whose bytes come
+    /// back as `(path, bytes)` for the caller to write — the Markdown export's
+    /// contract and file names.
+    pub fn export_to_html_with_images(
+        &self,
+        image_mode: ImageMode,
+        artifacts_dir: &str,
+    ) -> (String, Vec<(String, Vec<u8>)>) {
+        crate::html::to_html(
+            self,
+            &HtmlExportOptions {
+                image_mode,
+                artifacts_dir: artifacts_dir.to_string(),
+                ..HtmlExportOptions::default()
+            },
+        )
+    }
+
+    /// HTML rendering the content `layers` — docling-core's
+    /// `export_to_html(included_content_layers=…)` (#499). The default export
+    /// is body only; `ContentLayers::BODY.with(ContentLayer::Furniture)` adds
+    /// page headers/footers, `.with(ContentLayer::Notes)` reviewer comments,
+    /// [`ContentLayers::ALL`] is Python's `set(ContentLayer)`. An item on a
+    /// layer outside the set is skipped while its children are still walked,
+    /// and the items that do render go through the same serializers as the
+    /// body (a page header is a `<p>`, a comment a `<p>`, a header table a
+    /// `<table>`), exactly as upstream's `HTMLParams.layers` behaves. Pictures
+    /// stay placeholders; see [`export_to_html_with`] for the full option set.
+    ///
+    /// [`export_to_html_with`]: Self::export_to_html_with
+    pub fn export_to_html_with_layers(&self, layers: ContentLayers) -> String {
+        crate::html::to_html(
+            self,
+            &HtmlExportOptions {
+                layers,
+                ..HtmlExportOptions::default()
+            },
+        )
+        .0
+    }
+
+    /// HTML per `options` — image mode, referenced-image directory and content
+    /// layers in one call; the other `export_to_html*` methods are
+    /// shorthands for it. Returns the HTML and, for
+    /// [`ImageMode::Referenced`], the `(path, bytes)` artifacts.
+    pub fn export_to_html_with(
+        &self,
+        options: &HtmlExportOptions,
+    ) -> (String, Vec<(String, Vec<u8>)>) {
+        crate::html::to_html(self, options)
     }
 }
 

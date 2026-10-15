@@ -5,6 +5,7 @@
 // Exits non-zero on the first failed assertion, so it doubles as a CI check.
 
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import {
   checkDependencies,
   chunk,
@@ -13,10 +14,16 @@ import {
   chunkDocumentAsync,
   chunkFileAsync,
   convert,
+  convertArchive,
+  convertArchiveFile,
+  convertArchiveFileAsync,
   convertAsync,
   convertFile,
   convertFileAsync,
   DocumentConverter,
+  emailAttachments,
+  emailAttachmentsFile,
+  emailAttachmentsFileAsync,
   formatFromName,
   Pipeline,
   streamChunks,
@@ -47,7 +54,46 @@ const check = (name, fn) => {
 
 const MD = '# Title\n\nHello **world**.\n\n- one\n- two\n'
 
+// A small mixed archive (#557): two documents, an unsupported file, a broken
+// DOCX — written once with Python's zipfile (docs/a.md, b.csv, tool.exe,
+// broken.docx) and committed.
+const BUNDLE = new URL('./fixtures/bundle.zip', import.meta.url).pathname
+
 async function main() {
+  await check('convertArchiveFile converts each entry on its own (#557)', () => {
+    const items = convertArchiveFile(BUNDLE)
+    assert.deepEqual(
+      items.map((i) => [i.path, i.outcome]),
+      [
+        ['docs/a.md', 'converted'],
+        ['b.csv', 'converted'],
+        ['tool.exe', 'skipped'],
+        ['broken.docx', 'failed'],
+      ],
+    )
+    assert.ok(items[0].result.content.includes('alpha text'))
+    assert.equal(items[0].result.format, 'md')
+    assert.equal(items[2].error, 'unsupported file type')
+    assert.ok(items[3].error.includes('docx'))
+    // napi leaves an absent `Option` field undefined.
+    assert.equal(items[3].result ?? null, null)
+  })
+
+  await check('convertArchive takes bytes, async variants and the class agree', async () => {
+    const data = (await import('node:fs')).readFileSync(BUNDLE)
+    const sync = convertArchive({ name: 'bundle.zip', data }, { to: 'json' })
+    const viaFile = await convertArchiveFileAsync(BUNDLE, { to: 'json' })
+    const viaClass = await new DocumentConverter().convertArchiveAsync({ name: 'bundle.zip', data }, { to: 'json' })
+    for (const items of [sync, viaFile, viaClass]) {
+      assert.equal(items.length, 4)
+      assert.equal(items.filter((i) => i.outcome === 'converted').length, 2)
+      assert.ok(JSON.parse(items[0].result.content).texts.length > 0)
+    }
+    assert.throws(() => convertArchive({ name: 'x.zip', data: Buffer.from('plain') }))
+    // An archive is not a document: the plain converters still refuse it.
+    assert.throws(() => convertFile(BUNDLE))
+  })
+
   await check('supportedFormats lists md and pdf', () => {
     const formats = supportedFormats()
     assert.ok(formats.includes('md'))
@@ -60,9 +106,70 @@ async function main() {
     assert.equal(formatFromName('mystery.zzz'), null)
   })
 
+  await check('emailAttachments lists an .eml attachment with its payload', () => {
+    const eml = new URL('../../../tests/data/email/sources/eml_with_attachment.eml', import.meta.url)
+      .pathname
+    const atts = emailAttachmentsFile(eml)
+    assert.equal(atts.length, 1)
+    const [att] = atts
+    assert.equal(att.name, 'test.txt')
+    assert.equal(att.contentType, 'text/plain')
+    assert.equal(att.format, 'md')
+    assert.equal(att.inline, false)
+    // Optional fields are absent (undefined) when unset, like every other
+    // napi object.
+    assert.equal(att.skipped, undefined)
+    assert.ok(Buffer.isBuffer(att.data))
+    assert.equal(att.size, att.data.length)
+    assert.match(att.data.toString(), /^This is a test attachment file\./)
+    // In-memory bytes give the same listing, and the payload converts.
+    const fromBytes = emailAttachments({ name: 'm.eml', data: readFileSync(eml) })
+    assert.deepEqual(fromBytes, atts)
+    // `format` carries what the extension cannot (#564).
+    const res = convert({ name: att.name, data: att.data, format: att.format })
+    assert.match(res.content, /This is a test attachment file/)
+    // A limit skips an attachment and drops its payload.
+    const limited = emailAttachmentsFile(eml, { maxEntrySize: 10 })
+    assert.equal(limited[0].skipped, 'larger than the per-entry size limit')
+    assert.equal(limited[0].data, undefined)
+  })
+
+  await check('emailAttachments: payload bytes as sent, inline images only, unique names (#564)', async () => {
+    const b64 = (b) => Buffer.from(b).toString('base64')
+    const latin1 = Buffer.from('caf\xe9', 'latin1')
+    const msg = [
+      'From: a@x.com', 'Subject: S', 'MIME-Version: 1.0',
+      'Content-Type: multipart/mixed; boundary="bb"', '', '--bb',
+      'Content-Type: text/plain', '', 'Body.',
+      '--bb', 'Content-Type: text/plain; charset=iso-8859-1',
+      'Content-Disposition: attachment; filename="note.txt"',
+      'Content-Transfer-Encoding: base64', '', b64(latin1),
+      '--bb', 'Content-Type: application/pdf',
+      'Content-Disposition: inline; filename="report.pdf"',
+      'Content-Transfer-Encoding: base64', '', b64('%PDF-1.4 one'),
+      '--bb', 'Content-Type: application/pdf',
+      'Content-Disposition: attachment; filename="report.pdf"',
+      'Content-Transfer-Encoding: base64', '', b64('%PDF-1.4 two'),
+      '--bb--', '',
+    ].join('\r\n')
+    const atts = emailAttachments({ name: 'm.eml', data: Buffer.from(msg) })
+    // The async form lists the same, off the event loop.
+    const eml = new URL('../../../tests/data/email/sources/eml_with_attachment.eml', import.meta.url)
+      .pathname
+    assert.deepEqual(await emailAttachmentsFileAsync(eml), emailAttachmentsFile(eml))
+    assert.deepEqual(
+      atts.map((a) => [a.name, a.inline]),
+      [['note.txt', false], ['report.pdf', false], ['report-2.pdf', false]],
+    )
+    // Latin-1 stays Latin-1: no UTF-8 re-encoding of a text attachment.
+    assert.deepEqual([...atts[0].data], [...latin1])
+    assert.equal(atts[2].data.toString(), '%PDF-1.4 two')
+  })
+
   await check('convert (bytes) → Markdown round-trips', () => {
     const res = convert({ name: 'doc', data: Buffer.from(MD), format: 'md' })
     assert.equal(res.status, 'success')
+    assert.deepEqual(res.errors, [])
     assert.equal(res.format, 'md')
     assert.match(res.content, /# Title/)
     assert.match(res.content, /Hello/)
@@ -73,6 +180,13 @@ async function main() {
     const doc = JSON.parse(res.content)
     assert.equal(doc.schema_name, 'DoclingDocument')
     assert.ok(Array.isArray(doc.texts))
+  })
+
+  await check('convert (bytes) → Pandoc AST for pandoc -f json', () => {
+    const res = convert({ name: 'doc', data: Buffer.from(MD), format: 'md' }, { to: 'pandoc' })
+    const ast = JSON.parse(res.content)
+    assert.deepEqual(ast['pandoc-api-version'], [1, 23, 1, 1])
+    assert.equal(ast.blocks[0].t, 'Header')
   })
 
   await check('format inferred from name when omitted', () => {
@@ -194,7 +308,7 @@ async function main() {
       const { join: joinPath } = await import('node:path')
       const home = mktemp(joinPath(osTmp(), 'fw-chunk-'))
       // `.models`, not `models`: deps.js's homeDir() only adopts the cwd as the
-      // install home when it holds `.models/` (or `.pdfium/`). The plain
+      // install home when it holds `.models/`. The plain
       // `models/` layout is the one internal to ~/.cache/docling.rs, reachable
       // through DOCLING_RS_HOME — never by chdir alone, which is what this
       // check does. (Long-standing failure; unrelated to the VLM work.)
@@ -224,7 +338,6 @@ async function main() {
   await check('checkDependencies reports status without downloading', () => {
     const status = checkDependencies()
     assert.equal(typeof status.ready, 'boolean')
-    assert.equal(typeof status.pdfium, 'boolean')
     assert.ok(Array.isArray(status.missing))
   })
 
@@ -269,9 +382,8 @@ async function main() {
   // `pipeline: 'vlm'` replaces the ONNX stack with a remote OpenAI-compatible
   // endpoint, so every check here runs with no models on disk. They all use
   // image input on purpose: an image is already its own page, so this leg needs
-  // neither the layout model nor pdfium and runs in any environment — the same
-  // reasoning as `vlm_converts_an_image_without_pdfium` in
-  // crates/docling/tests/vlm.rs.
+  // no layout model and runs in any environment — the same reasoning as
+  // `vlm_converts_an_image_without_a_pdf_stack` in crates/docling/tests/vlm.rs.
 
   // A 1x1 PNG. `convert_vlm` forwards image bytes untouched, but a real file
   // keeps the fixture honest if that ever changes.
@@ -373,6 +485,26 @@ async function main() {
     assert.throws(() => new Pipeline({ pipeline: 'magic' }), /unknown pipeline/)
   })
 
+  // #471: the warm class reads every PDF/image option the one-shot path does,
+  // and validates it on `new` the way DocumentConverter does — before, only
+  // `strict` and the enrichment switches were read, so a `por+eng` Tesseract
+  // pipeline constructed fine and silently ran PP-OCR English. The builders
+  // probe nothing (Tesseract is located on first use), so this needs no
+  // models or binary on disk.
+  await check('Pipeline validates its OCR options like DocumentConverter', () => {
+    assert.throws(() => new Pipeline({ ocrEngine: 'tesseract', ocrLang: 'xx' }), /ocrLang/)
+    assert.throws(() => new DocumentConverter({ ocrEngine: 'tesseract', ocrLang: 'xx' }), /ocrLang/)
+    assert.throws(() => new Pipeline({ ocrEngine: 'bogus' }), /ocrEngine/)
+    assert.throws(() => new Pipeline({ ocrMode: 'sideways' }), /ocrMode/)
+    assert.throws(() => new Pipeline({ ocrScale: 0 }), /ocrScale/)
+    assert.throws(() => new Pipeline({ pages: '3-1' }), /pages/)
+    assert.throws(() => new Pipeline({ documentTimeout: 0 }), /documentTimeout/)
+    assert.throws(() => new DocumentConverter({ documentTimeout: -5 }), /documentTimeout/)
+    new DocumentConverter({ documentTimeout: 90 })
+    new Pipeline({ ocrEngine: 'tesseract', ocrLang: 'por+eng', ocrMode: 'full_page', pages: '1-2' })
+    new Pipeline({ ocrEngine: 'ppocr', ocrLang: 'zh-Hans', ocrScale: 3, headingHierarchy: true })
+  })
+
   await check('a misspelled pipeline name reports the typo, not a missing model', () => {
     // The JS guard runs before native option parsing, so it has to recognize a
     // bad name itself — otherwise a capitalization slip falls through to the
@@ -387,8 +519,8 @@ async function main() {
     )
   })
 
-  await check('mets_gbs under vlm says what is wrong instead of asking for pdfium', () => {
-    // METS-GBS is an ML format with no VLM path; fetching pdfium can't help.
+  await check('mets_gbs under vlm says what is wrong instead of asking for models', () => {
+    // METS-GBS is an ML format with no VLM path; fetching models can't help.
     assert.throws(
       () =>
         convert(
@@ -413,28 +545,9 @@ async function main() {
             vlmMaxTokens: 0,
           },
         ),
-      /vlmMaxTokens must be greater than 0/,
+      /vlmMaxTokens must be a positive integer/,
     )
   })
-
-  if (!checkDependencies().pdfium) {
-    await check("pipeline: 'vlm' still requires pdfium for PDF input", () => {
-      // The other half of the relaxed guard: the layout model must NOT be
-      // demanded, but pdfium must — VLM rasterizes PDF pages locally before
-      // sending them. Skipped when pdfium is installed (nothing to assert, and
-      // the call would then spend the endpoint's retry backoff failing).
-      assert.throws(
-        () =>
-          convert(
-            { name: 'doc.pdf', data: Buffer.from('%PDF-1.4') },
-            { pipeline: 'vlm', vlmEndpoint: 'http://127.0.0.1:1/v1', vlmModel: 'm' },
-          ),
-        (e) => /pdfium/.test(e.message) && !/layout_heron/.test(e.message),
-      )
-    })
-  } else {
-    console.log('  --  pdfium installed; skipping the VLM pdfium-requirement check')
-  }
 
   if (!process.env.DOCLING_RS_VLM_ENDPOINT) {
     await check("pipeline: 'vlm' skips the ML guard and fails on the missing endpoint", () => {

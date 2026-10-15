@@ -2,11 +2,13 @@
 
 <!-- image -->
 
-<!-- image -->
-
 Communication
 
 <!-- image -->
+
+<!-- image -->
+
+Time
 
 ➔
 
@@ -14,10 +16,6 @@ Communication
 
 <!-- image -->
 
-△
+<!-- image -->
 
-Forward chunk
-
-▲
-
-Backward chunk
+Forward chunk Backward chunk

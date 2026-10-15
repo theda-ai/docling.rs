@@ -24,6 +24,13 @@ pub const MEAN: [f32; 3] = [0.94247851, 0.94254675, 0.94292611];
 pub const STD: [f32; 3] = [0.17910956, 0.17940403, 0.17931663];
 /// Cap on decode steps (docling's generation limit).
 pub const MAX_STEPS: usize = 1024;
+/// A row this many OTSL tags wide means the decoder has stopped emitting row
+/// breaks (it repeats `lcel` until [`MAX_STEPS`]): decoding stops there and
+/// the structure is rejected, so the table falls back to geometric
+/// reconstruction (see [`BboxBook::runaway`]). A 448-px encoder input cannot
+/// resolve 256 columns (< 2 px each); real tables stay far below this (the
+/// PDF groundtruth corpus peaks at 12 columns).
+pub const MAX_ROW_TAGS: usize = 256;
 /// The decoder hidden width, and the bbox decoder's per-cell `tag_h` stride.
 pub const EMBED_DIM: usize = 512;
 
@@ -133,6 +140,8 @@ pub struct BboxBook {
     first_lcel: bool,
     bbox_ind: usize,
     cur_bbox_ind: usize,
+    /// Tags emitted since the last `nl` (the current row's width so far).
+    row_len: usize,
 }
 
 impl BboxBook {
@@ -145,8 +154,9 @@ impl BboxBook {
         }
     }
 
-    /// Feed one raw decoded tag and its hidden state. Returns `false` when the
-    /// corrected tag is `END` (stop decoding) — the tag is not recorded then.
+    /// Feed one raw decoded tag and its hidden state. Returns `false` to stop
+    /// decoding: when the corrected tag is `END` (not recorded), or when the
+    /// current row reached [`MAX_ROW_TAGS`] ([`runaway`](Self::runaway)).
     pub fn step(&mut self, raw: i64, hidden: &[f32]) -> bool {
         let tag = correct(raw, self.prev_ucel);
         if tag == END {
@@ -175,7 +185,18 @@ impl BboxBook {
         self.prev_ucel = tag == UCEL;
         self.otsl.push(tag);
         self.tags.push(tag);
-        true
+        self.row_len = if tag == NL { 0 } else { self.row_len + 1 };
+        self.row_len < MAX_ROW_TAGS
+    }
+
+    /// The decode degenerated into one endless row (no `nl` for
+    /// [`MAX_ROW_TAGS`] tags). docling keeps such a sequence, but its span
+    /// recovery (`html_to_otsl` knows colspans 2–20 only) and orphan pickup
+    /// then drop most of the table's words; callers reject the structure so
+    /// the region takes the geometric fallback instead. A long table that
+    /// merely hits [`MAX_STEPS`] with ordinary rows is not a runaway.
+    pub fn runaway(&self) -> bool {
+        self.row_len >= MAX_ROW_TAGS
     }
 }
 
@@ -702,6 +723,40 @@ mod tests {
         b.step(FCEL, &h); // collected, bbox_ind 0→1
         b.step(LCEL, &h); // first-lcel: cur=1, merge{1:-1}, bbox_ind 1→2
         assert_eq!(b.merge.get(&1), Some(&-1));
+    }
+
+    #[test]
+    fn book_stops_runaway_row() {
+        // A dense multi-level-header table decodes as ched ched, then lcel
+        // until the step cap, never a row break.
+        let mut b = BboxBook::new();
+        let h = [0.0f32; EMBED_DIM];
+        assert!(b.step(CHED, &h));
+        assert!(b.step(CHED, &h));
+        while b.step(LCEL, &h) {
+            assert!(b.otsl.len() < MAX_STEPS);
+        }
+        assert_eq!(b.otsl.len(), MAX_ROW_TAGS);
+        assert!(b.runaway());
+    }
+
+    #[test]
+    fn book_long_table_is_not_runaway() {
+        // A tall table that fills MAX_STEPS with ordinary rows (docling
+        // truncates it the same way) keeps its structure; so does a table
+        // that ends normally.
+        let mut b = BboxBook::new();
+        let h = [0.0f32; EMBED_DIM];
+        for i in 0..MAX_STEPS {
+            assert!(b.step(if i % 22 == 21 { NL } else { FCEL }, &h));
+        }
+        assert!(!b.runaway());
+        let mut b = BboxBook::new();
+        for t in [FCEL, LCEL, NL, FCEL, FCEL, NL] {
+            assert!(b.step(t, &h));
+        }
+        assert!(!b.step(END, &h));
+        assert!(!b.runaway());
     }
 
     #[test]

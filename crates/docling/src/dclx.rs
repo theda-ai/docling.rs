@@ -1,11 +1,13 @@
 //! `.dclx` packaging: the DocLang OPC archive (`doclang.pack` counterpart).
 //!
-//! Layout (fixed): `[Content_Types].xml`, `_rels/.rels` (both static bytes,
-//! matching the Python `doclang` package verbatim), and `document.xml` — the
+//! Layout: `[Content_Types].xml`, `_rels/.rels` (both static bytes, matching
+//! the Python `doclang` package verbatim), one `assets/image_NNNNNN_<sha256>.png`
+//! part per picture the markup references (docling's `save_as_doclang_archive`
+//! stores every picture asset as PNG), and `document.xml` — the
 //! [`DoclingDocument::export_to_doclang`] markup plus a single trailing
 //! newline. Entries are deflate-compressed and written in the reference's
-//! lexicographic order. Picture/page image parts are not emitted (our default
-//! export matches docling's placeholder image mode, which stores no images).
+//! lexicographic order. Page images (`pages/`) are not emitted: the backends
+//! keep none by default, like docling.
 
 use std::io::Write;
 
@@ -33,7 +35,26 @@ const RELS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 
 /// Serialize `doc` into `.dclx` bytes.
 pub fn to_dclx_bytes(doc: &DoclingDocument) -> Vec<u8> {
-    let xml = format!("{}\n", doc.export_to_doclang());
+    let (xml, assets) = doc.export_to_doclang_with_assets();
+    let xml = format!("{xml}\n");
+    // PNG and JPEG pictures arrive as PNG; anything else is converted here.
+    // An image no decoder reads is left out (its `<src>` still names it, as a
+    // docling archive would name a picture PIL failed to save).
+    let mut assets: Vec<(String, Vec<u8>)> = assets
+        .into_iter()
+        .filter_map(|(path, bytes)| {
+            if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+                return Some((path, bytes));
+            }
+            let img = image::load_from_memory(&bytes).ok()?;
+            let mut png = std::io::Cursor::new(Vec::new());
+            img.write_to(&mut png, image::ImageFormat::Png).ok()?;
+            Some((path, png.into_inner()))
+        })
+        .collect();
+    // The zero-padded index already orders them; sort anyway, the reference
+    // writes its staged tree lexicographically.
+    assets.sort_by(|a, b| a.0.cmp(&b.0));
     let mut buf = std::io::Cursor::new(Vec::new());
     {
         let mut zip = zip::ZipWriter::new(&mut buf);
@@ -45,6 +66,10 @@ pub fn to_dclx_bytes(doc: &DoclingDocument) -> Vec<u8> {
         zip.write_all(CONTENT_TYPES.as_bytes()).expect("zip write");
         zip.start_file("_rels/.rels", opts).expect("zip start");
         zip.write_all(RELS.as_bytes()).expect("zip write");
+        for (path, bytes) in &assets {
+            zip.start_file(path.as_str(), opts).expect("zip start");
+            zip.write_all(bytes).expect("zip write");
+        }
         zip.start_file("document.xml", opts).expect("zip start");
         zip.write_all(xml.as_bytes()).expect("zip write");
         zip.finish().expect("zip finish");

@@ -10,6 +10,7 @@ use std::collections::HashMap;
 
 use roxmltree::Document;
 
+use crate::backend::images::ImagePolicy;
 use crate::backend::ooxml::{self, Package};
 use crate::backend::{
     convert_html, maybe_prerender_html, DeclarativeBackend, MapImageResolver, NoFetch,
@@ -20,9 +21,11 @@ use docling_core::{DoclingDocument, PictureImage};
 
 #[derive(Default)]
 pub struct EpubBackend {
-    /// When set, `<img>` sources are read out of the EPUB archive and embedded
-    /// as [`PictureImage`]s (the analogue of docling's image fetch).
-    pub fetch_images: bool,
+    /// Under [`ImageSources::Embedded`] and above, `<img>` sources are read
+    /// out of the EPUB archive and embedded as [`PictureImage`]s (the
+    /// analogue of docling's image fetch; #646 — an archive entry is a part
+    /// of the same container, no filesystem or network is touched).
+    pub images: ImagePolicy,
     /// Pre-render the concatenated spine HTML in a headless browser first
     /// (mirrors [`crate::DocumentConverter::use_web_browser`]).
     pub use_web_browser: bool,
@@ -49,22 +52,34 @@ impl DeclarativeBackend for EpubBackend {
         let mut combined =
             String::from("<!DOCTYPE html><html><head><meta charset=\"utf-8\"/></head><body>");
         let body_re = cached_regex!(r"(?is)<body[^>]*>(.*?)</body>");
-        let link_re = cached_regex!(r#"href="([^"]*\.xhtml)(#[^"]*)""#);
+        // A link into another content document is reduced to its anchor:
+        // the file it names is merged into this one. A content document is
+        // XHTML by its manifest media-type, not its name, so `.xht`, `.htm`
+        // and `.html` (Calibre's choice) count too (docling#4293); a link
+        // with a scheme or a protocol-relative one belongs to a host and is
+        // left alone.
+        let link_re = cached_regex!(r#"href="([^"]*\.(?:xhtml|xht|html?))(#[^"]*)""#);
         // Images extracted from the archive, keyed by their resolved in-archive
         // path (which each `<img src>` is rewritten to during concatenation).
         let mut images: HashMap<String, PictureImage> = HashMap::new();
         for file in &spine {
-            let Some(xhtml) = pkg.read(file) else {
+            let Some(xhtml) = read_content(&mut pkg, file) else {
                 continue;
             };
             let body = body_re
                 .captures(&xhtml)
                 .map(|c| c[1].to_string())
                 .unwrap_or(xhtml);
-            let body = link_re.replace_all(&body, r#"href="$2""#);
+            let body = link_re.replace_all(&body, |caps: &regex::Captures| {
+                if is_external_href(&caps[1]) {
+                    caps[0].to_string()
+                } else {
+                    format!("href=\"{}\"", &caps[2])
+                }
+            });
             // Each `<img src>` is relative to *this* spine file's directory, so
             // resolve + extract here, before the bodies are flattened together.
-            let body = if self.fetch_images {
+            let body = if self.images.sources.embedded() {
                 let dir = file.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
                 extract_images(&body, dir, &mut pkg, &mut images)
             } else {
@@ -76,8 +91,12 @@ impl DeclarativeBackend for EpubBackend {
         combined.push_str("\n</body></html>");
 
         let combined = maybe_prerender_html(&combined, self.use_web_browser)?;
-        let doc = if self.fetch_images {
-            convert_html(&source.name, &combined, &MapImageResolver::new(images))
+        let doc = if self.images.sources.embedded() {
+            convert_html(
+                &source.name,
+                &combined,
+                &MapImageResolver::new(images, &self.images),
+            )
         } else {
             convert_html(&source.name, &combined, &NoFetch)
         };
@@ -88,6 +107,52 @@ impl DeclarativeBackend for EpubBackend {
 /// Rewrite each in-archive `<img src>` in `body` to its resolved archive path and
 /// read the image bytes into `images`. `data:`/remote sources are left untouched
 /// (they stay placeholders for EPUB). `dir` is the spine file's directory.
+/// A spine content document as text: UTF-8, or UTF-16 when it opens with a
+/// Whether an href leaves the book: a scheme (`https:`, `mailto:`) or a
+/// protocol-relative `//host` — upstream's `(?!\w+:|//)`.
+fn is_external_href(href: &str) -> bool {
+    if href.starts_with("//") {
+        return true;
+    }
+    let scheme_len = href
+        .bytes()
+        .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_')
+        .count();
+    scheme_len > 0 && href[scheme_len..].starts_with(':')
+}
+
+/// UTF-16 byte order mark (docling#4351 — `xhtml_data.decode("utf-8")` used to
+/// drop such a file). The BOM itself is not part of the text.
+fn read_content(pkg: &mut Package, path: &str) -> Option<String> {
+    let text = decode_content(pkg.read_bytes(path)?)?;
+    if let Err(e) = super::xml_depth::check(&text, path) {
+        eprintln!("docling: {e}; part skipped");
+        return None;
+    }
+    Some(text)
+}
+
+/// docling's `_decode_content_file`: UTF-16 behind a UTF-16 BOM, else UTF-8.
+fn decode_content(bytes: Vec<u8>) -> Option<String> {
+    Some(match bytes.as_slice() {
+        [0xFF, 0xFE, rest @ ..] | [0xFE, 0xFF, rest @ ..] => {
+            let big_endian = bytes[0] == 0xFE;
+            let units: Vec<u16> = rest
+                .chunks_exact(2)
+                .map(|c| {
+                    if big_endian {
+                        u16::from_be_bytes([c[0], c[1]])
+                    } else {
+                        u16::from_le_bytes([c[0], c[1]])
+                    }
+                })
+                .collect();
+            String::from_utf16_lossy(&units)
+        }
+        _ => String::from_utf8(bytes).ok()?,
+    })
+}
+
 fn extract_images(
     body: &str,
     dir: &str,
@@ -217,6 +282,27 @@ fn percent_decode(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::backend::images::ImageSources;
+    #[test]
+    fn utf16_content_documents_decode_behind_their_bom() {
+        // docling#4351: a UTF-16 content document used to be dropped.
+        let le: Vec<u8> = [0xFF, 0xFE]
+            .into_iter()
+            .chain("<p>hé</p>".encode_utf16().flat_map(u16::to_le_bytes))
+            .collect();
+        assert_eq!(super::decode_content(le).as_deref(), Some("<p>hé</p>"));
+        let be: Vec<u8> = [0xFE, 0xFF]
+            .into_iter()
+            .chain("<p>x</p>".encode_utf16().flat_map(u16::to_be_bytes))
+            .collect();
+        assert_eq!(super::decode_content(be).as_deref(), Some("<p>x</p>"));
+        assert_eq!(
+            super::decode_content(b"<p>y</p>".to_vec()).as_deref(),
+            Some("<p>y</p>")
+        );
+        assert_eq!(super::decode_content(vec![0xC3, 0x28]), None);
+    }
+
     use super::*;
 
     /// docling#4261 (2.129): a manifest href stepping out of the OPF directory
@@ -287,6 +373,41 @@ mod tests {
         );
     }
 
+    /// docling#4293: a cross-document link is reduced to its anchor whatever
+    /// the content document's extension; a link to a host is left alone.
+    #[test]
+    fn internal_links_of_every_extension_become_anchors() {
+        let re = cached_regex!(r#"href="([^"]*\.(?:xhtml|xht|html?))(#[^"]*)""#);
+        let fix = |html: &str| -> String {
+            re.replace_all(html, |caps: &regex::Captures| {
+                if is_external_href(&caps[1]) {
+                    caps[0].to_string()
+                } else {
+                    format!("href=\"{}\"", &caps[2])
+                }
+            })
+            .into_owned()
+        };
+        for ext in ["xhtml", "html", "htm", "xht"] {
+            assert_eq!(
+                fix(&format!("<a href=\"../text/ch2.{ext}#n1\">")),
+                "<a href=\"#n1\">"
+            );
+        }
+        assert_eq!(
+            fix("<a href=\"https://example.com/page.html#about\">"),
+            "<a href=\"https://example.com/page.html#about\">"
+        );
+        assert_eq!(
+            fix("<a href=\"//example.com/page.html#about\">"),
+            "<a href=\"//example.com/page.html#about\">"
+        );
+        assert_eq!(
+            fix("<a href=\"mailto:a@example.com\">"),
+            "<a href=\"mailto:a@example.com\">"
+        );
+    }
+
     #[test]
     fn extracts_archive_images_only_when_fetching() {
         use crate::format::InputFormat;
@@ -316,17 +437,12 @@ mod tests {
         };
 
         // Default: pictures stay placeholders (no archive reads).
-        let plain = EpubBackend {
-            fetch_images: false,
-            ..Default::default()
-        }
-        .convert(&src)
-        .unwrap();
+        let plain = EpubBackend::default().convert(&src).unwrap();
         assert!(embedded(&plain).is_empty());
 
         // Fetching: real image bytes are pulled out of the archive.
         let fetched = EpubBackend {
-            fetch_images: true,
+            images: ImagePolicy::new(ImageSources::Embedded),
             ..Default::default()
         }
         .convert(&src)

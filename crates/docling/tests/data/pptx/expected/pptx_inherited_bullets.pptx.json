@@ -36,7 +36,7 @@
           "$ref": "#/groups/1"
         },
         {
-          "$ref": "#/groups/2"
+          "$ref": "#/groups/4"
         }
       ],
       "content_layer": "body",
@@ -51,10 +51,32 @@
       "children": [
         {
           "$ref": "#/texts/0"
-        },
+        }
+      ],
+      "content_layer": "body",
+      "name": "list",
+      "label": "list"
+    },
+    {
+      "self_ref": "#/groups/2",
+      "parent": {
+        "$ref": "#/texts/0"
+      },
+      "children": [
         {
           "$ref": "#/texts/1"
-        },
+        }
+      ],
+      "content_layer": "body",
+      "name": "list",
+      "label": "list"
+    },
+    {
+      "self_ref": "#/groups/3",
+      "parent": {
+        "$ref": "#/texts/1"
+      },
+      "children": [
         {
           "$ref": "#/texts/2"
         }
@@ -64,7 +86,7 @@
       "label": "list"
     },
     {
-      "self_ref": "#/groups/2",
+      "self_ref": "#/groups/4",
       "parent": {
         "$ref": "#/groups/0"
       },
@@ -84,7 +106,11 @@
       "parent": {
         "$ref": "#/groups/1"
       },
-      "children": [],
+      "children": [
+        {
+          "$ref": "#/groups/2"
+        }
+      ],
       "content_layer": "body",
       "label": "list_item",
       "prov": [
@@ -92,10 +118,10 @@
           "page_no": 1,
           "bbox": {
             "l": 457200.0,
-            "t": 3200400.0,
+            "t": 457200.0,
             "r": 5943600.0,
-            "b": 457200.0,
-            "coord_origin": "BOTTOMLEFT"
+            "b": 3200400.0,
+            "coord_origin": "TOPLEFT"
           },
           "charspan": [
             0,
@@ -111,9 +137,13 @@
     {
       "self_ref": "#/texts/1",
       "parent": {
-        "$ref": "#/groups/1"
+        "$ref": "#/groups/2"
       },
-      "children": [],
+      "children": [
+        {
+          "$ref": "#/groups/3"
+        }
+      ],
       "content_layer": "body",
       "label": "list_item",
       "prov": [
@@ -121,10 +151,10 @@
           "page_no": 1,
           "bbox": {
             "l": 457200.0,
-            "t": 3200400.0,
+            "t": 457200.0,
             "r": 5943600.0,
-            "b": 457200.0,
-            "coord_origin": "BOTTOMLEFT"
+            "b": 3200400.0,
+            "coord_origin": "TOPLEFT"
           },
           "charspan": [
             0,
@@ -140,7 +170,7 @@
     {
       "self_ref": "#/texts/2",
       "parent": {
-        "$ref": "#/groups/1"
+        "$ref": "#/groups/3"
       },
       "children": [],
       "content_layer": "body",
@@ -150,10 +180,10 @@
           "page_no": 1,
           "bbox": {
             "l": 457200.0,
-            "t": 3200400.0,
+            "t": 457200.0,
             "r": 5943600.0,
-            "b": 457200.0,
-            "coord_origin": "BOTTOMLEFT"
+            "b": 3200400.0,
+            "coord_origin": "TOPLEFT"
           },
           "charspan": [
             0,
@@ -169,7 +199,7 @@
     {
       "self_ref": "#/texts/3",
       "parent": {
-        "$ref": "#/groups/2"
+        "$ref": "#/groups/4"
       },
       "children": [],
       "content_layer": "body",
@@ -179,10 +209,10 @@
           "page_no": 1,
           "bbox": {
             "l": 457200.0,
-            "t": 4572000.0,
+            "t": 3657600.0,
             "r": 5943600.0,
-            "b": 3657600.0,
-            "coord_origin": "BOTTOMLEFT"
+            "b": 4572000.0,
+            "coord_origin": "TOPLEFT"
           },
           "charspan": [
             0,

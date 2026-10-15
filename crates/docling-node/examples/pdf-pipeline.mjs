@@ -3,10 +3,10 @@
 //   ../../../scripts/install/download_dependencies.sh   # once, from the repo root
 //   node examples/pdf-pipeline.mjs path/to/document.pdf
 //
-// The PDF/image path needs native assets that aren't bundled in the addon
-// (pdfium + the layout/OCR/TableFormer ONNX models).
-// `scripts/install/download_dependencies.sh` fetches them straight into ./models and
-// ./.pdfium, which this package looks for by default — no env vars, no setup
+// The PDF/image path needs the layout/OCR/TableFormer ONNX models, which
+// aren't bundled in the addon. `scripts/install/download_dependencies.sh`
+// fetches them straight into ./.models, which this package looks for by
+// default — no env vars, no setup
 // call needed. Without it, converting a PDF throws a clear error pointing here.
 
 import { checkDependencies, convertFileAsync, Pipeline } from 'docling.rs'

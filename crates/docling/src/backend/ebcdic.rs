@@ -11,9 +11,9 @@
 //! byte-for-byte the Python codecs of the same names); COBOL numerics unpack
 //! from their nibbles: `packed_decimal` is COMP-3, `zoned_decimal` a signed
 //! display numeric, `integer`/`unsigned_integer` big-endian COMP. A declared
-//! scale renders exactly like Python's `Decimal(value).scaleb(-scale)` —
-//! including the spec's scientific notation (`0E-7`), which live docling
-//! output for scale-7 fields actually contains.
+//! scale renders like Python's `format(Decimal(value).scaleb(-scale), "f")`:
+//! fixed-point at every scale (docling#4296 — `str()` used to switch to `0E-7`
+//! for a zero with seven implied decimals).
 //!
 //! docling.rs extensions over upstream: the layout may name its `encoding`
 //! inline (upstream passes it as a separate backend option), and a source
@@ -252,6 +252,7 @@ impl DeclarativeBackend for EbcdicBackend {
                 cells: None,
                 caption: None,
                 caption_parent: Default::default(),
+                caption_location: None,
             }));
         }
         Ok(doc)
@@ -392,10 +393,9 @@ fn decode_char(table: &[u16; 256], b: u8) -> char {
 }
 
 /// Render an unsigned digit string + sign at a decimal scale exactly like
-/// `str(Decimal(value).scaleb(-scale))`: plain notation while the adjusted
-/// exponent stays ≥ -6, the spec's scientific notation beyond (`0E-7` — which
-/// scale-7 copybook fields really produce). Trailing zeros are kept: a zero
-/// at scale 4 is `0.0000`, matching docling's committed output.
+/// `format(Decimal(value).scaleb(-scale), "f")`: fixed-point notation at any
+/// scale. Trailing zeros are kept: a zero at scale 4 is `0.0000`, at scale 7
+/// `0.0000000`, matching docling's committed output.
 fn scale_decimal(raw_digits: &str, negative: bool, scale: u32) -> String {
     let digits = raw_digits.trim_start_matches('0');
     let digits = if digits.is_empty() { "0" } else { digits };
@@ -405,23 +405,14 @@ fn scale_decimal(raw_digits: &str, negative: bool, scale: u32) -> String {
     if scale == 0 {
         return format!("{sign}{digits}");
     }
-    let adjusted = digits.len() as i64 - 1 - i64::from(scale);
-    if adjusted >= -6 {
-        if digits.len() > scale as usize {
-            let (int_part, frac) = digits.split_at(digits.len() - scale as usize);
-            format!("{sign}{int_part}.{frac}")
-        } else {
-            let frac = format!("{digits:0>width$}", width = scale as usize);
-            format!("{sign}0.{frac}")
-        }
+    // `format(Decimal, "f")` (docling#4296): always fixed-point, never the
+    // `0E-7` that `str()` produced for an exponent below -6.
+    if digits.len() > scale as usize {
+        let (int_part, frac) = digits.split_at(digits.len() - scale as usize);
+        format!("{sign}{int_part}.{frac}")
     } else {
-        // to-scientific-string: one digit, optional fraction, E<adjusted>.
-        let (head, rest) = digits.split_at(1);
-        if rest.is_empty() {
-            format!("{sign}{head}E{adjusted}")
-        } else {
-            format!("{sign}{head}.{rest}E{adjusted}")
-        }
+        let frac = format!("{digits:0>width$}", width = scale as usize);
+        format!("{sign}0.{frac}")
     }
 }
 
@@ -433,14 +424,14 @@ mod tests {
 
     #[test]
     fn decimal_rendering_matches_python() {
-        // str(Decimal(v).scaleb(-scale)) reference values.
+        // format(Decimal(v).scaleb(-scale), "f") reference values.
         assert_eq!(scale_decimal("0", false, 0), "0");
         assert_eq!(scale_decimal("0", false, 4), "0.0000");
         assert_eq!(scale_decimal("12345", false, 2), "123.45");
         assert_eq!(scale_decimal("12345", true, 2), "-123.45");
         assert_eq!(scale_decimal("5", false, 4), "0.0005");
-        assert_eq!(scale_decimal("0", false, 7), "0E-7");
-        assert_eq!(scale_decimal("5", true, 7), "-5E-7");
+        assert_eq!(scale_decimal("0", false, 7), "0.0000000");
+        assert_eq!(scale_decimal("5", true, 7), "-0.0000005");
         assert_eq!(scale_decimal("52", false, 7), "0.0000052");
         assert_eq!(scale_decimal("007", false, 1), "0.7");
     }

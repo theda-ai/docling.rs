@@ -27,8 +27,11 @@ const INDENT: &str = "  ";
 struct Out {
     lines: Vec<(i32, String, bool)>,
     /// Running index for exported image assets (`assets/image_{NNNNNN}_…`),
-    /// incremented per image-bearing picture in document order.
+    /// incremented per body picture in document order.
     pic_index: usize,
+    /// The `(path, encoded bytes)` of each referenced asset, in `<src>` order,
+    /// when the caller packages them (`export_to_doclang_with_assets`).
+    assets: Option<Vec<(String, Vec<u8>)>>,
 }
 
 impl Out {
@@ -374,7 +377,7 @@ fn parse_md_runs(chars: &[char], style: InlineRun, out: &mut Vec<InlineRun>) {
 /// closed. Parentheses inside the destination nest, per CommonMark: Wikipedia's
 /// interwiki links (`/wiki/Houad_(evn)`) are exactly this case, and stopping at
 /// the first `)` used to cut the URI in half and leak the tail into the text.
-fn link_dest_end(chars: &[char], start: usize) -> Option<usize> {
+pub(crate) fn link_dest_end(chars: &[char], start: usize) -> Option<usize> {
     let mut depth = 0usize;
     for (offset, c) in chars.get(start..)?.iter().enumerate() {
         match c {
@@ -838,15 +841,29 @@ fn emit_cell_text(out: &mut Out, depth: i32, text: &str) {
 
 /// Serialize the node stream to DocLang XML (no trailing newline).
 pub fn export_to_doclang(nodes: &[Node]) -> String {
+    render(nodes, false).0
+}
+
+/// [`export_to_doclang`] plus the asset parts its `<src>` references name —
+/// `(assets/image_….png, bytes)` in document order, PNG for PNG and JPEG
+/// sources ([`crate::pixel_digest::asset_png`]), the original encoding for
+/// the rest (the archive writer converts those).
+pub fn export_to_doclang_with_assets(nodes: &[Node]) -> (String, Vec<(String, Vec<u8>)>) {
+    render(nodes, true)
+}
+
+fn render(nodes: &[Node], collect_assets: bool) -> (String, Vec<(String, Vec<u8>)>) {
     let mut out = Out {
         lines: Vec::new(),
         pic_index: 0,
+        assets: collect_assets.then(Vec::new),
     };
     out.push(0, "<doclang version=\"0.7\">".to_string());
     let mut i = 0usize;
     emit_nodes(&mut out, 1, nodes, &mut i, 0);
     out.push(0, "</doclang>".to_string());
-    out.finish()
+    let assets = out.assets.take().unwrap_or_default();
+    (out.finish(), assets)
 }
 
 /// Emit nodes at list-nesting `level`; consumes consecutive ListItems into
@@ -882,6 +899,17 @@ fn emit_nodes(out: &mut Out, depth: i32, nodes: &[Node], i: &mut usize, level: u
             }
             Node::Caption { text, href } => {
                 emit_caption(out, depth, text, href.as_deref());
+                *i += 1;
+            }
+            Node::LabeledText { .. } => {
+                let para = nodes[*i].labeled_as_paragraph();
+                emit_nodes(
+                    out,
+                    depth,
+                    std::slice::from_ref(para.as_ref()),
+                    &mut 0,
+                    level,
+                );
                 *i += 1;
             }
             Node::CheckboxItem { checked, text } => {
@@ -934,6 +962,15 @@ fn emit_nodes(out: &mut Out, depth: i32, nodes: &[Node], i: &mut usize, level: u
                     out.push(depth + 1, escape_text(text));
                 }
                 out.push(depth, format!("</{tag}>"));
+                *i += 1;
+            }
+            Node::FurnitureText { label, text } => {
+                out.push(depth, format!("<{label}>"));
+                out.push(depth + 1, "<layer value=\"furniture\"/>".to_string());
+                if !text.is_empty() {
+                    out.push(depth + 1, escape_text(text));
+                }
+                out.push(depth, format!("</{label}>"));
                 *i += 1;
             }
             Node::Table(t) => {
@@ -1008,6 +1045,8 @@ fn emit_nodes(out: &mut Out, depth: i32, nodes: &[Node], i: &mut usize, level: u
                 emit_field_region(out, depth, items);
                 *i += 1;
             }
+            // DocLang has no element for a key-value graph.
+            Node::KeyValueGraph { .. } => *i += 1,
             Node::InlineGroup {
                 unwrapped, runs, ..
             } => {
@@ -1041,7 +1080,7 @@ fn emit_nodes(out: &mut Out, depth: i32, nodes: &[Node], i: &mut usize, level: u
             }
             // Exact page provenance feeds the JSON export only; DocLang takes
             // its `<location>` tokens from the grid wrapper inside.
-            Node::Prov { inner, .. } => {
+            Node::Prov { inner, .. } | Node::Track { inner, .. } => {
                 emit_nodes(out, depth, std::slice::from_ref(inner), &mut 0, level);
                 *i += 1;
             }
@@ -1052,6 +1091,12 @@ fn emit_nodes(out: &mut Out, depth: i32, nodes: &[Node], i: &mut usize, level: u
             // Page markers feed the JSON export only — DocLang stays unchanged
             // (its geometry travels in the <location> tokens).
             Node::PageInfo { .. } => {
+                *i += 1;
+            }
+            // A PDF picture's contained text feeds the JSON export only, so
+            // the DocLang output is unchanged. (Upstream's DocLang picture
+            // serializer does print a picture's children inside its body.)
+            Node::PictureChildren(_) => {
                 *i += 1;
             }
             Node::TextDump(text) => {
@@ -1535,13 +1580,10 @@ fn emit_furniture(out: &mut Out, depth: i32, layer: ContentLayer, inner: &Node) 
             out.push(depth, "<picture>".to_string());
             out.push(depth + 1, token.clone());
             if let Some(img) = image {
-                out.push(
-                    depth + 1,
-                    format!(
-                        "<src uri=\"data:image/png;base64,{}\"/>",
-                        crate::base64::encode(&img.data)
-                    ),
-                );
+                // docling embeds the PIL-re-encoded PNG; a JPEG is re-encoded
+                // here too, any other source keeps its own type in the URI.
+                let (_, uri) = crate::pixel_digest::docling_data_uri(img);
+                out.push(depth + 1, format!("<src uri=\"{uri}\"/>"));
             }
             if let Some(c) = caption {
                 out.push(depth + 1, "<caption>".to_string());
@@ -1596,13 +1638,24 @@ fn emit_picture(
     // An image-bearing picture carries a referenced-image `<src>` naming the
     // exported asset (`assets/image_{index:06}_{sha256}.png`), matching docling's
     // referenced-image mode. docling re-encodes every image to PNG through PIL, so
-    // the extension is always `.png` and the content hash is over those re-encoded
-    // bytes — not reproducible here, so we hash the source bytes and the
-    // conformance harness canonicalizes the digest before comparing.
+    // the extension is always `.png`, and the digest is over the decoded pixels
+    // (`PIL img.tobytes()`) — reproduced exactly for PNG and JPEG sources, the
+    // encoded bytes otherwise (pixel_digest.rs).
+    // The index counts every body picture, image-less ones too — docling's
+    // `_with_pictures_refs` bumps `img_count` per `PictureItem`, not per image.
+    let idx = out.pic_index;
+    out.pic_index += 1;
     let src = image.map(|img| {
-        let idx = out.pic_index;
-        out.pic_index += 1;
-        format!("assets/image_{idx:06}_{}.png", sha256_hex(&img.data))
+        let path = format!(
+            "assets/image_{idx:06}_{}.png",
+            crate::pixel_digest::image_digest(&img.data)
+        );
+        if let Some(assets) = out.assets.as_mut() {
+            let bytes =
+                crate::pixel_digest::asset_png(&img.data).unwrap_or_else(|| img.data.clone());
+            assets.push((path.clone(), bytes));
+        }
+        path
     });
     if location.is_none() && caption.is_none() && src.is_none() {
         out.push(depth, "<picture></picture>".to_string());
@@ -1663,14 +1716,6 @@ fn strip_lone_link(text: &str) -> Cow<'_, str> {
     Cow::Borrowed(text)
 }
 
-/// Lowercase hex SHA-256 of `bytes` (image asset content hash).
-fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(bytes);
-    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
-}
-
 /// Render a [`Node::Located`] wrapper: the inner element with its `<location>`
 /// tokens as the first children.
 fn emit_located(out: &mut Out, depth: i32, location: &[u16; 4], inner: &Node) {
@@ -1687,6 +1732,9 @@ fn emit_located(out: &mut Out, depth: i32, location: &[u16; 4], inner: &Node) {
         }
         Node::Paragraph { text } => {
             emit_text_element(out, depth, "text", "text", text, Some(location));
+        }
+        Node::LabeledText { .. } => {
+            emit_located(out, depth, location, &inner.labeled_as_paragraph())
         }
         Node::Picture {
             caption,

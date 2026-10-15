@@ -1,0 +1,13 @@
+## **Issue 3: Concatenated equation blocks**
+
+The paragraph below contains three separate <m:oMath> elements.  
+Expected: three separate $$ blocks ($$a = b$$, $$c = d$$, $$e = f$$)  
+Docling produces: one $$ block with all equations concatenated.
+
+All three <m:oMath> elements are siblings inside a single <w:p>.
+
+$$a=b$$
+
+$$c=d$$
+
+$$e=f$$

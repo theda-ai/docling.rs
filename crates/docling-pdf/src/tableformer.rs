@@ -11,7 +11,7 @@ use crate::pdfium_backend::TextCell;
 // owned-value KV-cache fast path.
 use crate::tf_core::{
     argmax, build_table_cells, correct, merge_spans, preprocess_input, BboxBook, TableCell, END,
-    MAX_STEPS, START, UCEL,
+    MAX_ROW_TAGS, MAX_STEPS, START, UCEL,
 };
 use image::RgbImage;
 use ort::session::Session;
@@ -204,8 +204,7 @@ impl TableFormer {
         // encoder keeps the shared budget: one 448×448 CNN + transformer pass
         // per table, 680 ms single-threaded vs 165 on four.
         let build = |path: &str, mem_pattern: bool, threads: usize| -> Result<Session, String> {
-            let builder = Session::builder()
-                .map_err(|e| e.to_string())?
+            let builder = docling_onnx::session_builder()?
                 .with_intra_threads(threads)
                 .map_err(|e| e.to_string())?
                 .with_memory_pattern(mem_pattern)
@@ -632,6 +631,13 @@ impl TableFormer {
         mut book: BboxBook,
         eo: &DynValue,
     ) -> Result<Vec<TableCell>, String> {
+        if book.runaway() {
+            docling_core::debug_log!(
+                "docling-pdf: tableformer: no row break in {MAX_ROW_TAGS} tags; \
+                 geometric table fallback"
+            );
+            return Ok(Vec::new());
+        }
         if book.n == 0 {
             return Ok(Vec::new());
         }

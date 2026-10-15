@@ -1,5 +1,6 @@
-# Export the RT-DETR layout model + TableFormer to ONNX, re-host pdfium + the
-# OCR model, and publish everything as GitHub Release assets, so
+# Export the RT-DETR layout model + TableFormer to ONNX, re-host the OCR model
+# (and pdfium, for the opt-in `pdfium` feature's oracle tests), and publish
+# everything as GitHub Release assets, so
 # `scripts/install/download_dependencies.sh` can fetch the whole PDF/image ML stack
 # from a single host (this repo's releases) with zero configuration.
 #
@@ -19,7 +20,9 @@
 # Trigger: manual only (workflow_dispatch) — it installs torch and exports two
 # models, several GB and 10-20 minutes, not something to run on every push.
 # Re-running with the same tag re-uploads (clobbers) matching asset names, so
-# it's safe to retry after fixing a failed export.
+# it's safe to retry after fixing a failed export; assets this run did not
+# stage are pruned, except those other workflows own (see "Prune stale
+# release assets").
 #
 #   gh workflow run publish-models.yml                    # tag = models-v1
 #   gh workflow run publish-models.yml -f tag=models-v2    # a future re-export
@@ -181,6 +184,22 @@ jobs:
           # 090f04abcd9d9a7498bc4ebf677e4cb9bdce1fe4197ddb7e529f1ef44e1ff94f).
           curl -fsSL $RETRY -o third-party/ocr_det.onnx \
             "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv6/det/PP-OCRv6_det_small.onnx"
+          # PP-OCRv6 recognizer + dictionary (#570, Apache-2.0): RapidOCR's
+          # multilingual `PP-OCRv6_rec_small`, the recognizer docling runs for
+          # every language and the Rust default when present; re-hosted
+          # unmodified (hub SHA256:
+          # 6f327246b50388f3c176ae304bd95767ea6dc0c9ae92153ef8cbe210b3c14884).
+          curl -fsSL $RETRY -o third-party/ocr_rec_v6.onnx \
+            "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv6/rec/PP-OCRv6_rec_small.onnx"
+          curl -fsSL $RETRY -o third-party/ocr_rec_v6_dict.txt \
+            "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/paddle/PP-OCRv6/rec/PP-OCRv6_rec_small/ppocrv6_dict.txt"
+          # PP-LCNet text-line orientation classifier (#666, Apache-2.0):
+          # RapidOCR's `ch_PP-LCNet_x0_25_textline_ori_cls_mobile`, the 0/180
+          # check of `ocr_textline_orientation`; re-hosted unmodified (hub
+          # SHA256: 54379ae5174d026780215fc748a7f31910dee36818e63d49e17dc598ecc82df7).
+          curl -fsSL $RETRY -o third-party/ocr_textline_ori.onnx \
+            "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv5/cls/ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx"
+          echo "54379ae5174d026780215fc748a7f31910dee36818e63d49e17dc598ecc82df7  third-party/ocr_textline_ori.onnx" | sha256sum -c -
           # Whisper tiny (the ASR default, ~150 MB): same reasoning — a
           # default install fetches it, so mirror it here and leave Hugging
           # Face as download_dependencies.sh's fallback host.
@@ -226,6 +245,9 @@ jobs:
           stage third-party/ocr_rec_en.onnx ocr_rec_en.onnx
           stage third-party/en_dict.txt en_dict.txt
           stage third-party/ocr_det.onnx ocr_det.onnx
+          stage third-party/ocr_rec_v6.onnx ocr_rec_v6.onnx
+          stage third-party/ocr_rec_v6_dict.txt ocr_rec_v6_dict.txt
+          stage third-party/ocr_textline_ori.onnx ocr_textline_ori.onnx
           # Whisper tiny flattens with an asr_ prefix (release assets are one
           # flat namespace; download_dependencies.sh maps them back into
           # .models/asr/).
@@ -248,10 +270,13 @@ jobs:
           if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
             gh release upload "$TAG" release-assets/* --repo "${{ github.repository }}" --clobber
           else
+            # Never GitHub's "latest": that is the vX.Y.Z release whose CLI
+            # binaries install.sh downloads (release.yml marks it, #707).
             gh release create "$TAG" release-assets/* \
               --repo "${{ github.repository }}" \
               --title "docling.rs ML models ($TAG)" \
-              --notes-file docs/MODELS_NOTICE.md
+              --notes-file docs/MODELS_NOTICE.md \
+              --latest=false
           fi
 
       # --- prune stale assets ------------------------------------------------
@@ -264,6 +289,16 @@ jobs:
           gh release view "$TAG" --repo "${{ github.repository }}" \
             --json assets --jq '.assets[].name' |
           while IFS= read -r asset; do
+            # Other workflows publish into the same release and are not
+            # staged here, so their assets are kept: docling-parse-render.yml's
+            # per-platform tarballs, and onnxruntime-s390x.yml's runtime
+            # (onnxruntime-linux-s390x.tar.gz, #504) — pruning it broke the
+            # s390x images, whose smoke test requires the runtime in the image
+            # (v1.98.0, after a re-run of this workflow). Keep the patterns in
+            # sync with every workflow that uploads into $TAG.
+            case "$asset" in
+              docling-parse-render-*|onnxruntime-linux-*) continue ;;
+            esac
             if [ ! -f "release-assets/$asset" ]; then
               echo "pruning stale asset: $asset"
               gh release delete-asset "$TAG" "$asset" --repo "${{ github.repository }}" --yes

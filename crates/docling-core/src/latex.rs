@@ -458,6 +458,9 @@ fn render_one(node: &Node, list_level: usize, inline: bool, parts: &mut Vec<Stri
         }
         // A standalone caption item is a text item to the LaTeX serializer.
         Node::Caption { text, .. } => push(parts, inline_md(text)),
+        Node::LabeledText { .. } => {
+            render_one(&node.labeled_as_paragraph(), list_level, inline, parts)
+        }
         Node::Paragraph { text } => {
             // A whole-paragraph `$$…$$` is a formula item in the JSON — never
             // escaped, re-wrapped by the serializer.
@@ -521,12 +524,14 @@ fn render_one(node: &Node, list_level: usize, inline: bool, parts: &mut Vec<Stri
             }
         }
         Node::FieldRegion { items } => render_field_region(items, parts),
+        // A key-value graph has no LaTeX rendering (docling's serializer skips it).
+        Node::KeyValueGraph { .. } => {}
         Node::InlineGroup { md_text, .. } => push(parts, inline_md(md_text)),
         Node::TextDump(text) => push(parts, text_item(text)),
         // Notes-layer comments are omitted; an annotated item renders itself.
         Node::CommentSection { .. } => {}
         Node::Commented { inner, .. } => render_one(inner, list_level, inline, parts),
-        Node::Located { inner, .. } | Node::Prov { inner, .. } => {
+        Node::Located { inner, .. } | Node::Prov { inner, .. } | Node::Track { inner, .. } => {
             render_one(inner, list_level, inline, parts)
         }
         // A lone list item outside a run (defensive; `render_nodes` folds
@@ -539,6 +544,8 @@ fn render_one(node: &Node, list_level: usize, inline: bool, parts: &mut Vec<Stri
         Node::DoclangOnly(_)
         | Node::Furniture { .. }
         | Node::PageFurniture { .. }
+        | Node::FurnitureText { .. }
+        | Node::PictureChildren(_)
         | Node::PageBreak
         | Node::PageInfo { .. } => {}
     }
@@ -611,17 +618,38 @@ fn render_table(t: &Table) -> String {
         Some(cells) => {
             let mut by_pos: std::collections::HashMap<(usize, usize), &str> =
                 std::collections::HashMap::new();
+            // A rich cell is serialized through its group, whose items are
+            // then visited: upstream writes its content at the first grid
+            // position only and leaves the rest of a merge empty (#527); a
+            // plain merged cell repeats its text.
+            let mut rich_cover: std::collections::HashSet<(usize, usize)> =
+                std::collections::HashSet::new();
             for c in cells {
+                let rich = t
+                    .cell_blocks
+                    .as_ref()
+                    .and_then(|b| b.get(c.start_row))
+                    .and_then(|row| row.get(c.start_col))
+                    .is_some_and(|b| !b.is_empty());
                 for r in c.start_row..(c.start_row + c.row_span).min(num_rows) {
                     for k in c.start_col..(c.start_col + c.col_span).min(num_cols) {
                         by_pos.insert((r, k), c.text.as_str());
+                        if rich && (r, k) != (c.start_row, c.start_col) {
+                            rich_cover.insert((r, k));
+                        }
                     }
                 }
             }
             for r in 0..num_rows {
                 grid.push(
                     (0..num_cols)
-                        .map(|c| cell(r, c, by_pos.get(&(r, c)).copied().unwrap_or("")))
+                        .map(|c| {
+                            if rich_cover.contains(&(r, c)) {
+                                String::new()
+                            } else {
+                                cell(r, c, by_pos.get(&(r, c)).copied().unwrap_or(""))
+                            }
+                        })
                         .collect(),
                 );
             }

@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Fetch the native libs + models the PDF pipeline needs (all gitignored).
+# Build the models the PDF pipeline needs from source (all gitignored) — the
+# from-scratch alternative to download_dependencies.sh's prebuilt fetch. The
+# page renderer is pure Rust; no native PDF library is involved.
 #
 #   scripts/install/pdf_setup.sh
 #
 # Downloads:
-#   - libpdfium (bblanchon prebuilt) -> .pdfium/lib/libpdfium.{so,dylib}
 #   - PP-OCRv3 recognition model     -> .models/ocr_rec.onnx
 #   - PP-OCR character dictionary     -> .models/ppocr_keys_v1.txt
 # And exports two ONNX model sets (need a Python with torch+onnx; set $PYTHON,
@@ -16,33 +17,7 @@
 #     falls back to geometric table reconstruction.
 set -euo pipefail
 cd "$(dirname "$0")/../.."   # docling.rs/
-mkdir -p .pdfium .models
-
-# pdfium-binaries platform: auto-detected from the host (#281);
-# $PDFIUM_PLATFORM overrides (e.g. a cross-arch fetch).
-detect_platform() {
-  case "$(uname -s)" in
-    Darwin) os=mac ;;
-    *) os=linux ;;
-  esac
-  case "$(uname -m)" in
-    aarch64 | arm64) echo "$os-arm64" ;;
-    *) echo "$os-x64" ;;
-  esac
-}
-PLATFORM="${PDFIUM_PLATFORM:-$(detect_platform)}"
-# The mac tarballs ship libpdfium.dylib, never a .so — guarding on the .so
-# re-downloaded on every run and left the correctly fetched dylib unnoticed.
-case "$PLATFORM" in
-  mac-*) PDFIUM_LIB=libpdfium.dylib ;;
-  *) PDFIUM_LIB=libpdfium.so ;;
-esac
-if [ ! -f ".pdfium/lib/$PDFIUM_LIB" ]; then
-  echo "→ libpdfium ($PLATFORM)"
-  curl -sSL -o /tmp/pdfium.tgz \
-    "https://github.com/bblanchon/pdfium-binaries/releases/latest/download/pdfium-${PLATFORM}.tgz"
-  tar xzf /tmp/pdfium.tgz -C .pdfium
-fi
+mkdir -p .models
 
 if [ ! -f .models/ocr_rec.onnx ]; then
   echo "→ PP-OCRv3 recognition model"
@@ -82,7 +57,6 @@ if [ "${DOCLING_RS_FP32:-0}" != "1" ] && [ ! -f .models/layout_heron_int8.onnx ]
 fi
 
 echo "done. export these before running the pipeline:"
-echo "  export PDFIUM_DYNAMIC_LIB_PATH=$(pwd)/.pdfium/lib"
 if [ -f .models/layout_heron_int8.onnx ]; then
   echo "  export DOCLING_LAYOUT_ONNX=$(pwd)/.models/layout_heron_int8.onnx   # int8 default (fp32: layout_heron.onnx, or DOCLING_RS_FP32=1)"
 else

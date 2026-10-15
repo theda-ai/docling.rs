@@ -1,0 +1,101 @@
+[ Header 1 ( "" , [] , [] ) [ Str "Nesting" ]
+, Para
+    [ Str "A"
+    , Space
+    , Str "list"
+    , Space
+    , Str "featuring"
+    , Space
+    , Str "nesting:"
+    ]
+, BulletList
+    [ [ Plain [ Str "abc" ]
+      , BulletList
+          [ [ Plain [ Str "abc123" ]
+            , BulletList
+                [ [ Plain [ Str "abc1234" ]
+                  , BulletList
+                      [ [ Plain [ Str "abc12345" ]
+                        , BulletList
+                            [ [ Plain [ Str "a." ] ]
+                            , [ Plain [ Str "b." ] ]
+                            ]
+                        ]
+                      ]
+                  ]
+                , [ Plain [ Str "abcd1234\65306" ]
+                  , BulletList
+                      [ [ Plain [ Str "abcd12345\65306" ]
+                        , BulletList
+                            [ [ Plain [ Str "a." ] ]
+                            , [ Plain [ Str "b." ] ]
+                            ]
+                        ]
+                      ]
+                  ]
+                ]
+            ]
+          ]
+      ]
+    , [ Plain [ Str "def\65306" ]
+      , BulletList
+          [ [ Plain [ Str "def1234\65306" ]
+            , BulletList [ [ Plain [ Str "def12345\12290" ] ] ]
+            ]
+          ]
+      ]
+    , [ Plain
+          [ Str "after"
+          , Space
+          , Str "one"
+          , Space
+          , Str "empty"
+          , Space
+          , Str "line"
+          ]
+      , BulletList [ [ Plain [ Str "foo" ] ] ]
+      ]
+    , [ Plain
+          [ Str "afer"
+          , Space
+          , Str "two"
+          , Space
+          , Str "empty"
+          , Space
+          , Str "lines"
+          ]
+      , BulletList [ [ Plain [ Str "bar" ] ] ]
+      ]
+    ]
+, BulletList
+    [ [ Plain [ Str "changing" , Space , Str "symbol" ] ] ]
+, Para
+    [ Str "A"
+    , Space
+    , Str "nested"
+    , Space
+    , Str "HTML"
+    , Space
+    , Str "list:"
+    ]
+, BulletList
+    [ [ Plain [ Str "First" , Space , Str "item" ] ]
+    , [ Plain
+          [ Str "Second"
+          , Space
+          , Str "item"
+          , Space
+          , Str "with"
+          , Space
+          , Str "subitems:"
+          ]
+      , BulletList
+          [ [ Plain [ Str "Subitem" , Space , Str "1" ] ]
+          , [ Plain [ Str "Subitem" , Space , Str "2" ] ]
+          ]
+      ]
+    , [ Plain
+          [ Str "Last" , Space , Str "list" , Space , Str "item" ]
+      ]
+    ]
+]

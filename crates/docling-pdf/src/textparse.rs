@@ -101,6 +101,9 @@ struct Font {
     ascent: f64,
     descent: f64,
     hash: u64,
+    /// Weight and slant read from the `/BaseFont` name (the heading
+    /// hierarchy's style signal, #302).
+    style: crate::font_style::FontStyle,
 }
 
 impl Font {
@@ -267,6 +270,9 @@ fn parse_font(doc: &Document, name: &[u8], fdict: &Dictionary) -> Font {
         ascent,
         descent,
         hash: hash_name(name),
+        style: crate::font_style::parse_font_style(&String::from_utf8_lossy(
+            &base_font_name(fdict).unwrap_or_else(|| name.to_vec()),
+        )),
     }
 }
 
@@ -515,7 +521,7 @@ fn num(o: &Object) -> Option<f64> {
 }
 
 /// Parse a ToUnicode CMap's `bfchar` / `bfrange` sections into code→string.
-fn parse_tounicode(data: &[u8]) -> HashMap<u32, String> {
+pub(crate) fn parse_tounicode(data: &[u8]) -> HashMap<u32, String> {
     let text = String::from_utf8_lossy(data);
     let mut map = HashMap::new();
     let hex = |s: &str| -> Option<Vec<u16>> {
@@ -787,16 +793,42 @@ pub fn content_diagnosis(bytes: &[u8]) -> String {
 /// not misrouted into OCR: only a document averaging at most one line per page
 /// **and** totalling fewer than 32 characters is called vestigial.
 pub fn text_layer_is_vestigial(pages: &[crate::pdfium_backend::PdfPage]) -> bool {
-    let lines: usize = pages.iter().map(|p| p.cells.len()).sum();
-    if lines == 0 {
-        return true;
+    let mut tally = TextLayerTally::default();
+    pages.iter().for_each(|p| tally.add(p));
+    tally.is_vestigial()
+}
+
+/// [`text_layer_is_vestigial`]'s counts, accumulated a page at a time so a
+/// streaming caller need not keep the pages around to decide.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TextLayerTally {
+    pages: usize,
+    lines: usize,
+    chars: usize,
+}
+
+impl TextLayerTally {
+    pub fn add(&mut self, page: &crate::pdfium_backend::PdfPage) {
+        self.pages += 1;
+        self.lines += page.cells.len();
+        self.chars += page
+            .cells
+            .iter()
+            .map(|c| c.text.chars().count())
+            .sum::<usize>();
     }
-    let chars: usize = pages
-        .iter()
-        .flat_map(|p| &p.cells)
-        .map(|c| c.text.chars().count())
-        .sum();
-    lines <= pages.len() && chars < 32
+
+    /// The verdict over the pages added so far.
+    pub fn is_vestigial(&self) -> bool {
+        self.lines == 0 || (self.lines <= self.pages && self.chars < 32)
+    }
+
+    /// Whether the pages added so far already rule vestigial out for a
+    /// document of `total_pages`, whatever the remaining pages hold — both
+    /// counts only grow, so a caller may stop parsing pages it does not need.
+    pub fn proves_text(&self, total_pages: usize) -> bool {
+        self.lines > 0 && (self.lines > total_pages || self.chars >= 32)
+    }
 }
 
 /// Why the cross-reference repair did or did not fire, for the `text_layer`
@@ -829,25 +861,67 @@ pub fn xref_repair_status(bytes: &[u8]) -> String {
 /// a single `xref` section that begins after the last object. The repair then
 /// has to prove itself — the padded bytes are used only if they load — so a
 /// mis-repair degrades to today's behaviour rather than to silent garbage.
-fn load_document(bytes: &[u8]) -> Option<Document> {
+pub(crate) fn load_document(bytes: &[u8]) -> Option<Document> {
+    open_document(bytes, None).ok()
+}
+
+/// Why [`open_document`] could not hand back a readable document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OpenError {
+    /// lopdf cannot read the file even after the repairs.
+    Unreadable,
+    /// The file is encrypted and the password given (or none) does not open it.
+    Password,
+}
+
+/// Load `bytes` with the document's password. lopdf decrypts while reading —
+/// with `password`, or the empty user password most "protected" PDFs carry
+/// (what every viewer opens silently) — so every reader downstream sees plain
+/// streams; a file the password does not open loads with its streams still
+/// encrypted, which is reported as [`OpenError::Password`] rather than handed
+/// on as a document whose every stream decodes to nothing.
+pub(crate) fn open_document(bytes: &[u8], password: Option<&str>) -> Result<Document, OpenError> {
+    let Some(doc) = load_document_raw(bytes, password) else {
+        // lopdf refuses to load at all under a *wrong* password (a missing
+        // one loads the file with its streams still encrypted); tell the two
+        // apart by loading without it.
+        if password.is_some() && load_document_raw(bytes, None).is_some_and(|d| d.is_encrypted()) {
+            return Err(OpenError::Password);
+        }
+        return Err(OpenError::Unreadable);
+    };
+    if doc.is_encrypted() {
+        return Err(OpenError::Password);
+    }
+    Ok(doc)
+}
+
+fn load_options(password: Option<&str>) -> lopdf::LoadOptions {
+    lopdf::LoadOptions {
+        password: password.map(str::to_string),
+        ..lopdf::LoadOptions::default()
+    }
+}
+
+fn load_document_raw(bytes: &[u8], password: Option<&str>) -> Option<Document> {
     // Try progressively more repair, and accept a candidate only once the pages
     // actually carry content — a document whose streams were dropped still
     // "loads", so loading alone is not evidence the repair helped. A
     // well-formed file returns on the first attempt and pays for nothing.
     let mut fallback = None;
-    if let Some(doc) = best_effort_load(bytes, &mut fallback) {
+    if let Some(doc) = best_effort_load(bytes, password, &mut fallback) {
         return Some(doc);
     }
     let xref_fixed = pad_short_xref_entries(bytes).ok();
     if let Some(fixed) = &xref_fixed {
-        if let Some(doc) = best_effort_load(fixed, &mut fallback) {
+        if let Some(doc) = best_effort_load(fixed, password, &mut fallback) {
             return Some(doc);
         }
     }
     // Both defects can coexist, and the second only becomes visible once the
     // first is repaired, so build on whatever the previous step produced.
     let lengths_fixed = fix_stream_lengths(xref_fixed.as_deref().unwrap_or(bytes));
-    if let Some(doc) = best_effort_load(&lengths_fixed, &mut fallback) {
+    if let Some(doc) = best_effort_load(&lengths_fixed, password, &mut fallback) {
         return Some(doc);
     }
     fallback
@@ -855,8 +929,12 @@ fn load_document(bytes: &[u8]) -> Option<Document> {
 
 /// Load `data`, returning it only when its pages carry content; a document that
 /// merely parses is remembered as the fallback for when nothing does better.
-fn best_effort_load(data: &[u8], fallback: &mut Option<Document>) -> Option<Document> {
-    match Document::load_mem(data) {
+fn best_effort_load(
+    data: &[u8],
+    password: Option<&str>,
+    fallback: &mut Option<Document>,
+) -> Option<Document> {
+    match Document::load_mem_with_options(data, load_options(password)) {
         Ok(doc) if has_page_content(&doc) => Some(doc),
         Ok(doc) => {
             fallback.get_or_insert(doc);
@@ -1087,6 +1165,8 @@ pub struct PageParserCells {
     pub prose: Vec<crate::pdfium_backend::TextCell>,
     pub words: Vec<crate::pdfium_backend::TextCell>,
     pub code: Vec<crate::pdfium_backend::TextCell>,
+    /// Drawn checkbox squares (#609), in the cells' frame.
+    pub checkboxes: Vec<crate::checkbox::CheckBox>,
 }
 
 /// The parser text layer, driven one page at a time: the document is loaded
@@ -1109,10 +1189,16 @@ pub struct PageTextParser {
 }
 
 impl PageTextParser {
-    /// Load the document; `None` when it has no parseable text layer at all
-    /// (the caller then keeps pdfium's cells, as before).
+    /// Load the document; `None` when lopdf cannot read it at all.
     pub fn open(bytes: &[u8]) -> Option<Self> {
-        let doc = load_document(bytes)?;
+        Self::open_with_password(bytes, None)
+    }
+
+    /// [`open`](Self::open) with the document's password (an encrypted file
+    /// the password does not open reads as `None` here; the pipeline reports
+    /// it through [`crate::pdf_meta::PdfMeta::open_with_password`] first).
+    pub fn open_with_password(bytes: &[u8], password: Option<&str>) -> Option<Self> {
+        let doc = open_document(bytes, password).ok()?;
         let mut pages: Vec<_> = doc.get_pages().into_iter().collect();
         pages.sort_by_key(|(n, _)| *n);
         Some(Self {
@@ -1122,20 +1208,105 @@ impl PageTextParser {
         })
     }
 
+    /// The glyph boxes and font styles of the 0-based page `index` — the
+    /// heading-hierarchy stage's style signal (#302): every non-space glyph's
+    /// box (font ascent + descent at its size — the font-size proxy pdfium's
+    /// loose char box also gave) in top-left coordinates, with the weight
+    /// class and slant its `/BaseFont` name declares. Empty for a page
+    /// without a text layer (a scan), and the stage falls back to its other
+    /// signals.
+    pub(crate) fn glyph_styles(
+        &mut self,
+        index: usize,
+    ) -> Vec<crate::heading_hierarchy::GlyphStyle> {
+        let Some(&pid) = self.pages.get(index) else {
+            return Vec::new();
+        };
+        let (_w, h) = page_size(&self.doc, pid);
+        let glyphs = page_glyphs_cached(&self.doc, pid, &mut self.caches);
+        // Font hash → style, over the fonts the walk just parsed (an inline,
+        // uncached font dictionary reads as unstyled).
+        let styles: HashMap<u64, crate::font_style::FontStyle> = self
+            .caches
+            .fonts
+            .values()
+            .map(|f| (f.hash, f.style))
+            .collect();
+        glyphs
+            .iter()
+            .filter(|g| !g.ch.is_whitespace() && g.ll.is_finite())
+            .map(|g| {
+                let st = styles.get(&g.font).copied().unwrap_or_default();
+                crate::heading_hierarchy::GlyphStyle {
+                    l: g.ll,
+                    t: h - g.lt,
+                    r: g.lr,
+                    b: h - g.lb,
+                    height: g.height(),
+                    weight_cls: crate::font_style::weight_class(st.weight),
+                    italic: st.italic,
+                    styled: st.known,
+                }
+            })
+            .collect()
+    }
+
     /// Prose, word and code cells of the 0-based page `index` — empty for an
-    /// index the parser's page tree doesn't have (pdfium and lopdf can
-    /// disagree on a damaged file; the caller falls back to pdfium's text).
+    /// index the parser's page tree doesn't have (a damaged file whose page
+    /// tree disagrees with the object model's count).
     pub fn cells(&mut self, index: usize) -> PageParserCells {
         let Some(&pid) = self.pages.get(index) else {
             return PageParserCells::default();
         };
         let (_w, h) = page_size(&self.doc, pid);
-        let glyphs = page_glyphs_cached(&self.doc, pid, &mut self.caches);
+        let (glyphs, inks) = page_glyphs_and_inks(&self.doc, pid, &mut self.caches);
         let (prose, words) = crate::dp_lines::line_and_word_cells(&glyphs, h, true);
         PageParserCells {
             prose,
             words,
             code: crate::pdfium_backend::code_cells_from_glyphs(&glyphs, h),
+            checkboxes: crate::checkbox::find(&inks, h),
+        }
+    }
+
+    /// Pages in the document's page tree.
+    pub fn page_count(&self) -> usize {
+        self.pages.len()
+    }
+
+    /// The 0-based page `index` as the text-layer-only conversion sees it —
+    /// one element of [`pdf_text_pages`], parsed on demand so a caller can
+    /// drop each page once it is assembled instead of holding the whole
+    /// document's cells. A blank page (no cells) for an index the page tree
+    /// doesn't have.
+    pub fn text_page(&mut self, index: usize) -> crate::pdfium_backend::PdfPage {
+        let (w, h, (glyphs, inks)) = match self.pages.get(index) {
+            Some(&pid) => {
+                let (w, h) = page_size(&self.doc, pid);
+                (w, h, page_glyphs_and_inks(&self.doc, pid, &mut self.caches))
+            }
+            None => (0.0, 0.0, Default::default()),
+        };
+        let (mut prose, mut words) = crate::dp_lines::line_and_word_cells(&glyphs, h, true);
+        drop_overpainted_cells(&mut prose);
+        drop_overpainted_cells(&mut words);
+        crate::pdfium_backend::PdfPage {
+            #[cfg(feature = "ocr-prep")]
+            image_layout: None,
+            width: w,
+            height: h,
+            // Cells are native PDF points; there is no rendered bitmap.
+            scale: 1.0,
+            cells: prose,
+            code_cells: crate::pdfium_backend::code_cells_from_glyphs(&glyphs, h),
+            word_cells: words,
+            checkboxes: crate::checkbox::find(&inks, h),
+            #[cfg(feature = "ocr-prep")]
+            image: image::RgbImage::new(1, 1),
+            links: Vec::new(),
+            rotation: 0,
+            #[cfg(feature = "ml")]
+            pending_image: None,
         }
     }
 }
@@ -1158,36 +1329,11 @@ pub fn pdf_all_cells(bytes: &[u8]) -> Vec<PageParserCells> {
 /// wasm32. A page the parser can't read (no text layer) comes back with empty
 /// cells; there is no pdfium fallback on this path.
 pub fn pdf_text_pages(bytes: &[u8]) -> Vec<crate::pdfium_backend::PdfPage> {
-    let Some(doc) = load_document(bytes) else {
+    let Some(mut parser) = PageTextParser::open(bytes) else {
         return Vec::new();
     };
-    let mut caches = DocCaches::default();
-    let mut pages: Vec<_> = doc.get_pages().into_iter().collect();
-    pages.sort_by_key(|(n, _)| *n);
-    pages
-        .into_iter()
-        .map(|(_, pid)| {
-            let (w, h) = page_size(&doc, pid);
-            let glyphs = page_glyphs_cached(&doc, pid, &mut caches);
-            let (mut prose, mut words) = crate::dp_lines::line_and_word_cells(&glyphs, h, true);
-            drop_overpainted_cells(&mut prose);
-            drop_overpainted_cells(&mut words);
-            crate::pdfium_backend::PdfPage {
-                #[cfg(feature = "ocr-prep")]
-                image_layout: None,
-                width: w,
-                height: h,
-                // Cells are native PDF points; there is no rendered bitmap.
-                scale: 1.0,
-                cells: prose,
-                code_cells: crate::pdfium_backend::code_cells_from_glyphs(&glyphs, h),
-                word_cells: words,
-                #[cfg(feature = "ocr-prep")]
-                image: image::RgbImage::new(1, 1),
-                links: Vec::new(),
-                rotation: 0,
-            }
-        })
+    (0..parser.page_count())
+        .map(|i| parser.text_page(i))
         .collect()
 }
 
@@ -1312,6 +1458,30 @@ fn fonts_from_res(
 }
 
 /// Extract every glyph on a page as a native-coordinate [`Glyph`].
+/// [`PageTextParser::glyph_styles`] for the given **1-based** pages of a
+/// document, keyed by page number — a separate, on-demand pass (no
+/// rendering), so the extraction pipeline stays byte-identical whether or not
+/// the heading-hierarchy stage runs. Empty when lopdf cannot open the file.
+pub(crate) fn glyph_styles(
+    bytes: &[u8],
+    pages: &[usize],
+) -> HashMap<usize, Vec<crate::heading_hierarchy::GlyphStyle>> {
+    let mut out = HashMap::new();
+    let Some(mut parser) = PageTextParser::open(bytes) else {
+        return out;
+    };
+    for &page_no in pages {
+        if page_no == 0 {
+            continue;
+        }
+        let styles = parser.glyph_styles(page_no - 1);
+        if !styles.is_empty() {
+            out.insert(page_no, styles);
+        }
+    }
+    out
+}
+
 pub(crate) fn page_glyphs(doc: &Document, page_id: lopdf::ObjectId) -> Vec<Glyph> {
     page_glyphs_cached(doc, page_id, &mut DocCaches::default())
 }
@@ -1323,12 +1493,24 @@ fn page_glyphs_cached(
     page_id: lopdf::ObjectId,
     caches: &mut DocCaches,
 ) -> Vec<Glyph> {
+    page_glyphs_and_inks(doc, page_id, caches).0
+}
+
+/// [`page_glyphs_cached`] plus the small painted path pieces the same walk
+/// passed — what [`crate::checkbox::find`] looks for checkbox squares in
+/// (#609) — in the glyphs' frame.
+fn page_glyphs_and_inks(
+    doc: &Document,
+    page_id: lopdf::ObjectId,
+    caches: &mut DocCaches,
+) -> (Vec<Glyph>, Vec<crate::checkbox::Ink>) {
     let mut out = Vec::new();
+    let mut inks = Vec::new();
     // lopdf 0.44: get_page_content returns the assembled content-stream bytes
     // directly (an empty Vec when the page has none).
     let content_bytes = doc.get_page_content(page_id);
     let Ok(content) = lopdf::content::Content::decode(&content_bytes) else {
-        return out;
+        return (out, inks);
     };
     if let Some(res) = page_res(doc, page_id) {
         // pdfium's page matrix: user space translated so the display box's
@@ -1348,9 +1530,39 @@ fn page_glyphs_cached(
             0,
             caches,
             &mut out,
+            &mut inks,
         );
+        out.retain(|g| on_page(g, pb.w, pb.h));
     }
-    out
+    (out, inks)
+}
+
+/// Whether a glyph is on the page (#529): docling-parse keeps a character
+/// only when its whole box lies inside the display box — the CropBox, or
+/// the MediaBox without one — edges included, so a FrameMaker print slug
+/// drawn beside the CropBox or a tiled page's neighbouring text beyond the
+/// MediaBox never becomes a cell, and a line crossing the edge is cut at the
+/// last glyph that fits (`Crossing the rig`). The box is docling-parse's
+/// char box — the advance by the font's ascent/descent, the loose box here
+/// (its axis-aligned extent for rotated text) — in the frame `page_glyphs`
+/// already moved to the display box's corner, so the page is `[0, w] × [0,
+/// h]`. A glyph without a finite box is kept, as before. (A standard-14 font
+/// without a FontDescriptor gets the 750 / −250 default ascent / descent
+/// here where docling-parse reads the AFM's — Helvetica's 718 / −207 — so
+/// for those a glyph within ~0.04 em of the top or bottom edge can fall the
+/// other way; horizontally the advance is the same.)
+fn on_page(g: &Glyph, w: f32, h: f32) -> bool {
+    // f32 noise only: docling-parse already drops a glyph 0.01 pt over.
+    const EPS: f32 = 1e-3;
+    let (l, b, r, t) = if [g.ll, g.lb, g.lr, g.lt].iter().all(|v| v.is_finite()) {
+        (g.ll, g.lb, g.lr, g.lt)
+    } else {
+        (g.l, g.b, g.r, g.t)
+    };
+    if ![l, b, r, t].iter().all(|v| v.is_finite()) {
+        return true;
+    }
+    l >= -EPS && b >= -EPS && r <= w + EPS && t <= h + EPS
 }
 
 /// Run a content stream's operators, emitting glyphs into `out`. Recurses into
@@ -1367,6 +1579,7 @@ fn run_content(
     depth: u32,
     caches: &mut DocCaches,
     out: &mut Vec<Glyph>,
+    inks: &mut Vec<crate::checkbox::Ink>,
 ) {
     let fonts = fonts_from_res(doc, res, caches);
     let xobjects = res
@@ -1393,12 +1606,26 @@ fn run_content(
     let mut trise = init.trise;
 
     let op_f = |operands: &[Object], i: usize| operands.get(i).and_then(num).unwrap_or(0.0);
+    // The path under construction, already in page space (a path is built
+    // under one CTM — `cm` is not allowed inside it), for the checkbox
+    // squares (#609). Text extraction never reads it.
+    let mut path: Vec<PathPiece> = Vec::new();
+    let (mut cur, mut start) = ((0.0, 0.0), (0.0, 0.0));
+    // Whether the fill colour is (near) white, saved/restored with `q`/`Q`:
+    // a white-filled stroked box is a checkbox outline, a coloured one a
+    // chart legend's swatch. The initial fill colour is black.
+    let mut fill_light = false;
+    let mut fill_stack: Vec<bool> = Vec::new();
 
     for op in &content.operations {
         let operands = &op.operands;
         match op.operator.as_str() {
-            "q" => gstate_stack.push((ctm, tc, tw, th, tl, trise, fsize, font)),
+            "q" => {
+                gstate_stack.push((ctm, tc, tw, th, tl, trise, fsize, font));
+                fill_stack.push(fill_light);
+            }
             "Q" => {
+                fill_light = fill_stack.pop().unwrap_or(false);
                 if let Some((c, a, b, h, l, r, fs, f)) = gstate_stack.pop() {
                     ctm = c;
                     tc = a;
@@ -1535,6 +1762,75 @@ fn run_content(
                     }
                 }
             }
+            "m" => {
+                cur = ctm.apply(op_f(operands, 0), op_f(operands, 1));
+                start = cur;
+            }
+            "l" => {
+                let p = ctm.apply(op_f(operands, 0), op_f(operands, 1));
+                path.push(PathPiece::Line(cur, p));
+                cur = p;
+            }
+            "c" | "v" | "y" => {
+                let pts: Vec<(f64, f64)> = (0..operands.len() / 2)
+                    .map(|k| ctm.apply(op_f(operands, 2 * k), op_f(operands, 2 * k + 1)))
+                    .collect();
+                if let Some(&end) = pts.last() {
+                    path.push(PathPiece::Curve(
+                        std::iter::once(cur).chain(pts.iter().copied()).collect(),
+                    ));
+                    cur = end;
+                }
+            }
+            "h" => {
+                if cur != start {
+                    path.push(PathPiece::Line(cur, start));
+                }
+                cur = start;
+            }
+            "re" => {
+                let (x, y, w, h) = (
+                    op_f(operands, 0),
+                    op_f(operands, 1),
+                    op_f(operands, 2),
+                    op_f(operands, 3),
+                );
+                path.push(PathPiece::Rect([
+                    ctm.apply(x, y),
+                    ctm.apply(x + w, y),
+                    ctm.apply(x + w, y + h),
+                    ctm.apply(x, y + h),
+                ]));
+                cur = ctm.apply(x, y);
+                start = cur;
+            }
+            "S" | "s" | "f" | "F" | "f*" | "B" | "B*" | "b" | "b*" => {
+                let op = op.operator.as_str();
+                if matches!(op, "s" | "b" | "b*") && cur != start {
+                    path.push(PathPiece::Line(cur, start));
+                }
+                let stroke = matches!(op, "S" | "s" | "B" | "B*" | "b" | "b*");
+                let fill = !matches!(op, "S" | "s");
+                paint_path(&path, stroke, fill, fill_light, inks);
+                path.clear();
+            }
+            "n" => path.clear(),
+            // The fill colour, by its components: gray `g`, `rg`, CMYK `k`,
+            // and `sc`/`scn` by operand count (a pattern name is not light).
+            "g" | "rg" | "k" | "sc" | "scn" => {
+                let v: Vec<f64> = operands
+                    .iter()
+                    .map(num)
+                    .collect::<Option<_>>()
+                    .unwrap_or_default();
+                fill_light = match v.as_slice() {
+                    [g] => *g >= 0.9,
+                    [r, g, b] => r.min(*g).min(*b) >= 0.9,
+                    [c, m, y, k] => c.max(*m).max(*y).max(*k) <= 0.1,
+                    _ => false,
+                };
+            }
+            "cs" => fill_light = false,
             "Do" => {
                 // Invoke a Form XObject: bulk body text in many PDFs lives inside
                 // a form, reached only here. Image XObjects are skipped (no text).
@@ -1625,9 +1921,101 @@ fn run_content(
                     depth + 1,
                     caches,
                     out,
+                    inks,
                 );
             }
             _ => {}
+        }
+    }
+}
+
+/// One piece of a path under construction, page space (see `run_content`).
+enum PathPiece {
+    Line((f64, f64), (f64, f64)),
+    /// An `re`: its four corners, counter-clockwise from `(x, y)`.
+    Rect([(f64, f64); 4]),
+    /// A Bézier segment: its start and control/end points (their hull).
+    Curve(Vec<(f64, f64)>),
+}
+
+/// Record a painted path's pieces for the checkbox finder (#609): a stroked
+/// line is a [`Seg`](crate::checkbox::Ink::Seg), a stroked rectangle that
+/// stays axis-aligned a [`Rect`](crate::checkbox::Ink::Rect) (one filled
+/// white too — still an outline), and a coloured fill or a curve only its
+/// bounding box, a [`Blot`](crate::checkbox::Ink::Blot): a possible tick
+/// mark, or a swatch. White fills draw nothing and are dropped. Only pieces small
+/// enough to be a checkbox edge or a mark inside one are kept.
+fn paint_path(
+    path: &[PathPiece],
+    stroke: bool,
+    fill: bool,
+    fill_light: bool,
+    inks: &mut Vec<crate::checkbox::Ink>,
+) {
+    use crate::checkbox::Ink;
+    let bbox = |pts: &mut dyn Iterator<Item = (f64, f64)>| {
+        pts.fold(
+            (
+                f64::INFINITY,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                f64::NEG_INFINITY,
+            ),
+            |(l, b, r, t), (x, y)| (l.min(x), b.min(y), r.max(x), t.max(y)),
+        )
+    };
+    let mut keep = |ink: Ink| {
+        if ink.worth_keeping() {
+            inks.push(ink);
+        }
+    };
+    if fill && !fill_light {
+        // A coloured fill is a blot — a tick mark, or (the size of a square)
+        // a legend swatch, which `checkbox::find` then rules out. A white
+        // fill is no ink on paper: it only leaves the stroke, if any, below.
+        let (l, b, r, t) = bbox(&mut path.iter().flat_map(|p| match p {
+            PathPiece::Line(a, z) => vec![*a, *z],
+            PathPiece::Rect(c) => c.to_vec(),
+            PathPiece::Curve(c) => c.clone(),
+        }));
+        if l.is_finite() {
+            keep(Ink::Blot { l, b, r, t });
+        }
+        return;
+    }
+    if !stroke {
+        return;
+    }
+    for piece in path {
+        match piece {
+            PathPiece::Line(a, z) => keep(Ink::Seg {
+                x0: a.0,
+                y0: a.1,
+                x1: z.0,
+                y1: z.1,
+            }),
+            PathPiece::Rect(c) => {
+                let axis = ((c[0].1 - c[1].1).abs() < 1e-6 && (c[1].0 - c[2].0).abs() < 1e-6)
+                    || ((c[0].0 - c[1].0).abs() < 1e-6 && (c[1].1 - c[2].1).abs() < 1e-6);
+                if axis {
+                    let (l, b, r, t) = bbox(&mut c.iter().copied());
+                    keep(Ink::Rect { l, b, r, t });
+                } else {
+                    for k in 0..4 {
+                        let (a, z) = (c[k], c[(k + 1) % 4]);
+                        keep(Ink::Seg {
+                            x0: a.0,
+                            y0: a.1,
+                            x1: z.0,
+                            y1: z.1,
+                        });
+                    }
+                }
+            }
+            PathPiece::Curve(c) => {
+                let (l, b, r, t) = bbox(&mut c.iter().copied());
+                keep(Ink::Blot { l, b, r, t });
+            }
         }
     }
 }
@@ -1659,11 +2047,33 @@ fn show_text(
         };
         let trm = scale.then(*tm).then(ctm);
         // Box in glyph space (1000-unit em): x 0..w, y descent..ascent.
-        let (x0, y0) = trm.apply(0.0, font.descent / 1000.0);
-        let (x1, _y1) = trm.apply(w0, font.descent / 1000.0);
-        let (_x2, y2) = trm.apply(0.0, font.ascent / 1000.0);
-        let (left, right) = (x0.min(x1), x0.max(x1));
-        let (bot, top) = (y0.min(y2), y0.max(y2));
+        let (desc, asc) = (font.descent / 1000.0, font.ascent / 1000.0);
+        let (x0, y0) = trm.apply(0.0, desc);
+        let (x1, y1) = trm.apply(w0, desc);
+        let (x2, y2) = trm.apply(w0, asc);
+        let (x3, y3) = trm.apply(0.0, asc);
+        // Upright = the baseline runs left-to-right along +x. Only then is the
+        // loose box the rectangle spanned by the baseline's x and the em's y
+        // (a synthetic oblique's skew is ignored, as it always was). A rotated
+        // matrix — the `0 s -s 0 tx ty Tm` landscape pages are built with
+        // (#528) — collapsed that rectangle to zero width, and every such run
+        // vanished; those glyphs keep their real quad (docling-parse's char
+        // rect) and its extent instead.
+        let upright = trm.a > 0.0 && trm.b.abs() <= 1e-6 * trm.a;
+        let (left, bot, right, top, quad) = if upright {
+            (x0.min(x1), y0.min(y3), x0.max(x1), y0.max(y3), None)
+        } else {
+            let (xs, ys) = ([x0, x1, x2, x3], [y0, y1, y2, y3]);
+            let fold = |v: [f64; 4], f: fn(f64, f64) -> f64| v.into_iter().reduce(f).unwrap();
+            let q = [x0, y0, x1, y1, x2, y2, x3, y3].map(|v| v as f32);
+            (
+                fold(xs, f64::min),
+                fold(ys, f64::min),
+                fold(xs, f64::max),
+                fold(ys, f64::max),
+                Some(q),
+            )
+        };
         if let Some(s) = text {
             // A run may map one code to multiple chars (ligature/fraction); share box.
             for ch in s.chars() {
@@ -1679,6 +2089,7 @@ fn show_text(
                         lr: right as f32,
                         lt: top as f32,
                         font: font.hash,
+                        quad,
                     });
                 }
             }
@@ -1812,7 +2223,7 @@ fn tex_math_builtin(fdict: &Dictionary) -> Option<HashMap<u8, char>> {
 /// digit/punctuation names from the Adobe Glyph List, and common typographic
 /// names. A `.suffix` (`one.taboldstyle`, `a.sc`) is stripped and the base name
 /// retried — docling renders these as the base character.
-fn glyph_name_to_char(name: &[u8]) -> Option<char> {
+pub(crate) fn glyph_name_to_char(name: &[u8]) -> Option<char> {
     let s = std::str::from_utf8(name).ok()?;
     if let Some(hex) = s.strip_prefix("uni") {
         if let Ok(cp) = u32::from_str_radix(hex.get(0..4)?, 16) {
@@ -2566,7 +2977,15 @@ mod page_box_frame {
     /// One page, `boxes` spliced into the page dictionary verbatim, one text
     /// run at user-space `(x, y)`.
     fn pdf(boxes: &str, x: f32, y: f32) -> Vec<u8> {
-        let content = format!("BT /F1 12 Tf {x} {y} Td (First printing) Tj ET\n");
+        pdf_content(
+            boxes,
+            &format!("BT /F1 12 Tf {x} {y} Td (First printing) Tj ET\n"),
+        )
+    }
+
+    /// One page, `boxes` spliced into the page dictionary, `content` as its
+    /// content stream (font `/F1` = Helvetica).
+    fn pdf_content(boxes: &str, content: &str) -> Vec<u8> {
         let objs: Vec<String> = vec![
             "<</Type/Catalog/Pages 2 0 R>>".into(),
             format!("<</Type/Pages/Kids[3 0 R]/Count 1{boxes}>>"),
@@ -2632,6 +3051,58 @@ mod page_box_frame {
             );
         }
         assert!((plain[0].l - 37.0).abs() < 1e-3, "{}", plain[0].l);
+    }
+
+    fn text(glyphs: &[Glyph]) -> String {
+        glyphs.iter().map(|g| g.ch).collect()
+    }
+
+    /// #529: text drawn outside the display box — a print slug beside the
+    /// CropBox, a tiled page's neighbour beyond the MediaBox — is dropped,
+    /// glyph by glyph like docling-parse, instead of being clamped onto the
+    /// page edge; a line crossing the edge keeps the glyphs that fit.
+    #[test]
+    fn glyphs_outside_the_display_box_are_dropped() {
+        let (_, g) = only_page(&pdf_content(
+            "/MediaBox[0 0 400 400]/CropBox[100 100 400 400]",
+            "BT /F1 14 Tf 120 300 Td (Visible.) Tj ET\nBT /F1 8 Tf 5 40 Td (Slug) Tj ET\n",
+        ));
+        assert_eq!(text(&g), "Visible.");
+        let (_, g) = only_page(&pdf_content(
+            "/MediaBox[0 0 300 400]",
+            "BT /F1 14 Tf 40 300 Td (On page) Tj ET\nBT /F1 14 Tf 400 250 Td (Beyond) Tj ET\n",
+        ));
+        assert_eq!(text(&g), "On page");
+        // docling-parse: "Crossing the right edge" on a 300 pt page → "Crossing the rig".
+        let (_, g) = only_page(&pdf_content(
+            "/MediaBox[0 0 300 400]",
+            "BT /F1 14 Tf 200 250 Td (Crossing the right edge) Tj ET\n",
+        ));
+        assert_eq!(text(&g), "Crossing the rig");
+    }
+
+    /// The containment test is docling-parse's: the whole char box (advance
+    /// × the font's ascent / descent) inside the display box, edges
+    /// included — a Helvetica `W` at 50 pt (47.2 wide) ending exactly on the
+    /// right edge stays, 0.01 pt further it goes; likewise on the left.
+    #[test]
+    fn a_glyph_on_the_edge_stays_one_over_it_goes() {
+        let w_at = |x: f32, y: f32| {
+            let (_, g) = only_page(&pdf_content(
+                "/MediaBox[0 0 300 400]",
+                &format!("BT /F1 50 Tf {x} {y} Td (W) Tj ET\n"),
+            ));
+            text(&g)
+        };
+        assert_eq!(w_at(252.8, 200.0), "W");
+        assert_eq!(w_at(252.81, 200.0), "");
+        assert_eq!(w_at(0.0, 200.0), "W");
+        assert_eq!(w_at(-0.01, 200.0), "");
+        // Vertically the box is the font's ascent / descent: a baseline far
+        // enough up keeps the descender on the page, one at 0 does not.
+        assert_eq!(w_at(100.0, 20.0), "W");
+        assert_eq!(w_at(100.0, 0.0), "");
+        assert_eq!(w_at(100.0, 380.0), "");
     }
 
     /// pdfium's fallbacks: no MediaBox → Letter; a CropBox is clipped to the
@@ -2812,6 +3283,11 @@ mod base14_fonts {
     /// A one-page PDF whose single `Tj` uses `fontdict` (no embedded program).
     fn pdf_with_font(fontdict: &[u8], text: &[u8]) -> Vec<u8> {
         let content = [b"BT /F1 12 Tf 72 700 Td (".as_slice(), text, b") Tj ET\n"].concat();
+        pdf_with_content(fontdict, &content)
+    }
+
+    /// A one-page A4 PDF drawing `content` with `fontdict` as `/F1`.
+    fn pdf_with_content(fontdict: &[u8], content: &[u8]) -> Vec<u8> {
         let stream = format!("<</Length {}>>stream\n", content.len()).into_bytes();
         let objs: Vec<Vec<u8>> = vec![
             b"<</Type/Catalog/Pages 2 0 R>>".to_vec(),
@@ -2819,7 +3295,7 @@ mod base14_fonts {
             b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 595 842]/Contents 4 0 R\
                /Resources<</Font<</F1 5 0 R>>>>>>"
                 .to_vec(),
-            [stream.as_slice(), content.as_slice(), b"endstream"].concat(),
+            [stream.as_slice(), content, b"endstream"].concat(),
             fontdict.to_vec(),
         ];
         let mut out = b"%PDF-1.4\n".to_vec();
@@ -2885,6 +3361,163 @@ mod base14_fonts {
             .into_iter()
             .flat_map(|(_, _, c)| c)
             .collect()
+    }
+
+    /// Text drawn with a rotated text matrix reads as one line in its own
+    /// reading order, boxed by the run's axis-aligned extent (#528). The
+    /// landscape case is `0 s -s 0 tx ty Tm` on a `/Rotate 90` page; every
+    /// such run used to collapse to zero width and vanish (90°/270°/tilted)
+    /// or read backwards (180°). Expected boxes are docling-parse 7.22's line
+    /// cells for the same runs (y-up, PDF points).
+    #[test]
+    fn rotated_text_matrix_reads_in_order() {
+        const HELV: &[u8] = b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>";
+        const TEXT: &str = "Upright text on a rotated page.";
+        for (tm, [l, b, r, t]) in [
+            ("0 14 -14 0 200 100", [189.9, 100.0, 202.9, 289.1]), // 90°
+            ("-14 0 0 -14 350 300", [160.9, 289.9, 350.0, 302.9]), // 180°
+            ("0 -14 14 0 200 500", [197.1, 310.9, 210.1, 500.0]), // 270°
+            (
+                "9.8995 9.8995 -9.8995 9.8995 100 100",
+                [92.9, 98.0, 235.8, 240.8],
+            ), // 45°
+        ] {
+            let content = format!("BT /F1 1 Tf {tm} Tm ({TEXT}) Tj ET\n");
+            let pdf = pdf_with_content(HELV, content.as_bytes());
+            let cs = cells(&pdf);
+            assert_eq!(cs.len(), 1, "{tm}: {cs:?}");
+            let c = &cs[0];
+            assert_eq!(c.text, TEXT, "{tm}");
+            // `cells` is top-left-origin on the 842 pt page. The descriptor-
+            // less base-14 face gets the parser's 1-em box where docling-parse
+            // reads Helvetica's AFM (718/−207) — the same ≤ 0.6 pt
+            // across-the-baseline offset upright text has — so allow 1 pt.
+            let got = [c.l, 842.0 - c.b, c.r, 842.0 - c.t];
+            for (g, w) in got.iter().zip([l, b, r, t]) {
+                assert!(
+                    (g - w).abs() < 1.0,
+                    "{tm}: box {got:?} vs docling-parse {:?}",
+                    [l, b, r, t]
+                );
+            }
+            let words: Vec<String> = super::pdf_words(&pdf)
+                .into_iter()
+                .flat_map(|(_, _, c)| c)
+                .map(|c| c.text)
+                .collect();
+            assert_eq!(words, TEXT.split(' ').collect::<Vec<_>>(), "{tm}");
+        }
+    }
+
+    /// A rotated run past the page edge (a cover's spine title) is dropped
+    /// by the on-page test (#529) — measured on the quad's extent, not the
+    /// zero-width box rotated glyphs used to get — instead of clamping onto
+    /// the edge as a zero-width cell. One inside the page is kept.
+    #[test]
+    fn rotated_text_off_the_page_is_dropped() {
+        const HELV: &[u8] = b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>";
+        let off = pdf_with_content(
+            HELV,
+            b"BT /F1 1 Tf 0 14 -14 0 -4 200 Tm (Spine title) Tj ET\n",
+        );
+        assert!(cells(&off).is_empty(), "{:?}", cells(&off));
+        let on = pdf_with_content(
+            HELV,
+            b"BT /F1 1 Tf 0 14 -14 0 30 200 Tm (Margin note) Tj ET\n",
+        );
+        assert_eq!(cells(&on).len(), 1);
+    }
+
+    /// Upright text keeps the plain loose rectangle — no quad, and the
+    /// sanitizer path is the one every pinned PDF baseline was made with.
+    #[test]
+    fn upright_glyphs_carry_no_quad() {
+        let only_page = |pdf: &[u8]| {
+            let doc = super::load_document(pdf).expect("loads");
+            let pid = *doc.get_pages().values().next().expect("one page");
+            super::page_glyphs(&doc, pid)
+        };
+        let pdf = pdf_with_font(b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>", b"Plain");
+        let glyphs = only_page(&pdf);
+        assert!(!glyphs.is_empty());
+        assert!(glyphs.iter().all(|g| g.quad.is_none() && g.lr > g.ll));
+        // A 90° glyph's style height is its font size, not its advance.
+        let pdf = pdf_with_content(
+            b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
+            b"BT /F1 1 Tf 0 14 -14 0 200 100 Tm (W) Tj ET\n",
+        );
+        let glyphs = only_page(&pdf);
+        let g = &glyphs[0];
+        assert!(g.quad.is_some());
+        // 14 pt × the face's 1-em box (no descriptor: ascent − descent = 1).
+        assert!((g.height() - 14.0).abs() < 0.05, "{}", g.height());
+    }
+
+    /// #609: ReportLab's chart axis sets each tick label with the *same* `Tm`
+    /// inside its own `q … cm … Q`, so only the CTM stacks `3`…`8` one under
+    /// another at one x. Each tick is its own line cell with its own box (as
+    /// docling-parse reads it), not one `345678` cell boxed like the first.
+    #[test]
+    fn ticks_stacked_by_cm_are_separate_line_cells() {
+        let mut content = String::new();
+        for (k, tick) in "345678".chars().enumerate() {
+            let y = 300.0 + 25.92 * k as f64;
+            content.push_str(&format!(
+                "q 1 0 0 1 125 {y} cm BT /F1 10 Tf 1 0 0 1 -5 -4 Tm ({tick}) Tj ET Q\n"
+            ));
+        }
+        let pdf = pdf_with_content(
+            b"<</Type/Font/Subtype/Type1/BaseFont/Times-Roman>>",
+            content.as_bytes(),
+        );
+        let cells = cells(&pdf);
+        let texts: Vec<&str> = cells.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, ["3", "4", "5", "6", "7", "8"]);
+        for (k, c) in cells.iter().enumerate() {
+            // Top-left y of a tick whose baseline is 4 pt under its cm origin.
+            let base = 842.0 - (300.0 + 25.92 * k as f32 - 4.0);
+            assert!((c.l - 120.0).abs() < 0.1, "{k}: l {}", c.l);
+            assert!(
+                c.t < base && base - c.t < 10.0,
+                "{k}: t {} base {base}",
+                c.t
+            );
+        }
+    }
+
+    /// #609: the path walk finds drawn checkbox squares — ReportLab's four
+    /// `m … l S` edges under a `cm`, and a stroked `re` with a tick inside
+    /// (checked) — in the text cells' top-left frame, and a stroked box
+    /// filled white; a filled bar, a big frame and a colour-filled legend
+    /// swatch are not checkboxes.
+    #[test]
+    fn drawn_checkbox_squares_are_found() {
+        let content = b"q 1 0 0 1 119.52 449.04 cm \
+            n 0 12.96 m 12.96 12.96 l S n 0 0 m 12.96 0 l S \
+            n 0 0 m 0 12.96 l S n 12.96 0 m 12.96 12.96 l S Q\n\
+            200 400 10 10 re S 202 405 m 204.5 402 l 208.5 408.5 l S\n\
+            300 400 12 12 re f 50 50 100 100 re S\n\
+            q 0.2 0.4 0.8 rg 400 400 12 12 re B Q q 1 g 500 400 12 12 re B Q\n";
+        let pdf = pdf_with_content(b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>", content);
+        let mut parser = super::PageTextParser::open(&pdf).expect("parses");
+        let mut boxes = parser.cells(0).checkboxes;
+        boxes.sort_by(|a, b| a.l.total_cmp(&b.l));
+        let got: Vec<([i32; 4], bool)> = boxes
+            .iter()
+            .map(|c| {
+                let r = |v: f32| (v * 100.0).round() as i32;
+                ([r(c.l), r(c.t), r(c.r), r(c.b)], c.checked)
+            })
+            .collect();
+        // Page height 842: y-up 449.04..462.0 → top-left 380.0..392.96.
+        assert_eq!(
+            got,
+            [
+                ([11952, 38000, 13248, 39296], false),
+                ([20000, 43200, 21000, 44200], true),
+                ([50000, 43000, 51200, 44200], false),
+            ]
+        );
     }
 
     /// Every standard-14 alias/style decodes with real (positive-width) boxes.

@@ -1,0 +1,271 @@
+[ Header 1 ( "" , [] , [] ) [ Str "Beverages" ]
+, BulletList
+    [ [ Plain [ Strong [ Str "Coffee" ] ]
+      , BulletList
+          [ [ Plain
+                [ Str "Black"
+                , Space
+                , Str "hot"
+                , Space
+                , Str "drink"
+                ]
+            ]
+          ]
+      ]
+    , [ Plain [ Strong [ Str "Milk" ] ]
+      , BulletList
+          [ [ Plain
+                [ Str "White"
+                , Space
+                , Str "cold"
+                , Space
+                , Str "drink"
+                ]
+            ]
+          ]
+      ]
+    , [ Plain [ Strong [ Str "Soda" ] ] ]
+    , [ Plain [ Strong [ Str "Water" ] ] ]
+    ]
+, Header
+    2
+    ( "" , [] , [] )
+    [ Str "Programming" , Space , Str "Languages" ]
+, BulletList
+    [ [ Plain [ Strong [ Str "Python" ] ]
+      , BulletList
+          [ [ Plain
+                [ Str "A"
+                , Space
+                , Str "high-level"
+                , Space
+                , Str "programming"
+                , Space
+                , Str "language"
+                ]
+            ]
+          , [ Plain
+                [ Str "Known"
+                , Space
+                , Str "for"
+                , Space
+                , Str "its"
+                , Space
+                , Str "simplicity"
+                , Space
+                , Str "and"
+                , Space
+                , Str "readability"
+                ]
+            ]
+          ]
+      ]
+    , [ Plain [ Strong [ Str "JavaScript" ] ]
+      , BulletList
+          [ [ Plain
+                [ Str "A"
+                , Space
+                , Str "scripting"
+                , Space
+                , Str "language"
+                , Space
+                , Str "for"
+                , Space
+                , Str "web"
+                , Space
+                , Str "browsers"
+                ]
+            ]
+          ]
+      ]
+    ]
+, Header
+    2 ( "" , [] , [] ) [ Str "Complex" , Space , Str "Example" ]
+, BulletList
+    [ [ Plain [ Strong [ Str "HTML" ] ]
+      , BulletList
+          [ [ Plain
+                [ Str "HyperText"
+                , Space
+                , Str "Markup"
+                , Space
+                , Str "Language"
+                , Space
+                , Str "-"
+                , Space
+                , Str "used"
+                , Space
+                , Str "for"
+                , Space
+                , Emph [ Str "structuring" ]
+                , Space
+                , Str "web"
+                , Space
+                , Str "content"
+                ]
+            ]
+          ]
+      ]
+    , [ Plain [ Strong [ Str "CSS" ] ]
+      , BulletList
+          [ [ Plain
+                [ Str "Cascading"
+                , Space
+                , Str "Style"
+                , Space
+                , Str "Sheets"
+                ]
+            ]
+          , [ Plain
+                [ Str "Used"
+                , Space
+                , Str "for"
+                , Space
+                , Str "styling"
+                , Space
+                , Str "and"
+                , Space
+                , Str "layout"
+                ]
+            ]
+          ]
+      ]
+    ]
+, Header
+    2 ( "" , [] , [] ) [ Str "Nested" , Space , Str "Lists" ]
+, BulletList
+    [ [ Plain
+          [ Strong
+              [ Str "Main" , Space , Str "Term" , Space , Str "1" ]
+          ]
+      , BulletList
+          [ [ Plain
+                [ Str "Description"
+                , Space
+                , Str "for"
+                , Space
+                , Str "the"
+                , Space
+                , Str "first"
+                , Space
+                , Str "main"
+                , Space
+                , Str "term."
+                ]
+            ]
+          ]
+      ]
+    , [ Plain
+          [ Strong
+              [ Str "Main"
+              , Space
+              , Str "Term"
+              , Space
+              , Str "2"
+              , Space
+              , Str "(Sub-categories)"
+              ]
+          ]
+      , BulletList
+          [ [ Plain [ Strong [ Str "Sub-term" , Space , Str "A" ] ]
+            , BulletList
+                [ [ Plain
+                      [ Str "Detail"
+                      , Space
+                      , Str "for"
+                      , Space
+                      , Str "sub-term"
+                      , Space
+                      , Str "A."
+                      ]
+                  ]
+                ]
+            ]
+          , [ Plain [ Strong [ Str "Sub-term" , Space , Str "B" ] ]
+            , BulletList
+                [ [ Plain
+                      [ Str "Detail"
+                      , Space
+                      , Str "for"
+                      , Space
+                      , Str "sub-term"
+                      , Space
+                      , Str "B."
+                      ]
+                  ]
+                ]
+            ]
+          ]
+      ]
+    , [ Plain
+          [ Strong
+              [ Str "Main"
+              , Space
+              , Str "Term"
+              , Space
+              , Str "3"
+              , Space
+              , Str "(Mixed)"
+              ]
+          ]
+      , BulletList
+          [ [ Plain
+                [ Str "This"
+                , Space
+                , Str "is"
+                , Space
+                , Str "a"
+                , Space
+                , Str "regular"
+                , Space
+                , Str "text"
+                , Space
+                , Str "description."
+                ]
+            ]
+          ]
+      , BulletList
+          [ [ Plain [ Strong [ Str "Sub-term" , Space , Str "C" ] ]
+            , BulletList
+                [ [ Plain
+                      [ Str "Detail"
+                      , Space
+                      , Str "for"
+                      , Space
+                      , Str "sub-term"
+                      , Space
+                      , Str "C."
+                      ]
+                  ]
+                ]
+            ]
+          , [ Plain [ Strong [ Str "Sub-term" , Space , Str "D" ] ]
+            , BulletList
+                [ [ Plain
+                      [ Str "Detail"
+                      , Space
+                      , Str "for"
+                      , Space
+                      , Str "sub-term"
+                      , Space
+                      , Str "D."
+                      ]
+                  ]
+                ]
+            ]
+          ]
+      , BulletList
+          [ [ Plain
+                [ Str "Final"
+                , Space
+                , Str "regular"
+                , Space
+                , Str "text"
+                , Space
+                , Str "description."
+                ]
+            ]
+          ]
+      ]
+    ]
+]

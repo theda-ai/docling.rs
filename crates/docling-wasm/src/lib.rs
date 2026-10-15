@@ -5,8 +5,8 @@
 //!
 //! Built on `docling` with `default-features = false` plus `pdf-text`: a PDF's
 //! **embedded text layer** converts too (pure-Rust parser, same extraction as
-//! the native `--no-ocr` flag — flat paragraphs, no headings/tables/pictures).
-//! The ML pipelines (pdfium + ONNX Runtime) and the HTTP image fetcher are
+//! the native `--text-layer-only` flag — flat paragraphs, no headings/tables/pictures).
+//! The ML pipelines (ONNX Runtime) and the HTTP image fetcher are
 //! compiled out — scanned PDFs, images, and audio are rejected at convert time
 //! with a clear message.
 //!
@@ -16,7 +16,8 @@
 //! const md = convert(new Uint8Array(await file.arrayBuffer()), file.name, "md");
 //! ```
 
-use docling::{DocumentConverter, ImageMode, InputFormat, SourceDocument};
+use docling::{ConvertOptions, DocumentConverter, ImageMode, InputFormat, SourceDocument};
+use serde::Deserialize;
 use wasm_bindgen::prelude::*;
 
 #[cfg(feature = "ocr")]
@@ -41,6 +42,58 @@ fn start() {
     console_error_panic_hook::set_once();
 }
 
+/// One request: the output selection plus the conversion options every
+/// surface shares ([`docling::ConvertOptions`], #577) — the JSON object
+/// [`convert_with_options`] takes.
+#[derive(Debug, Default, Deserialize)]
+struct Request {
+    /// `md` (default) | `json` | `text` | `doclang` | `latex` | `html` | `pandoc` |
+    /// `vtt`.
+    to: Option<String>,
+    /// `placeholder` (default) | `embedded` — see [`image_mode`].
+    images: Option<String>,
+    #[serde(flatten)]
+    convert: ConvertOptions,
+}
+
+/// Parse the options JSON; unknown keys are rejected (serde's
+/// `deny_unknown_fields` cannot see through the `flatten`), so a misspelled
+/// key fails loudly instead of silently doing nothing.
+fn parse_request(options_json: Option<&str>) -> Result<Request, String> {
+    let Some(json) = options_json.filter(|j| !j.trim().is_empty()) else {
+        return Ok(Request::default());
+    };
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| format!("options: {e}"))?;
+    let Some(map) = value.as_object() else {
+        return Err("options: expected a JSON object".into());
+    };
+    let unknown = ConvertOptions::unknown_keys(map.keys().map(String::as_str), &["to", "images"]);
+    if let Some(key) = unknown.first() {
+        return Err(format!("options: unknown field `{key}`"));
+    }
+    serde_json::from_value(value).map_err(|e| format!("options: {e}"))
+}
+
+/// The positional [`convert`] arguments as a [`Request`]: `max_pages` is the
+/// window `1-N` (issue #80's window with first pinned to 1).
+fn positional_request(
+    to: Option<&str>,
+    images: Option<&str>,
+    max_pages: Option<u32>,
+    page_break_placeholder: Option<&str>,
+) -> Request {
+    Request {
+        to: to.map(str::to_owned),
+        images: images.map(str::to_owned),
+        convert: ConvertOptions {
+            pages: max_pages.filter(|&n| n > 0).map(|n| format!("1-{n}")),
+            page_break_placeholder: page_break_placeholder.map(str::to_owned),
+            ..ConvertOptions::default()
+        },
+    }
+}
+
 /// The whole conversion body, host-testable (`JsError` can only be
 /// constructed on the wasm target, so the JS boundary stays a thin shim).
 fn convert_impl(
@@ -51,22 +104,29 @@ fn convert_impl(
     max_pages: Option<u32>,
     page_break_placeholder: Option<&str>,
 ) -> Result<String, String> {
+    convert_request(
+        bytes,
+        filename,
+        positional_request(to, images, max_pages, page_break_placeholder),
+    )
+}
+
+/// Convert per a parsed [`Request`]: the shared options validated and applied
+/// by [`ConvertOptions::apply`] (the ML-only ones are inert here — the formats
+/// they affect are rejected at convert time), then the export `to` names.
+fn convert_request(bytes: &[u8], filename: &str, request: Request) -> Result<String, String> {
     let ext = filename.rsplit('.').next().unwrap_or_default();
     let format = InputFormat::from_extension(ext)
         .ok_or_else(|| format!("unknown or unsupported extension: {filename:?}"))?;
     let source = SourceDocument::from_bytes(filename.to_string(), format, bytes.to_vec());
-    let mut converter = DocumentConverter::new();
-    // "First N pages" (issue #80's window with first pinned to 1): only PDFs
-    // consume it; other formats convert whole, same as the CLI.
-    if let Some(n) = max_pages.filter(|&n| n > 0) {
-        converter = converter.page_range(1, n as usize);
-    }
-    // docling's `page_break_placeholder`: text between pages in the Markdown
-    // (slides, sheets, DjVu pages, PDF text-layer pages). Unset = no breaks.
-    converter = converter.page_break_placeholder(page_break_placeholder.map(str::to_owned));
+    let converter = request
+        .convert
+        .apply(DocumentConverter::new())
+        .map_err(|e| e.to_string())?;
     let result = converter.convert(source).map_err(|e| e.to_string())?;
-    let image_mode = image_mode(images)?;
-    match to.unwrap_or("md") {
+    let to = request.to.as_deref().unwrap_or("md");
+    let image_mode = image_mode(request.images.as_deref(), to)?;
+    match to {
         // `Referenced` is deliberately unreachable here: it hands the caller
         // loose image files to write next to the Markdown, which a page with no
         // filesystem cannot do — the browser equivalent is `embedded`.
@@ -77,8 +137,20 @@ fn convert_impl(
         "json" => Ok(result.document.export_to_json()),
         "doclang" => Ok(result.document.export_to_doclang()),
         "latex" => Ok(result.document.export_to_latex()),
+        // #613: docling's plain text (`export_to_text`).
+        "text" => Ok(result.document.export_to_text()),
+        // #492: like Markdown, pictures embed (`referenced` is unreachable
+        // here for the same reason).
+        "html" => Ok(result
+            .document
+            .export_to_html_with_images(image_mode, "artifacts")
+            .0),
+        // #515: Pandoc's JSON AST (`pandoc -f json`); pictures as above.
+        "pandoc" => pandoc_json(&result.document, image_mode),
+        // #614: docling's `--to vtt` — a `.vtt` input's cues round-trip.
+        "vtt" => Ok(result.document.export_to_vtt()),
         other => Err(format!(
-            "unknown output format {other:?} (expected \"md\", \"json\", \"doclang\" or \"latex\")"
+            "unknown output format {other:?} (expected \"md\", \"json\", \"text\", \"doclang\", \"latex\", \"html\", \"pandoc\" or \"vtt\")"
         )),
     }
 }
@@ -87,8 +159,16 @@ fn convert_impl(
 /// option: `placeholder` (docling's default `<!-- image -->`) or `embedded`
 /// (`![Image](data:…;base64,…)`, self-contained — the only way to carry pixels
 /// out of a page that cannot write files).
-fn image_mode(images: Option<&str>) -> Result<ImageMode, String> {
-    match images.unwrap_or("placeholder") {
+///
+/// Unset is `placeholder`, except `embedded` for the Pandoc AST (#537): it
+/// feeds `pandoc -t docx`, whose writers drop a picture without a target.
+fn image_mode(images: Option<&str>, to: &str) -> Result<ImageMode, String> {
+    let default = if to == "pandoc" {
+        "embedded"
+    } else {
+        "placeholder"
+    };
+    match images.unwrap_or(default) {
         "placeholder" => Ok(ImageMode::Placeholder),
         "embedded" => Ok(ImageMode::Embedded),
         other => Err(format!(
@@ -97,11 +177,28 @@ fn image_mode(images: Option<&str>) -> Result<ImageMode, String> {
     }
 }
 
+/// Pandoc's JSON AST (#515) with `image_mode`'s pictures — the one output
+/// every conversion path here (declarative, OCR, layout) shares.
+pub(crate) fn pandoc_json(
+    doc: &docling_core::DoclingDocument,
+    image_mode: ImageMode,
+) -> Result<String, String> {
+    let opts = docling_core::pandoc::PandocExportOptions {
+        image_mode,
+        ..Default::default()
+    };
+    doc.export_to_pandoc_json_with(&opts)
+        .map(|(json, _)| json)
+        .map_err(|e| e.to_string())
+}
+
 /// Convert a document (as bytes + filename, the extension drives format
 /// detection) to `to`: `"md"` (Markdown, default), `"json"` (docling-core's
-/// `DoclingDocument` wire format, schema 1.10.0), `"doclang"` (docling's
-/// DocLang XML serialization) or `"latex"` (docling 2.124's LaTeX document,
-/// #317).
+/// `DoclingDocument` wire format, schema 1.10.0), `"text"` (plain text,
+/// docling's `export_to_text`, #613), `"doclang"` (docling's
+/// DocLang XML serialization), `"latex"` (docling 2.124's LaTeX document,
+/// #317), `"html"`, `"pandoc"` (Pandoc's JSON AST for `pandoc -f json`,
+/// #515) or `"vtt"` (WebVTT, docling's `--to vtt`, #614).
 ///
 /// `images` controls how pictures render in Markdown — `"placeholder"`
 /// (default) or `"embedded"` (base64 data URIs), the same option
@@ -130,6 +227,29 @@ pub fn convert(
     .map_err(|e| JsError::new(&e))
 }
 
+/// Convert with the full option set as one JSON object (#577): `to` and
+/// `images` as in [`convert`], plus every conversion option the CLI,
+/// docling-serve, the C ABI and the Python/Node bindings share — the keys of
+/// `docling::ConvertOptions` (`strict`, `compact_tables`,
+/// `page_break_placeholder`, `pages`, `encoding`, `skip_empty_cells`,
+/// `list_attachments`, `xbrl_taxonomy`, …), validated by the same rules.
+/// Options of the ML pipeline are accepted and inert in this build (the
+/// formats they apply to are rejected at convert time). Unknown keys are an
+/// error. `undefined` / `""` means defaults.
+///
+/// ```js
+/// convert_with_options(bytes, file.name, JSON.stringify({ to: "md", strict: true, pages: "1-3" }));
+/// ```
+#[wasm_bindgen]
+pub fn convert_with_options(
+    bytes: &[u8],
+    filename: &str,
+    options_json: Option<String>,
+) -> Result<String, JsError> {
+    let request = parse_request(options_json.as_deref()).map_err(|e| JsError::new(&e))?;
+    convert_request(bytes, filename, request).map_err(|e| JsError::new(&e))
+}
+
 /// The file extensions this build can convert, as a JSON string array —
 /// handy for an `<input accept=…>` filter. PDF converts via its embedded
 /// text layer (`pdf-text`); the remaining ML formats (images, audio, METS)
@@ -140,13 +260,13 @@ pub fn supported_extensions() -> String {
     // formats (images, audio, video, mets tarballs).
     let exts = [
         "docx", "dotx", "docm", "dotm", "pptx", "potx", "ppsx", "pptm", "potm", "ppsm", "md",
-        "txt", "text", "qmd", "rmd", "html", "htm", "xhtml", "xml", "nxml", "dclg", "dclx", "adoc",
-        "asciidoc", "asc", "csv", "tsv", "xlsx", "xlsm", "xlsb", "xltx", "xltm", "odt", "ott",
-        "ods", "ots", "odp", "otp", "sxw", "stw", "sxg", "sxc", "stc", "sxi", "sti", "fodt",
-        "fods", "fodp", "json", "sdw", "sda", "sdd", "vor", "abw", "zabw", "awt", "wpd", "wp",
-        "wp5", "wp6", "wpt", "wps", "dbf", "dif", "slk", "sylk", "wk1", "wk2", "wk3", "wk4", "wks",
-        "wrk", "123", "wq1", "wq2", "wb1", "wb2", "wb3", "qpw", "xlr", "vtt", "tex", "latex",
-        "eml", "epub", "mhtml", "mht", "rtf", "vsdx", "vsdm", "pdf", "djvu", "djv",
+        "markdown", "txt", "text", "qmd", "rmd", "html", "htm", "xhtml", "xml", "nxml", "dclg",
+        "dclx", "adoc", "asciidoc", "asc", "csv", "tsv", "xlsx", "xlsm", "xlsb", "xltx", "xltm",
+        "odt", "ott", "ods", "ots", "odp", "otp", "sxw", "stw", "sxg", "sxc", "stc", "sxi", "sti",
+        "fodt", "fods", "fodp", "json", "sdw", "sda", "sdd", "vor", "abw", "zabw", "awt", "wpd",
+        "wp", "wp5", "wp6", "wpt", "wps", "dbf", "dif", "slk", "sylk", "wk1", "wk2", "wk3", "wk4",
+        "wks", "wrk", "123", "wq1", "wq2", "wb1", "wb2", "wb3", "qpw", "xlr", "vtt", "tex",
+        "latex", "eml", "epub", "mhtml", "mht", "rtf", "vsdx", "vsdm", "pdf", "djvu", "djv",
     ];
     serde_json::to_string(exts.as_slice()).expect("static array serializes")
 }
@@ -170,6 +290,9 @@ mod tests {
         assert!(out.contains("# Title"));
         let json = convert_impl(md, "note.md", Some("json"), None, None, None).unwrap();
         assert!(json.contains("\"schema_name\""));
+        let pandoc = convert_impl(md, "note.md", Some("pandoc"), None, None, None).unwrap();
+        assert!(pandoc.starts_with("{\"pandoc-api-version\":[1,23,1,1]"));
+        assert!(pandoc.contains("\"t\":\"Header\""));
     }
 
     #[test]
@@ -193,9 +316,9 @@ mod tests {
     #[test]
     fn pdf_text_layer_converts() {
         // A text-layer PDF converts via the pure-Rust `pdf-text` path (the
-        // exact `--no-ocr` extraction: flat paragraphs in reading order).
+        // exact `--text-layer-only` extraction: flat paragraphs in reading order).
         // Under `cargo test --workspace`, feature unification swaps in the
-        // full ML pipeline (which needs pdfium + models) — this test is about
+        // full ML pipeline (which needs the models) — this test is about
         // the text-layer arm, so it only runs in the real wasm feature set.
         if docling::PDF_ML_COMPILED {
             return;
@@ -211,17 +334,25 @@ mod tests {
 
     #[test]
     fn scanned_pdf_reports_missing_text_layer() {
-        // A PDF with no embedded text (here: a stub with no content stream)
-        // should explain that OCR needs a native build, not return "".
+        // A PDF with no embedded text (an image-only scan) should explain
+        // that OCR needs a native build, not return "".
         // Text-layer-arm-only, same as `pdf_text_layer_converts`.
         if docling::PDF_ML_COMPILED {
             return;
         }
-        let err = convert_impl(b"%PDF-1.4\n%%EOF", "scan.pdf", None, None, None, None).unwrap_err();
+        let scan = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/data/scanned/sources/ocr_test_raster.pdf"
+        ))
+        .unwrap();
+        let err = convert_impl(&scan, "scan.pdf", None, None, None, None).unwrap_err();
         assert!(
             err.contains("text layer") || err.contains("OCR"),
             "should point at the missing text layer: {err}"
         );
+        // Bytes no reader opens are an error about the file instead.
+        let err = convert_impl(b"%PDF-1.4\n%%EOF", "x.pdf", None, None, None, None).unwrap_err();
+        assert!(err.contains("not a readable PDF"), "{err}");
     }
 
     #[test]
@@ -269,6 +400,36 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("unknown images="), "{err}");
+    }
+
+    /// `convert_with_options` reads the shared option set: a `pages` window
+    /// and `strict` land, a typo is rejected, and the positional `convert`
+    /// arguments are the same request.
+    #[test]
+    fn options_json_is_the_shared_option_set() {
+        let md = b"# Title\n\nHello *world*\n";
+        let req = parse_request(Some(r#"{"to": "json", "strict": true, "pages": "1-2"}"#)).unwrap();
+        assert_eq!(req.to.as_deref(), Some("json"));
+        assert_eq!(req.convert.strict, Some(true));
+        assert_eq!(req.convert.page_range().unwrap(), Some((1, 2)));
+        let out = convert_request(md, "note.md", req).unwrap();
+        assert!(out.contains("\"schema_name\""));
+        let err = parse_request(Some(r#"{"strictness": true}"#)).unwrap_err();
+        assert!(err.contains("unknown field `strictness`"), "{err}");
+        let err = convert_request(
+            md,
+            "note.md",
+            parse_request(Some(r#"{"pages": "0-2"}"#)).unwrap(),
+        )
+        .unwrap_err();
+        assert!(err.contains("pages"), "{err}");
+        assert_eq!(
+            positional_request(None, None, Some(3), Some("<!-- p -->"))
+                .convert
+                .pages
+                .as_deref(),
+            Some("1-3")
+        );
     }
 
     #[test]

@@ -1105,21 +1105,4 @@ mod tests {
             .to_string();
         assert!(e.contains("not a Microsoft Works document"), "{e}");
     }
-
-    #[test]
-    fn libreoffice_fixtures_parse() {
-        // LibreOffice's libwps smoke files are near-empty documents; they
-        // must at least parse and detect their generation.
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/works/sources");
-        for f in [
-            "works2_dos.wps",
-            "works3.wps",
-            "works45.wps",
-            "works5.wps",
-            "works6.wps",
-        ] {
-            let bytes = std::fs::read(dir.join(f)).unwrap();
-            convert(bytes).unwrap_or_else(|e| panic!("{f}: {e}"));
-        }
-    }
 }

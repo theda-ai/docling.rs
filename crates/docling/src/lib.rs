@@ -22,12 +22,20 @@
 //! See `docs/MIGRATION.md` for the architecture, format-by-format parity
 //! status, and how conformance against Python docling is measured.
 
+pub mod archive;
 pub mod chunks;
 mod converter;
 pub mod dclx;
+pub mod email_attachments;
 mod error;
+pub mod fetch;
 mod format;
+// Allocator housekeeping for processes that convert many documents (#669).
+pub mod memory;
+pub mod options;
+mod redact;
 mod result;
+mod sniff;
 mod source;
 #[cfg(feature = "pdf")]
 mod stream;
@@ -38,10 +46,23 @@ pub mod backend;
 #[cfg(feature = "asr")]
 pub mod video;
 
-pub use converter::{parse_page_range, DocumentConverter, DEFAULT_VIDEO_FRAMES};
-pub use error::ConversionError;
-pub use format::InputFormat;
-pub use result::{ConversionResult, ConversionStatus};
+pub use archive::{ArchiveLimits, ArchiveOutcome};
+pub use backend::images::{ImageLimits, ImagePolicy, ImageSources, DEFAULT_MAX_IMAGE_BYTES};
+pub use backend::ipynb::{IpynbBackend, IpynbOutputs};
+#[cfg(feature = "pdf")]
+pub use converter::WarmPipeline;
+pub use converter::{parse_page_range, DocumentConverter, ALL_VIDEO_FRAMES, DEFAULT_VIDEO_FRAMES};
+pub use docling_core::{
+    CustomPattern, ImageRedaction, PiiKind, RedactionOptions, RedactionReport, Replacement,
+};
+pub use email_attachments::{EmailAttachmentInfo, EmailAttachments};
+pub use error::{ConversionError, EncryptionError};
+pub use fetch::FetchPolicy;
+pub use format::{InputFormat, OUTPUT_FORMATS};
+pub use options::{
+    cli_flag, merge_options, ConvertOptions, OptionInfo, OptionsError, PipelineKind, OPTIONS,
+};
+pub use result::{ConversionResult, ConversionStatus, ErrorItem};
 pub use source::SourceDocument;
 #[cfg(feature = "pdf")]
 pub use stream::MarkdownStream;
@@ -50,9 +71,11 @@ pub use stream::MarkdownStream;
 // `result.document.export_to_markdown()` works without an extra import.
 pub use docling_core::base64;
 pub use docling_core::chunker;
+pub use docling_core::pandoc;
 pub use docling_core::{
-    ConfidenceReport, DocItemLabel, DoclingDocument, ImageMode, MarkdownStreamer, Node,
-    PictureImage, QualityGrade, Table,
+    ConfidenceReport, ContentLayer, ContentLayers, DocItemLabel, DoclingDocument,
+    HtmlExportOptions, ImageMode, MarkdownExportOptions, MarkdownStreamer, Node, PictureImage,
+    QualityGrade, Table,
 };
 
 // The reusable PDF/image pipeline (models loaded once, reused across documents),
@@ -60,15 +83,40 @@ pub use docling_core::{
 #[cfg(feature = "pdf")]
 pub use docling_pdf::{
     model_inventory, page_count as pdf_page_count, render_pages as render_pdf_pages,
-    tesseract_lang_arg, EnrichmentOptions, HeadingHierarchyOptions, ModelEntry, OcrEngine, OcrLang,
-    OcrMode, Pipeline, RenderedPage,
+    tesseract_lang_arg, EnrichmentOptions, HeadingHierarchyOptions, ImageOutput, ModelEntry,
+    OcrEngine, OcrLang, OcrMode, PdfError, Pipeline, RenderedPage,
 };
 // The pure-Rust text-layer extraction (no pdfium, no models) — compiled with
-// either PDF feature. The CLI uses it as the `--no-ocr` fallback when the
+// either PDF feature. The CLI uses it as the `--text-layer-only` fallback when the
 // runtime assets are missing (launch blocker: a bare `cargo install` ships
 // neither pdfium nor the models).
 #[cfg(any(feature = "pdf", feature = "pdf-text"))]
 pub use docling_pdf::convert_text_layer_pages as pdf_text_layer_pages;
+
+/// Re-execute under an absolute `argv[0]` so ONNX Runtime finds its GPU
+/// provider libraries next to the binary (#664) — see
+/// `docling_onnx::reexec_for_provider_libraries`. Binaries call it first
+/// thing in `main`; a no-op unless a CUDA/TensorRT build was started by bare
+/// name on Linux.
+pub fn reexec_for_provider_libraries() {
+    #[cfg(feature = "pdf")]
+    docling_pdf::ep::reexec_for_provider_libraries();
+}
+
+/// The ONNX Runtime the ML stages run on, as `(major, minor)` — the
+/// statically linked one (1.31 since #523), or the library an
+/// `ort-load-dynamic` build loaded. `None` without the `pdf` feature or
+/// when the runtime cannot be asked.
+pub fn onnx_runtime_version() -> Option<(u32, u32)> {
+    #[cfg(feature = "pdf")]
+    {
+        docling_pdf::ep::runtime_version()
+    }
+    #[cfg(not(feature = "pdf"))]
+    {
+        None
+    }
+}
 
 /// Which PDF conversion this build compiled in: the full ML pipeline (`pdf`
 /// feature), the pure-Rust text-layer path (`pdf-text`, the wasm32 build), or

@@ -22,13 +22,13 @@ fn fixtures_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/svg")
 }
 
-/// The text-extraction converter: `no_ocr` short-circuits SVG away from the
+/// The text-extraction converter: `text_layer_only` short-circuits SVG away from the
 /// rasterizer on every build flavor, so this test is deterministic with or
 /// without models installed.
 fn text_convert(src: &Path) -> String {
     let source = SourceDocument::from_file(src).expect("svg fixture");
     DocumentConverter::new()
-        .no_ocr(true)
+        .text_layer_only(true)
         .convert(source)
         .expect("svg text extraction")
         .document
@@ -75,7 +75,7 @@ fn svg_without_text_says_why_it_needs_ml() {
     let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
         <rect width="10" height="10" fill="red"/></svg>"#;
     let err = DocumentConverter::new()
-        .no_ocr(true)
+        .text_layer_only(true)
         .convert(SourceDocument::from_bytes(
             "shapes",
             InputFormat::Svg,
@@ -98,7 +98,7 @@ fn streaming_matches_buffered_text_path() {
         let source = SourceDocument::from_file(&path).unwrap();
         let mut streamed = String::new();
         for chunk in DocumentConverter::new()
-            .no_ocr(true)
+            .text_layer_only(true)
             .convert_streaming(source)
             .expect("stream")
         {
@@ -113,7 +113,7 @@ fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// The rasterize route needs the layout + OCR models (no pdfium — the PNG
+/// The rasterize route needs the layout + OCR models (the PNG
 /// decodes through the `image` crate). Model resolution is CWD-relative, so
 /// this also moves the process to the repo root, like `scanned.rs`.
 fn models_ready() -> bool {

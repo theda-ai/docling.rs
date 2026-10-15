@@ -21,21 +21,22 @@
 //! walks read the file the same way; only the item structure differs.
 //!
 //! What cannot be reproduced without upstream's optional tools is noted
-//! where it happens: a blip-less DrawingML shape, an EMF/WMF picture and a
-//! chart image are rendered through LibreOffice upstream and become pictures
-//! with an `image` payload; here the same pictures carry no payload.
+//! where it happens: a blip-less DrawingML shape and a chart image are
+//! rendered through LibreOffice upstream and become pictures with an `image`
+//! payload; here the same pictures carry no payload. An EMF/WMF picture is
+//! rendered to PNG in-process (`metafile.rs`, #536).
 
 use std::collections::{HashMap, HashSet};
 
-use docling_core::tree::{Formatting, ItemTree, ListMeta, TreeKind};
+use docling_core::tree::{Formatting, ItemTree, ListMeta, TreeKind, TreeNote};
 use docling_core::{ContentLayer, PictureImage, Script, Table, TableCell};
 use roxmltree::{Document, Node as XmlNode, NodeId};
 
 use super::docx::{
     attr, build_enum_marker, chart_rels, child_elements, clean_checkbox_symbols,
-    detect_code_language, get_list_counter, header_footer_parts, in_textbox, is_code_by_font,
-    is_code_style, is_title_style, numbered_heading_text, on_off, part_rels, row_cells,
-    row_grid_offsets, run_child_text, style_numbering, Ctx, MAX_TABLE_DEPTH,
+    detect_code_language, footnote_texts, get_list_counter, header_footer_parts, in_textbox,
+    is_code_by_font, is_code_style, is_title_style, numbered_heading_text, on_off, part_rels,
+    row_cells, row_grid_offsets, run_child_text, style_numbering, t_text, Ctx, MAX_TABLE_DEPTH,
 };
 use super::html_tree::docling_href;
 use super::ooxml::Package;
@@ -50,6 +51,17 @@ struct Part {
     text: String,
     fmt: Option<Formatting>,
     link: Option<String>,
+}
+
+/// A `w:footnoteReference` / `w:endnoteReference` placed in a text item
+/// ([`Walker::note_calls`]).
+struct NoteCall {
+    /// The text item the call sits in.
+    item: usize,
+    /// Its position, in chars into that item's text.
+    offset: usize,
+    kind: &'static str,
+    id: String,
 }
 
 /// A paragraph's identity: roxmltree node ids are per parsed document, and
@@ -76,6 +88,7 @@ struct ListCache {
 struct SavedListCtx {
     history: Vec<Hist>,
     level_at_new_list: Option<i64>,
+    level_start_ilevel: i64,
     parents: Vec<Option<usize>>,
     cache: Option<ListCache>,
 }
@@ -86,6 +99,9 @@ struct Walker {
     parents: Vec<Option<usize>>,
     level: i64,
     level_at_new_list: Option<i64>,
+    /// The `w:ilvl` the current list opened at (docling#4188): a list that
+    /// starts above level 0 still lands at `level_at_new_list`.
+    level_start_ilevel: i64,
     numbered_headers: HashMap<u8, u64>,
     list_counters: HashMap<(String, i64), i64>,
     started_numids: HashSet<String>,
@@ -101,8 +117,88 @@ struct Walker {
     pending_code_blank_lines: usize,
     /// `paragraph_to_items`: the items each paragraph produced.
     para_items: HashMap<Key, Vec<usize>>,
+    /// The `#/texts/N` index each deleted blank spacer had when it was
+    /// created — the stale ref a rich cell's `provs_in_cell` still holds for
+    /// it (#527, see [`Walker::resolve_cell_provs`]).
+    stale: HashMap<usize, usize>,
+    /// The body element (paragraph, table, …) each item was created for —
+    /// the innermost one, for [`rich_cell_layout`].
+    item_src: HashMap<usize, Key>,
+    /// Footnote / endnote references met in the body, anchored to the text
+    /// item that holds them (#538) — resolved to the note bodies once those
+    /// are read.
+    note_calls: Vec<NoteCall>,
     /// `paragraph_comment_map`, in insertion order.
     para_comments: Vec<(Key, Vec<String>)>,
+}
+
+/// The block layout docling's Markdown gives a rich table cell when it
+/// differs from the cell's paragraph order (#527): each block is the body
+/// elements of one top-level item of the cell group, in group order — a
+/// list group's items, or a single paragraph / nested table. Upstream's
+/// stale `provs_in_cell` refs ([`Walker::resolve_cell_provs`]) pull the list
+/// item after a deleted blank spacer out of its list to where the blank
+/// stood: `- First item` / blank / `- Second item` becomes two lists, and
+/// with a third item directly after the second, that third one stays in the
+/// first list ahead of the second. Walks the cell on its own, as upstream's
+/// `_isolated_list_context` does; `None` when no blank was deleted (the
+/// cell's own order holds) or when an item cannot be traced to exactly one
+/// element (the caller keeps its rendering).
+pub(super) fn rich_cell_layout(tc: XmlNode, ctx: &Ctx) -> Option<Vec<Vec<NodeId>>> {
+    let mut w = Walker::new();
+    let provs = w.walk_linear(tc, ctx);
+    if !provs.iter().any(|&p| w.tree.items[p].deleted) {
+        return None;
+    }
+    let g = w.add(None, None, group_kind("unspecified", "rich_cell"));
+    for p in w.resolve_cell_provs(&provs) {
+        w.tree.reparent(p, Some(g));
+    }
+    let src = |id: usize| w.item_src.get(&id).map(|k| k.1);
+    let mut seen = HashSet::new();
+    let mut blocks = Vec::new();
+    for &c in &w.tree.items[g].children {
+        let block: Vec<NodeId> = match &w.tree.items[c].kind {
+            TreeKind::Group { label, .. } if label == "list" => w.tree.items[c]
+                .children
+                .iter()
+                .map(|&i| src(i))
+                .collect::<Option<_>>()?,
+            _ => vec![src(c)?],
+        };
+        if !block.iter().all(|n| seen.insert(*n)) {
+            return None;
+        }
+        blocks.push(block);
+    }
+    Some(blocks)
+}
+
+/// How many empty inline groups a rich table cell leaves behind on the body
+/// (#527). `_create_or_reuse_parent` opens an inline group on the current
+/// parent for every paragraph with more than one formatting run and adds
+/// the runs to it, but the cell walk returns the runs themselves as
+/// `provs_in_cell`, and `_group_cell_elements` moves them into the cell
+/// group: the inline group stays where it was opened, empty, after the
+/// table. Markdown, HTML and JSON-derived output never show it; DocLang
+/// writes it as `<text></text>`.
+pub(super) fn rich_cell_orphan_groups(tc: XmlNode, ctx: &Ctx) -> usize {
+    let mut w = Walker::new();
+    let provs = w.walk_linear(tc, ctx);
+    let g = w.add(None, None, group_kind("unspecified", "rich_cell"));
+    for p in w.resolve_cell_provs(&provs) {
+        w.tree.reparent(p, Some(g));
+    }
+    w.tree
+        .items
+        .iter()
+        .filter(|it| {
+            !it.deleted
+                && it.parent.is_none()
+                && it.children.is_empty()
+                && matches!(&it.kind, TreeKind::Group { label, .. } if label == "inline")
+        })
+        .count()
 }
 
 /// Build docling's item tree for a parsed `word/document.xml` body, its
@@ -118,6 +214,28 @@ pub(super) fn build_tree(
     w.walk_linear(body, ctx);
     w.add_header_footer(pkg, body, ctx);
     w.add_comments(comments);
+    // `_add_footnotes_and_endnotes` (docling#4374): after the comments, each
+    // note's body a furniture-layer `footnote` text on the body.
+    let mut bodies: HashMap<(&'static str, String), (usize, String)> = HashMap::new();
+    for note in footnote_texts(pkg) {
+        let id = w.add(
+            None,
+            Some(ContentLayer::Furniture),
+            text_kind("footnote", &note.text, None, None),
+        );
+        bodies.insert((note.kind, note.id), (id, note.text));
+    }
+    // #538: hang each note on the text item that calls it, for the Pandoc
+    // AST's `Note` (docling's JSON keeps the bodies unlinked).
+    for call in std::mem::take(&mut w.note_calls) {
+        if let Some((body, text)) = bodies.get(&(call.kind, call.id)) {
+            w.tree.items[call.item].notes.push(TreeNote {
+                offset: call.offset,
+                text: text.clone(),
+            });
+            w.tree.items[*body].note_body = true;
+        }
+    }
     w.tree
 }
 
@@ -142,10 +260,81 @@ fn run_text(r: XmlNode) -> String {
     child_elements(r).map(run_child_text).collect()
 }
 
+/// The `w:footnoteReference` / `w:endnoteReference` calls of a paragraph as
+/// `(offset, kind, w:id)`, the offset in chars of the paragraph text that
+/// [`Walker::iter_paragraph_content`] reads — the same traversal: runs and
+/// hyperlinks directly under the paragraph (through `smartTag` / `customXml`
+/// / `ins` / `moveTo` / `fldSimple`), a content control's text counted whole
+/// (#538).
+fn note_references(p: XmlNode) -> Vec<(usize, &'static str, String)> {
+    fn walk(node: XmlNode, acc: &mut usize, out: &mut Vec<(usize, &'static str, String)>) {
+        for c in child_elements(node) {
+            if is_math(c) {
+                continue;
+            }
+            match c.tag_name().name() {
+                "smartTag" | "customXml" | "ins" | "moveTo" | "fldSimple" => walk(c, acc, out),
+                "r" => run(c, acc, out),
+                "hyperlink" => {
+                    for r in c.children().filter(|n| n.has_tag_name("r") && !is_math(*n)) {
+                        run(r, acc, out);
+                    }
+                }
+                "sdt" => {
+                    *acc += c
+                        .descendants()
+                        .filter(|n| n.has_tag_name("t") && !is_math(*n))
+                        .filter(|n| n.ancestors().any(|a| a.has_tag_name("sdtContent")))
+                        .map(|t| t_text(t).chars().count())
+                        .sum::<usize>();
+                }
+                _ => {}
+            }
+        }
+    }
+    fn run(r: XmlNode, acc: &mut usize, out: &mut Vec<(usize, &'static str, String)>) {
+        for c in child_elements(r) {
+            let kind = match c.tag_name().name() {
+                "footnoteReference" => "footnote",
+                "endnoteReference" => "endnote",
+                _ => {
+                    *acc += run_child_text(c).chars().count();
+                    continue;
+                }
+            };
+            if let Some(id) = attr(c, "id") {
+                out.push((*acc, kind, id.to_string()));
+            }
+        }
+    }
+    if !p
+        .descendants()
+        .any(|n| n.has_tag_name("footnoteReference") || n.has_tag_name("endnoteReference"))
+    {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    walk(p, &mut 0, &mut out);
+    out
+}
+
 /// python-docx's `Paragraph.text`: the runs and hyperlinks directly under the
 /// paragraph (`w:r | w:hyperlink`), nothing inside content controls or
 /// tracked insertions.
 fn py_paragraph_text(p: XmlNode) -> String {
+    paragraph_text(p, false)
+}
+
+/// The runs and hyperlinks of a paragraph; with `accepted`, also those inside
+/// tracked insertions and move destinations (`w:ins`, `w:moveTo`) — the
+/// paragraph as Word shows it with the changes accepted — and inside the
+/// inline wrappers Word puts around a span (`w:sdt`, `w:customXml`,
+/// `w:smartTag`, `w:fldSimple`; #628): python-docx's `CT_P.text` reads
+/// `w:r | w:hyperlink` only, so a plain cell whose text sat in a content
+/// control or a field result came out empty in docling's JSON while the
+/// Markdown walk (`push_inline_text`) printed it — the same loss #545 fixed
+/// for tracked changes, found by the chain-parity matrix.
+fn paragraph_text(p: XmlNode, accepted: bool) -> String {
     let mut out = String::new();
     for c in child_elements(p) {
         if is_math(c) {
@@ -158,17 +347,35 @@ fn py_paragraph_text(p: XmlNode) -> String {
                     out.push_str(&run_text(r));
                 }
             }
+            "ins" | "moveTo" | "customXml" | "smartTag" | "fldSimple" if accepted => {
+                out.push_str(&paragraph_text(c, true))
+            }
+            // A checkbox control's glyph (`w14:checkbox`, its `w:t` is ☐/☒)
+            // stays out as in python-docx: the state is already the cell's
+            // `checkbox_selected` child items, and upstream's cell `text`
+            // for the mirrored `docx_checkboxes` is matched exactly.
+            "sdt" if accepted && !c.descendants().any(|n| n.has_tag_name("checkbox")) => {
+                for content in c.children().filter(|n| n.has_tag_name("sdtContent")) {
+                    out.push_str(&paragraph_text(content, true));
+                }
+            }
             _ => {}
         }
     }
     out
 }
 
-/// python-docx's `_Cell.text`: the cell's direct paragraphs joined with `\n`.
+/// A cell's text: python-docx's `_Cell.text` (its direct paragraphs joined
+/// with `\n`), except that tracked insertions and move destinations count
+/// (#545), and so does text behind an inline content control, custom XML
+/// tag, smart tag or simple field (#628). python-docx skips them, so docling
+/// writes an empty cell for one whose text was inserted or moved there with
+/// track changes on, and — a plain cell having no child items — the JSON
+/// lost that text outright; Markdown always printed it.
 fn py_cell_text(tc: XmlNode) -> String {
     tc.children()
         .filter(|n| n.has_tag_name("p"))
-        .map(py_paragraph_text)
+        .map(|p| paragraph_text(p, true))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -263,6 +470,7 @@ impl Walker {
             parents: vec![None; LEVELS],
             level: 0,
             level_at_new_list: None,
+            level_start_ilevel: 0,
             numbered_headers: HashMap::new(),
             list_counters: HashMap::new(),
             started_numids: HashSet::new(),
@@ -277,6 +485,9 @@ impl Walker {
             pending_code_blank_lines: 0,
             para_items: HashMap::new(),
             para_comments: Vec::new(),
+            stale: HashMap::new(),
+            item_src: HashMap::new(),
+            note_calls: Vec::new(),
         }
     }
 
@@ -380,20 +591,39 @@ impl Walker {
         refs: &mut Vec<usize>,
     ) -> usize {
         if self.can_reuse_list_group(numid, parent) {
-            // Reusing the group drops the empty text item a blank spacer
-            // paragraph added between the last list item and this one.
-            if let Some(last) = self.tree.last_text() {
-                let blank = match &self.tree.items[last].kind {
-                    TreeKind::Text { text, .. } | TreeKind::Code { text, .. } => {
-                        text.trim().is_empty()
-                    }
-                    _ => false,
-                };
+            // Reuse only if nothing but empty paragraphs (added when the list
+            // was closed) follows the cached group in its parent; otherwise
+            // the new items would land before the intervening content, e.g.
+            // a table (docling#4305). The blanks are dropped on reuse.
+            let group = self.cache.as_ref().map(|c| c.group).unwrap_or(0);
+            let container: Vec<usize> = match parent {
+                Some(p) => self.tree.items[p].children.clone(),
+                None => (0..self.tree.items.len())
+                    .filter(|&i| self.tree.items[i].parent.is_none())
+                    .collect(),
+            };
+            let mut trailing_empty: Vec<usize> = Vec::new();
+            for &id in container.iter().rev() {
+                let blank = matches!(&self.tree.items[id].kind,
+                    TreeKind::Text { text, .. } if text.trim().is_empty());
                 if blank {
-                    self.tree.delete(last);
+                    trailing_empty.push(id);
+                    continue;
                 }
+                if id == group {
+                    // `delete_items` takes the whole batch at once: every
+                    // blank's index is the one it was created with.
+                    for &blank in &trailing_empty {
+                        let at = self.tree.bucket_index(blank);
+                        self.stale.insert(blank, at);
+                    }
+                    for blank in trailing_empty {
+                        self.tree.delete(blank);
+                    }
+                    return group;
+                }
+                break;
             }
-            return self.cache.as_ref().map(|c| c.group).unwrap_or(0);
         }
         let g = self.add(parent, self.layer, group_kind("list", "list"));
         refs.push(g);
@@ -409,6 +639,7 @@ impl Walker {
         let saved = SavedListCtx {
             history: self.history.clone(),
             level_at_new_list: self.level_at_new_list,
+            level_start_ilevel: self.level_start_ilevel,
             parents: self.parents.clone(),
             cache: self.cache.clone(),
         };
@@ -419,6 +650,7 @@ impl Walker {
     fn restore_list_ctx(&mut self, saved: SavedListCtx) {
         self.history = saved.history;
         self.level_at_new_list = saved.level_at_new_list;
+        self.level_start_ilevel = saved.level_start_ilevel;
         self.parents = saved.parents;
         self.cache = saved.cache;
     }
@@ -442,11 +674,16 @@ impl Walker {
         let prop = |name: &str| rpr.and_then(|pr| pr.children().find(|n| n.has_tag_name(name)));
         let mut bold = prop("b").is_some_and(|b| on_off(attr(b, "val")));
         let raw_on = |n: XmlNode| !matches!(attr(n, "val"), Some("0" | "false"));
+        // `<w:bCs>` (complex-script bold) is deliberately not a bold signal
+        // here or in the paragraph mark, as in docling 2.133 (#587): Word
+        // emits it as a font-theme artefact next to `w:szCs` / `rFonts
+        // cstheme` without the user applying bold, and writes `<w:b>` even
+        // for Arabic text when they do — so `<w:b>` alone is reliable. The
+        // Markdown walk (`docx.rs`) never read `bCs`; reading it here made a
+        // plain cell a RichTableCell with a `<strong>` the document has not.
         if !bold {
-            // Any `<w:b>` / `<w:bCs>` in the run, then the paragraph mark's.
-            bold = r
-                .descendants()
-                .any(|n| (n.has_tag_name("b") || n.has_tag_name("bCs")) && raw_on(n));
+            // Any `<w:b>` in the run, then the paragraph mark's.
+            bold = r.descendants().any(|n| n.has_tag_name("b") && raw_on(n));
         }
         if !bold {
             if let Some(owner) = ppr_owner {
@@ -454,10 +691,7 @@ impl Walker {
                     .children()
                     .find(|n| n.has_tag_name("pPr"))
                     .and_then(|pr| pr.children().find(|n| n.has_tag_name("rPr")))
-                    .is_some_and(|rp| {
-                        rp.children()
-                            .any(|n| (n.has_tag_name("b") || n.has_tag_name("bCs")) && raw_on(n))
-                    });
+                    .is_some_and(|rp| rp.children().any(|n| n.has_tag_name("b") && raw_on(n)));
             }
         }
         if !bold {
@@ -509,13 +743,15 @@ impl Walker {
 
     /// `_iter_paragraph_content`: one part per run, hyperlink or content
     /// control, recursing through `smartTag` / `customXml` / `ins` /
-    /// `fldSimple` wrappers only.
+    /// `fldSimple` wrappers only — and `moveTo`, a tracked move's destination,
+    /// which docling skips (its text vanished, #545; the source `moveFrom`
+    /// stays out, like a deletion).
     fn iter_paragraph_content(&self, p: XmlNode, ctx: &Ctx) -> Vec<Part> {
         fn children_recursive<'a, 'i>(node: XmlNode<'a, 'i>, out: &mut Vec<XmlNode<'a, 'i>>) {
             for c in child_elements(node) {
                 if matches!(
                     c.tag_name().name(),
-                    "smartTag" | "customXml" | "ins" | "fldSimple"
+                    "smartTag" | "customXml" | "ins" | "moveTo" | "fldSimple"
                 ) && !is_math(c)
                 {
                     children_recursive(c, out);
@@ -542,7 +778,7 @@ impl Walker {
                     let text: String = child
                         .descendants()
                         .filter(|n| n.has_tag_name("t") && !is_math(*n) && in_content(*n))
-                        .filter_map(|n| n.text())
+                        .map(t_text)
                         .collect();
                     if text.is_empty() {
                         continue;
@@ -645,7 +881,7 @@ fn paragraph_elements(content: &[Part]) -> Vec<Part> {
 /// reconstruct it.
 fn equations_in_text(element: XmlNode, text: &str) -> (String, Vec<String>) {
     {
-        let mut only_texts: Vec<&str> = Vec::new();
+        let mut only_texts: Vec<String> = Vec::new();
         let mut only_equations: Vec<String> = Vec::new();
         let mut texts_and_equations: Vec<String> = Vec::new();
         let is_omath = |n: XmlNode| n.has_tag_name("oMath") && is_math(n);
@@ -667,20 +903,18 @@ fn equations_in_text(element: XmlNode, text: &str) -> (String, Vec<String>) {
                         .descendants()
                         .filter(|n| n.has_tag_name("t") && !is_math(*n))
                     {
-                        if let Some(s) = t.text() {
-                            only_texts.push(s);
-                            texts_and_equations.push(s.to_string());
-                        }
+                        let s = t_text(t);
+                        only_texts.push(s.to_string());
+                        texts_and_equations.push(s.into_owned());
                     }
                 }
             }
         } else {
             for n in element.descendants() {
                 if n.has_tag_name("t") && !is_math(n) {
-                    if let Some(s) = n.text() {
-                        only_texts.push(s);
-                        texts_and_equations.push(s.to_string());
-                    }
+                    let s = t_text(n);
+                    only_texts.push(s.to_string());
+                    texts_and_equations.push(s.into_owned());
                 } else if is_omath(n) {
                     push_eq(n, &mut only_equations, &mut texts_and_equations);
                 }
@@ -866,12 +1100,42 @@ impl Walker {
         })
     }
 
+    /// What each of a rich cell's `provs_in_cell` refs points at by the time
+    /// `_group_cell_elements` resolves them (#527). Upstream collects the refs
+    /// as the cell is walked, but a list resumed after blank spacer
+    /// paragraphs deletes those blanks (`delete_items`), which renumbers
+    /// `doc.texts`: the blank's ref, `#/texts/K`, now resolves to whatever
+    /// text item took index K — the list item that followed it. That item is
+    /// pulled out of its list group into the cell group at the blank's
+    /// position (and later wrapped in a list group of its own by docling-core,
+    /// [`ItemTree::wrap_misplaced_list_items`]). A stale index past the end
+    /// resolves to nothing — upstream would fail the conversion there.
+    fn resolve_cell_provs(&self, provs: &[usize]) -> Vec<usize> {
+        provs
+            .iter()
+            .filter_map(|&p| {
+                if !self.tree.items[p].deleted {
+                    return Some(p);
+                }
+                let k = *self.stale.get(&p)?;
+                (0..self.tree.items.len())
+                    .filter(|&i| {
+                        let it = &self.tree.items[i];
+                        !it.deleted
+                            && matches!(it.kind, TreeKind::Text { .. } | TreeKind::Code { .. })
+                    })
+                    .nth(k)
+            })
+            .collect()
+    }
+
     // ----- the walk -----------------------------------------------------------
 
     /// `_walk_linear` over a container's element children.
     fn walk_linear(&mut self, container: XmlNode, ctx: &Ctx) -> Vec<usize> {
         let mut added: Vec<usize> = Vec::new();
         for element in child_elements(container) {
+            let first_new = self.tree.items.len();
             let tag = element.tag_name().name();
             let blips: Vec<XmlNode> = element
                 .descendants()
@@ -942,6 +1206,9 @@ impl Walker {
                 }
             } else if tag == "p" {
                 added.extend(self.handle_text_elements(element, ctx, false));
+            }
+            for id in first_new..self.tree.items.len() {
+                self.item_src.entry(id).or_insert(key);
             }
         }
         added
@@ -1095,18 +1362,11 @@ impl Walker {
             all.extend(ps);
         }
 
-        let mut seen_text: HashSet<String> = HashSet::new();
-        let mut seen_empty: HashSet<usize> = HashSet::new();
-        for (p, pos) in all {
-            let text = py_paragraph_text(p);
-            let t = text.trim();
-            if !t.is_empty() {
-                if !seen_text.insert(t.to_string()) {
-                    continue;
-                }
-            } else if !seen_empty.insert(pos) {
-                continue;
-            }
+        // No text-keyed dedup (docling's `_handle_textbox_content` has one):
+        // it existed for the `mc:AlternateContent` duplicate of a text box,
+        // which is settled before parsing (`mc.rs`, #572), and it dropped a
+        // paragraph legitimately repeated in a box along with it.
+        for (p, _pos) in all {
             refs.extend(self.handle_text_elements(p, ctx, false));
             let blips: Vec<XmlNode> = p.descendants().filter(|n| n.has_tag_name("blip")).collect();
             let vml: Vec<XmlNode> = p
@@ -1162,6 +1422,7 @@ impl Walker {
                     captions: Vec::new(),
                     image: img,
                     classification: None,
+                    description: None,
                     confidence: None,
                     chart: None,
                     dpi: None,
@@ -1183,6 +1444,7 @@ impl Walker {
                 captions: Vec::new(),
                 image: None,
                 classification: None,
+                description: None,
                 confidence: None,
                 chart: None,
                 dpi: None,
@@ -1217,6 +1479,7 @@ impl Walker {
                 captions: caption.into_iter().collect(),
                 image: None,
                 classification: spec.map(|(kind, _, _)| kind.clone()),
+                description: None,
                 confidence: None,
                 chart: spec.map(|(_, _, table)| table.clone()),
                 dpi: None,
@@ -1345,7 +1608,7 @@ impl Walker {
                         row_idx
                     );
                     let g = self.add(Some(table_id), self.layer, group_kind("unspecified", &name));
-                    for p in provs {
+                    for p in self.resolve_cell_provs(&provs) {
                         self.tree.reparent(p, Some(g));
                     }
                     group = Some(g);
@@ -1402,6 +1665,48 @@ impl Walker {
 
     /// `_handle_text_elements`.
     fn handle_text_elements(&mut self, p: XmlNode, ctx: &Ctx, skip_empty_text: bool) -> Vec<usize> {
+        let calls = note_references(p);
+        let first_new = self.tree.items.len();
+        let refs = self.handle_text_elements_inner(p, ctx, skip_empty_text);
+        if !calls.is_empty() {
+            let full_text: String = self
+                .iter_paragraph_content(p, ctx)
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect();
+            self.anchor_note_calls(&full_text, first_new, calls);
+        }
+        refs
+    }
+
+    /// #538: place each note reference of a paragraph in the text item it
+    /// falls in ([`ItemTree::place_note_calls`]).
+    fn anchor_note_calls(
+        &mut self,
+        full_text: &str,
+        first_new: usize,
+        calls: Vec<(usize, &'static str, String)>,
+    ) {
+        let offsets: Vec<usize> = calls.iter().map(|c| c.0).collect();
+        let placed = self.tree.place_note_calls(first_new, full_text, &offsets);
+        for ((_, kind, id), place) in calls.into_iter().zip(placed) {
+            if let Some((item, offset)) = place {
+                self.note_calls.push(NoteCall {
+                    item,
+                    offset,
+                    kind,
+                    id,
+                });
+            }
+        }
+    }
+
+    fn handle_text_elements_inner(
+        &mut self,
+        p: XmlNode,
+        ctx: &Ctx,
+        skip_empty_text: bool,
+    ) -> Vec<usize> {
         let mut refs: Vec<usize> = Vec::new();
         let content = self.iter_paragraph_content(p, ctx);
         let elements = self.paragraph_elements(&content);
@@ -1483,10 +1788,18 @@ impl Walker {
 
         if p_style_id == "Title" {
             self.clear_parents_from(0);
+            // The parents stack is cleared here, so the list context goes
+            // with it (docling#4282) — the next list item opens fresh.
+            self.level_at_new_list = None;
             let te = self.add(None, self.layer, text_kind("title", &text, None, None));
             self.set_parent(0, Some(te));
             refs.push(te);
         } else if p_style_id.contains("Heading") {
+            // `_add_heading` clears the parents tail; a heading whose style
+            // carries `w:numPr` used to leave `level_at_new_list` pointing at
+            // a slot that no longer exists, and the next list item hung its
+            // group off the body root (docling#4282).
+            self.level_at_new_list = None;
             let is_numbered_style = numid
                 .as_deref()
                 .is_some_and(|n| Self::has_visible_numbering(n, ilevel.unwrap_or(0), ctx));
@@ -1729,6 +2042,7 @@ impl Walker {
         if prev_numid.is_none() || (same && self.level_at_new_list.is_none()) {
             // Open a new list.
             self.level_at_new_list = Some(level);
+            self.level_start_ilevel = ilevel;
             self.start_numid(numid);
             let parent = self.parent_at(level - 1);
             let g = self.get_or_create_list_group(numid, parent, &mut refs);
@@ -1740,9 +2054,8 @@ impl Walker {
             && prev_indent.is_some_and(|pi| pi < ilevel)
         {
             // Open an indented list.
-            let lanl = self.level_at_new_list.unwrap_or(0);
             let pi = prev_indent.unwrap_or(0);
-            for i in (lanl + pi + 1)..(lanl + ilevel + 1) {
+            for i in (self.slot_for(pi) + 1)..(self.slot_for(ilevel) + 1) {
                 let g = self.add(
                     self.parent_at(i - 1),
                     self.layer,
@@ -1751,28 +2064,28 @@ impl Walker {
                 self.set_parent(i, Some(g));
                 refs.push(g);
             }
-            use_level = lanl + ilevel;
+            use_level = self.slot_for(ilevel);
         } else if same
             && self.level_at_new_list.is_some()
             && prev_indent.is_some_and(|pi| ilevel < pi)
         {
             // Close list levels.
-            let lanl = self.level_at_new_list.unwrap_or(0);
-            self.clear_parents_from(lanl + ilevel + 1);
-            use_level = lanl + ilevel;
+            self.clear_parents_from(self.slot_for(ilevel) + 1);
+            use_level = self.slot_for(ilevel);
         } else if same && self.is_list_group(self.parent_at(level - 1)) {
             // Continue the existing list.
             use_level = level - 1;
         } else if !same || !self.is_list_group(self.parent_at(level - 1)) {
             // New list sequence.
             match self.level_at_new_list {
-                Some(lanl) => {
-                    use_level = lanl + ilevel;
+                Some(_) => {
+                    use_level = self.slot_for(ilevel);
                     self.clear_parents_from(use_level + 1);
                 }
                 None => {
                     use_level = level;
                     self.level_at_new_list = Some(use_level);
+                    self.level_start_ilevel = ilevel;
                 }
             }
             self.start_numid(numid);
@@ -1784,6 +2097,15 @@ impl Walker {
             use_level = level - 1;
         }
         (refs, use_level)
+    }
+
+    /// `_slot_for` (docling#4188): the parents slot for a Word `w:ilvl`. A
+    /// list that starts at level 0 maps to `level_at_new_list + ilvl`; one
+    /// that starts higher subtracts its start level so its first item lands
+    /// at `level_at_new_list`, and an item shallower than the start level (a
+    /// resumed list returning to level 0) clamps to the list base.
+    fn slot_for(&self, word_ilevel: i64) -> i64 {
+        self.level_at_new_list.unwrap_or(0) + (word_ilevel - self.level_start_ilevel).max(0)
     }
 
     /// Counters reset only the first time a `numId` is opened: a `numId`
@@ -1943,6 +2265,7 @@ impl Walker {
             let Some(xml) = pkg.read(&part) else {
                 continue;
             };
+            let xml = super::mc::resolve_alternate_content(&xml);
             let Ok(dom) = Document::parse(&xml) else {
                 continue;
             };
@@ -2210,6 +2533,7 @@ mod tests {
             TreeKind::Table { .. } => "table".into(),
             TreeKind::Picture { .. } => "picture".into(),
             TreeKind::FieldRegion { .. } => "field_region".into(),
+            TreeKind::KeyValueGraph { .. } => "key_value_region".into(),
         }
     }
 

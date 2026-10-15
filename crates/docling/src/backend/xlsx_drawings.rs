@@ -296,6 +296,7 @@ pub fn chart_table_from_columns(
         cells: None,
         caption: None,
         caption_parent: Default::default(),
+        caption_location: None,
     })
 }
 
@@ -414,11 +415,13 @@ pub fn parse_legacy_comments(xml: &str) -> Vec<(String, String, String)> {
 pub fn parse_threaded_comments(
     xml: &str,
     persons: &HashMap<String, String>,
-) -> HashMap<String, (String, String, Option<String>)> {
+) -> HashMap<String, Vec<(String, String, Option<String>)>> {
     let Ok(dom) = Document::parse(xml) else {
         return HashMap::new();
     };
-    let mut out = HashMap::new();
+    // Per cell: (id, parentId, (author, text, time)) in document order.
+    let mut per_cell: HashMap<String, Vec<ThreadEntry>> = HashMap::new();
+    let mut order: Vec<String> = Vec::new();
     for c in dom
         .descendants()
         .filter(|n| n.has_tag_name("threadedComment"))
@@ -439,9 +442,80 @@ pub fn parse_threaded_comments(
             .unwrap_or("")
             .to_string();
         let time = attr("dT").map(|t| format_comment_time(&t));
-        out.insert(cell, (author, text, time));
+        if !per_cell.contains_key(&cell) {
+            order.push(cell.clone());
+        }
+        per_cell.entry(cell).or_default().push((
+            attr("id"),
+            attr("parentId"),
+            (author, text, time),
+        ));
     }
-    out
+    order
+        .into_iter()
+        .filter_map(|cell| {
+            let entries = per_cell.remove(&cell)?;
+            Some((cell, order_comment_thread(entries)))
+        })
+        .collect()
+}
+
+/// One `threadedComment`: its `id`, its `parentId`, and `(author, text, time)`.
+type ThreadEntry = (
+    Option<String>,
+    Option<String>,
+    (String, String, Option<String>),
+);
+
+/// Order one cell's `(id, parentId, comment)` entries as a thread — docling's
+/// `_order_comment_thread` (docling#4353). OOXML does not fix the element
+/// order of threaded comments, so the thread follows the id/parentId links:
+/// each comment comes before its replies, and replies to the same comment
+/// are sorted by timestamp, then document order. A comment whose parent is
+/// missing is a root. Comments that no root reaches (a parentId cycle) are
+/// kept at the end, in document order.
+fn order_comment_thread(entries: Vec<ThreadEntry>) -> Vec<(String, String, Option<String>)> {
+    // The rendered time is `YYYY-MM-DDTHH:MM:SS(.fff)`, so it sorts as text;
+    // an absent time sorts after every present one (`(True, datetime.min)`).
+    let sort_key = |i: usize| -> (bool, String, usize) {
+        let time = entries[i].2 .2.clone();
+        (time.is_none(), time.unwrap_or_default(), i)
+    };
+    let ids: std::collections::HashSet<&str> = entries
+        .iter()
+        .filter_map(|(id, _, _)| id.as_deref())
+        .filter(|id| !id.is_empty())
+        .collect();
+    let mut roots: Vec<usize> = Vec::new();
+    let mut children: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (i, (_, parent, _)) in entries.iter().enumerate() {
+        match parent.as_deref().filter(|p| ids.contains(p)) {
+            Some(p) => children.entry(p).or_default().push(i),
+            None => roots.push(i),
+        }
+    }
+    let mut ordered: Vec<usize> = Vec::new();
+    let mut visited = vec![false; entries.len()];
+    // Depth-first from the roots; a reverse-sorted stack pops the earliest.
+    let mut stack = roots;
+    stack.sort_by_key(|&i| std::cmp::Reverse(sort_key(i)));
+    while let Some(i) = stack.pop() {
+        if visited[i] {
+            continue;
+        }
+        visited[i] = true;
+        ordered.push(i);
+        if let Some(mut replies) = entries[i]
+            .0
+            .as_deref()
+            .and_then(|id| children.get(id).cloned())
+        {
+            replies.sort_by_key(|&i| std::cmp::Reverse(sort_key(i)));
+            stack.extend(replies);
+        }
+    }
+    ordered.extend((0..entries.len()).filter(|&i| !visited[i]));
+    ordered.into_iter().map(|i| entries[i].2.clone()).collect()
 }
 
 /// `xl/persons/person.xml` → `id -> displayName`.

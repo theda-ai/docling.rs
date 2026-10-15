@@ -36,7 +36,7 @@ pub struct OnnxEmbedder {
 impl OnnxEmbedder {
     /// Load the ONNX model and tokenizer from the paths in `cfg`.
     pub fn from_config(cfg: &RagConfig) -> Result<Self> {
-        let builder = Session::builder()
+        let builder = docling_onnx::session_builder()
             .map_err(|e| RagError::Embedding(format!("ONNX session builder: {e}")))?;
         // Same execution-provider selection as the PDF pipeline (#74): one
         // DOCLING_RS_EP switch covers the embedder too — a `--features cuda`

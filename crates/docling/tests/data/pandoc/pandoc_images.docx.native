@@ -1,0 +1,26 @@
+[ Para [ Str "before" ]
+, Para [ Str "P_img.png" ]
+, Para
+    [ Image
+        ( "" , [] , [] )
+        []
+        ( "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAHklEQVR4nGM8ISfHgA0wMTAwmD98iCnBiE/HgEkAALX8BBD4dJ54AAAAAElFTkSuQmCC"
+        , ""
+        )
+    ]
+, Para [ Str "P_img.gif" ]
+, Para
+    [ Image
+        ( "" , [] , [] )
+        []
+        ( "data:image/gif;base64,R0lGODdhCAAIAIIAAACZADOZAADMAACZMzOZMzPMM////wAAACwAAAAACAAIAAAIJgAJABBIcKABggUJCiBQsEDChAAKDBxIYCGBAAIlEsRIceCAAAEBADs="
+        , ""
+        )
+    ]
+, Para [ Str "P_img.emf" ]
+, Para
+    [ Image
+        ( "" , [ "docling-placeholder" ] , [] ) [] ( "" , "" )
+    ]
+, Para [ Str "after" ]
+]

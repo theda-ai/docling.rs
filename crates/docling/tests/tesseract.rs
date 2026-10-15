@@ -1,6 +1,6 @@
 //! #460: the Tesseract OCR engine end to end — the system `tesseract` binary
 //! reading the scanned fixtures through the same layout-region pipeline as
-//! PP-OCR, selected with `ocr_engine("tesseract")`. Needs pdfium, the layout
+//! PP-OCR, selected with `ocr_engine("tesseract")`. Needs the layout
 //! model and a `tesseract` with the `eng` traineddata on `PATH`, so it skips
 //! cleanly on checkouts without them — CI without models must stay green.
 //! Text assertions are deliberately loose (Tesseract versions differ by a
@@ -33,17 +33,10 @@ fn tesseract_langs() -> Option<Vec<String>> {
     )
 }
 
-/// pdfium + the layout model + `tesseract` with `eng`; moves the process to
+/// The layout model + `tesseract` with `eng`; moves the process to
 /// the repo root (model resolution is CWD-relative).
 fn ready(need: &[&str]) -> bool {
     let root = repo_root();
-    if !(root.join(".pdfium/lib/libpdfium.so").exists()
-        || root.join(".pdfium/lib/libpdfium.dylib").exists()
-        || root.join(".pdfium/lib/pdfium.dll").exists()
-        || std::env::var("PDFIUM_DYNAMIC_LIB_PATH").is_ok())
-    {
-        return false;
-    }
     if !root.join(".models/layout_heron.onnx").exists() {
         return false;
     }
@@ -70,7 +63,7 @@ fn convert(stem: &str) -> String {
 #[test]
 fn tesseract_engine_reads_a_scanned_page() {
     if !ready(&["eng"]) {
-        eprintln!("skipping: pdfium, the layout model or tesseract (eng) is not present");
+        eprintln!("skipping: the layout model or tesseract (eng) is not present");
         return;
     }
     let md = convert("ocr_test");
@@ -93,7 +86,7 @@ fn tesseract_engine_reads_a_scanned_page() {
 #[test]
 fn tesseract_osd_normalizes_raster_rotation() {
     if !ready(&["eng", "osd"]) {
-        eprintln!("skipping: pdfium, the layout model or tesseract (eng + osd) is not present");
+        eprintln!("skipping: the layout model or tesseract (eng + osd) is not present");
         return;
     }
     let upright = convert("ocr_test_raster");
@@ -116,7 +109,7 @@ fn tesseract_osd_normalizes_raster_rotation() {
 #[test]
 fn tesseract_missing_language_degrades() {
     if !ready(&["eng"]) {
-        eprintln!("skipping: pdfium, the layout model or tesseract (eng) is not present");
+        eprintln!("skipping: the layout model or tesseract (eng) is not present");
         return;
     }
     let source = SourceDocument::from_file("tests/data/scanned/sources/ocr_test.pdf")

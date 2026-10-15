@@ -1,18 +1,15 @@
-//! pdfium-based text extraction and page rendering.
-//!
-//! Text is reconstructed the way docling's `docling-parse` does it, so the
-//! output spacing matches the groundtruth: the page's **character** stream is
-//! grouped into **words** (split at a horizontal gap wider than a fraction of
-//! the font height — font-relative, so letter-tracking in display titles does
-//! not split a word) and words into **lines** (by baseline). pdfium-render's
-//! safe API only exposes whole style runs / `GetBoundedText`, so the character
-//! loop is driven through the raw `PdfiumLibraryBindings` FFI on a second handle
-//! to the same bytes (no fork; stays publishable).
+//! The page walk of the PDF pipeline: per page, the geometry and links from
+//! the object model (`pdf_meta`), the text layer from the pure-Rust parser
+//! (`textparse`), the model-input bitmaps from the docling-parse renderer
+//! plugin, the Rust raster or the Rust page renderer — and, behind the
+//! `pdfium` feature, the pdfium library for `DOCLING_RS_RENDERER=pdfium`
+//! (docling's pypdfium2 chain) and for a file lopdf cannot read ([`native`]).
+//! The module keeps its historical name; every type in it is pdfium-free.
 
+#[cfg(feature = "ml")]
+use crate::PdfError;
 #[cfg(feature = "ocr-prep")]
 use image::RgbImage;
-#[cfg(feature = "ml")]
-use pdfium_render::prelude::*;
 
 /// A run of text with its bounding box, in PDF points with a **top-left** origin
 /// (pdfium's native origin is bottom-left; we flip it to match docling's
@@ -46,20 +43,37 @@ pub struct PdfPage {
     /// Per-word cells (one per word, not joined into lines) for TableFormer cell
     /// matching.
     pub word_cells: Vec<TextCell>,
+    /// Checkbox squares drawn on the page (#609): assembly gives each line
+    /// with one in front of it its own checkbox item. Empty without a text
+    /// layer (OCR pages) or vector paths.
+    pub checkboxes: Vec<crate::checkbox::CheckBox>,
     /// The rendered page bitmap. Present whenever pixels are available at all
     /// (`ocr-prep` ⊂ `ml`): the native pipeline renders it with pdfium, the
     /// browser pipeline receives it from the host canvas. Picture regions are
     /// cropped out of it.
     #[cfg(feature = "ocr-prep")]
     pub image: RgbImage,
-    /// The **scale-1.0** page image the layout model runs on (docling parity:
-    /// its layout stage calls `page.get_image(scale=1.0)` — pdfium at 1.5×,
-    /// PIL-BICUBIC down to point size — a *different* image from the 2×
+    /// The **scale-1.0** page image the layout model runs on (parity with
+    /// docling's `PyPdfiumDocumentBackend`: the layout stage calls
+    /// `page.get_image(scale=1.0)`, which that backend serves as pdfium at
+    /// 1.5×, PIL-BICUBIC down to point size — a *different* image from the 2×
     /// OCR/crop bitmap above, and a different resampling regime than
-    /// stretching that bitmap). `None` on paths without a pdfium renderer
-    /// (browser, METS/TIFF), which fall back to stretching [`Self::image`].
+    /// stretching that bitmap; docling 2.123+'s default docling-parse backend
+    /// renders the same request with its own Blend2D/FreeType renderer, whose
+    /// glyph anti-aliasing differs — #478). `None` on paths without a pdfium
+    /// renderer (browser, METS/TIFF), which fall back to stretching
+    /// [`Self::image`].
     #[cfg(feature = "ocr-prep")]
     pub image_layout: Option<RgbImage>,
+    /// The 2x bitmap of a page with a text layer, still rendering on the
+    /// page walk's helper thread (#682): [`Self::image`] holds a 1×1
+    /// placeholder until [`Self::resolve_image`] installs the render, which
+    /// the ML pipeline does right after layout — the stage that reads
+    /// [`Self::image_layout`] instead — so the render overlaps it. `None`
+    /// once resolved, and on every path that renders synchronously (scanned
+    /// pages, the plugin and pdfium renderers, images, METS).
+    #[cfg(feature = "ml")]
+    pub pending_image: Option<PendingImage>,
     /// Hyperlink annotations on the page (rect in top-left page coords + target
     /// URI), restricted to web/mail/tel schemes. Used only by strict Markdown.
     pub links: Vec<LinkAnnot>,
@@ -90,13 +104,27 @@ impl PdfPage {
             cells,
             code_cells: Vec::new(),
             word_cells: Vec::new(),
+            checkboxes: Vec::new(),
             #[cfg(feature = "ocr-prep")]
             image: RgbImage::new(0, 0),
             #[cfg(feature = "ocr-prep")]
             image_layout: None,
+            #[cfg(feature = "ml")]
+            pending_image: None,
             links: Vec::new(),
             rotation: 0,
         }
+    }
+
+    /// Wait for a deferred 2x render (#682) and install it as
+    /// [`Self::image`]; a no-op when nothing is pending. The ML pipeline
+    /// calls it once layout is done, before anything reads the bitmap.
+    #[cfg(feature = "ml")]
+    pub fn resolve_image(&mut self) -> Result<(), PdfError> {
+        if let Some(pending) = self.pending_image.take() {
+            self.image = crate::timing::timed("render.wait", || pending.wait())?;
+        }
+        Ok(())
     }
 
     /// Same as [`from_cells`](Self::from_cells) but carrying the rendered page
@@ -152,6 +180,15 @@ impl PdfPage {
             };
             (l.l, l.t, l.r, l.b) = (nl, nt, nr, nb);
         }
+        // Checkbox squares likewise (a scan has none; kept consistent).
+        for c in &mut self.checkboxes {
+            let (nl, nt, nr, nb) = match deg {
+                90 => (c.t, width - c.r, c.b, width - c.l),
+                180 => (width - c.r, height - c.b, width - c.l, height - c.t),
+                _ => (height - c.b, c.l, height - c.t, c.r),
+            };
+            (c.l, c.t, c.r, c.b) = (nl, nt, nr, nb);
+        }
         if deg != 180 {
             (self.width, self.height) = (height, width);
         }
@@ -176,105 +213,37 @@ pub struct PdfDocument {
     pub pages: Vec<PdfPage>,
 }
 
-/// Whether to use the docling-parse line sanitizer ([`crate::dp_lines`]) for prose
-/// reconstruction — the default. Set `DOCLING_LEGACY_LINES` to fall back to the
-/// older gap-heuristic `lines_from_glyphs`.
-pub(crate) fn use_dp_lines() -> bool {
-    !docling_core::env::flag("DOCLING_LEGACY_LINES")
-}
-
-/// Whether to source **word** cells from the pure-Rust parser (roadmap item 6),
-/// the default. The parser's `word_cells` reproduce docling-parse's word grouping
-/// byte-for-byte — the per-word tokens TableFormer matches table-grid cells
-/// against — which moves table extraction closer to docling on the heavy
-/// multi-column fixtures. Set `DOCLING_PDFIUM_WORDS` to keep pdfium's word cells,
-/// or `DOCLING_PDFIUM_TEXT` to fall back to pdfium for all text.
-pub(crate) fn use_parser_words() -> bool {
-    !docling_core::env::flag("DOCLING_PDFIUM_WORDS")
-        && !docling_core::env::flag("DOCLING_PDFIUM_TEXT")
-}
-
-/// Whether to source **code** cells from the parser too (the default) — the last
-/// text layer to leave pdfium, fully retiring its text path. The parser's
-/// gap-based code grouping ([`code_cells_from_glyphs`]) reconstructs monospace
-/// spacing from positioning gaps (`function add(a, b) { … }`), so it no longer
-/// drops the inter-token spaces the old space-glyph-only grouping lost
-/// (`functionadd`). Reverts to pdfium with `DOCLING_PDFIUM_WORDS` (alongside word
-/// cells) or `DOCLING_PDFIUM_TEXT` (all text).
-pub(crate) fn use_parser_code() -> bool {
-    use_parser_words()
-}
-
-#[cfg(feature = "ml")]
-/// Try binding pdfium from a directory (or a literal library file path):
-/// `<dir>/<platform library name>` first, else `<dir>` itself as the file.
-fn try_bind_dir(path: &str) -> Option<Box<dyn pdfium_render::prelude::PdfiumLibraryBindings>> {
-    let name = Pdfium::pdfium_platform_library_name_at_path(path);
-    if let Ok(b) = Pdfium::bind_to_library(&name) {
-        return Some(b);
-    }
-    Pdfium::bind_to_library(path).ok()
-}
-
-#[cfg(feature = "ml")]
-/// Bind to the pdfium dynamic library. Honors `PDFIUM_DYNAMIC_LIB_PATH` (a
-/// directory or file) first; else falls back to `.pdfium/lib` relative to the
-/// current directory (the layout `scripts/install/download_dependencies.sh` and
-/// `scripts/install/pdf_setup.sh` both produce); else the system library.
-fn bind() -> Result<Pdfium, PdfiumError> {
-    if let Some(path) = docling_core::env::nonempty("PDFIUM_DYNAMIC_LIB_PATH") {
-        if let Some(b) = try_bind_dir(&path) {
-            return Ok(Pdfium::new(b));
-        }
-    }
-    // No env var (or it didn't resolve): fall back to `.pdfium/lib` relative to
-    // the current directory — mirroring `layout.rs`/`ocr.rs`'s `.models/…`
-    // defaults — the layout `scripts/install/download_dependencies.sh` (and
-    // `scripts/install/pdf_setup.sh`) produce, so a checkout with the dependencies
-    // downloaded next to it needs no env var at all.
-    if let Some(b) = try_bind_dir(&crate::resolve_asset(".pdfium/lib")) {
-        return Ok(Pdfium::new(b));
-    }
-    Pdfium::bind_to_system_library().map(Pdfium::new)
-}
-
 #[cfg(feature = "ml")]
 impl PdfDocument {
     /// Parse a PDF from bytes, optionally decrypting with `password`.
     ///
     /// Note: this materialises **every** page's rendered bitmap in memory at
     /// once. For large documents prefer [`for_each_page`], which streams.
-    pub fn open(bytes: &[u8], password: Option<&str>) -> Result<Self, PdfiumError> {
-        let pdfium = bind()?;
-        let ffi = FfiText::load(pdfium.bindings(), bytes, password);
-        let doc = pdfium.load_pdf_from_byte_slice(bytes, password)?;
-        let mut rust = rust_parser_cells(bytes);
+    pub fn open(bytes: &[u8], password: Option<&str>) -> Result<Self, PdfError> {
         let mut pages = Vec::new();
-        for (i, page) in doc.pages().iter().enumerate() {
-            let rc = rust.as_mut().map(|p| p.cells_timed(i));
-            pages.push(extract_page(&page, &ffi, i as i32, rc, true, true)?);
-        }
+        for_each_page::<PdfError, _>(bytes, password, true, true, None, |_, _, page| {
+            pages.push(page);
+            Ok(())
+        })?;
         Ok(PdfDocument { pages })
     }
 }
 
 #[cfg(feature = "ml")]
-/// Per-page prose line cells from the pure-Rust text parser. This is the
-/// **default** text layer (it matches docling-parse's char geometry and is a
-/// strict improvement on byte-conformance — e.g. it recovers the Arabic
-/// sentence-period attachment in `right_to_left_01`). Set `DOCLING_PDFIUM_TEXT`
-/// to fall back to pdfium's text layer. The parser returns an empty page when a
-/// PDF (or a page) has no parseable text layer; the caller keeps pdfium's cells
-/// in that case, so scanned/edge-case pages are unaffected.
-fn rust_parser_cells(bytes: &[u8]) -> Option<crate::textparse::PageTextParser> {
-    if docling_core::env::flag("DOCLING_PDFIUM_TEXT") {
-        return None;
-    }
+/// The document's text layer: the pure-Rust text parser (docling-parse's
+/// char geometry; the only text source since phase 4 of "Retiring pdfium" —
+/// on the whole corpus every page it reads no text from is one pdfium read
+/// no text from either, i.e. a scan for the OCR path). `None` for a file
+/// lopdf cannot open at all.
+fn rust_parser_cells(
+    bytes: &[u8],
+    password: Option<&str>,
+) -> Option<crate::textparse::PageTextParser> {
     // Only the document load happens here; pages are parsed as the walk
     // reaches them (`cells_timed`), so nothing is decoded for pages outside
     // a `--pages` window and the parse overlaps the workers' inference.
     crate::timing::timed("textparse.open", || {
-        crate::textparse::PageTextParser::open(bytes)
+        crate::textparse::PageTextParser::open_with_password(bytes, password)
     })
 }
 
@@ -288,11 +257,22 @@ impl crate::textparse::PageTextParser {
 #[cfg(feature = "ml")]
 /// Number of pages in a PDF, without rendering any of them — used to decide
 /// whether a document is worth spinning up the parallel worker pool.
-pub fn page_count(bytes: &[u8], password: Option<&str>) -> Result<usize, PdfiumError> {
+pub fn page_count(bytes: &[u8], password: Option<&str>) -> Result<usize, PdfError> {
+    // The pure-Rust object model first, then the docling-parse plugin's
+    // count, then pdfium (the `pdfium` feature) — the order every entry point
+    // here follows.
+    if let Some(meta) = crate::timing::timed("meta.open", || {
+        crate::pdf_meta::PdfMeta::open_with_password(bytes, password)
+    })? {
+        return Ok(meta.page_count());
+    }
+    if let Some(dp) = crate::dparse_render::Doc::open_if_enabled(bytes, password) {
+        return Ok(dp.page_count());
+    }
     crate::timing::timed("pdfium.page_count", || {
-        let pdfium = bind()?;
-        let doc = pdfium.load_pdf_from_byte_slice(bytes, password)?;
-        Ok(doc.pages().len() as usize)
+        let lib = native::bind()?;
+        let n = lib.open(bytes, password)?.page_count();
+        Ok(n)
     })
 }
 
@@ -319,7 +299,7 @@ pub fn page_count(bytes: &[u8], password: Option<&str>) -> Result<usize, PdfiumE
 /// pages, not five hundred. `f` still receives the absolute page index, so
 /// downstream page numbering refers to the source document.
 ///
-/// `E` is the caller's error type; pdfium errors convert into it via `From`.
+/// `E` is the caller's error type; [`PdfError`]s convert into it via `From`.
 pub fn for_each_page<E, F>(
     bytes: &[u8],
     password: Option<&str>,
@@ -329,41 +309,118 @@ pub fn for_each_page<E, F>(
     mut f: F,
 ) -> Result<(), E>
 where
-    E: From<PdfiumError>,
+    E: From<PdfError>,
     F: FnMut(usize, usize, PdfPage) -> Result<(), E>,
 {
-    let pdfium = bind()?;
-    let (ffi, doc) = crate::timing::timed("pdfium.open", || {
-        let ffi = FfiText::load(pdfium.bindings(), bytes, password);
-        pdfium
-            .load_pdf_from_byte_slice(bytes, password)
-            .map(|doc| (ffi, doc))
+    // The pure-Rust object model: page count, geometry, `/Rotate`, links.
+    // `None` only for a file lopdf cannot read even after the parser's
+    // repairs; pdfium (the `pdfium` feature) then answers for it.
+    let meta = crate::timing::timed("meta.open", || {
+        crate::pdf_meta::PdfMeta::open_with_password(bytes, password)
     })?;
+    // The docling-parse renderer (#478, `DOCLING_RS_RENDERER=docling-parse`):
+    // the page images the models see come from it when it is asked for.
+    let dparse = if render_image {
+        crate::dparse_render::Doc::open_if_enabled(bytes, password)
+    } else {
+        None
+    };
+    // pdfium, when it has a job (`bind_or_skip`).
+    let pdfium = bind_or_skip(meta.is_some())?;
+    let session = match &pdfium {
+        Some(p) => Some(p.open(bytes, password)?),
+        None => None,
+    };
     // `extract_text = false` (full-page OCR forced, docling#4061 / 2.122):
     // the text layer would be cleared unread, so neither the pure-Rust parser
     // nor pdfium's text page is decoded at all — on vector-dense pages (CAD
     // drawings as 100k+ path segments) that decode is most of the page cost.
     let mut rust = if extract_text {
-        rust_parser_cells(bytes)
+        rust_parser_cells(bytes, password)
     } else {
         None
     };
-    let pages = doc.pages();
-    let total = pages.len() as usize;
+    // pdfium's count when it is loaded (a damaged file can make the two
+    // object models disagree, and pdfium's pages are the ones rendered), the
+    // object model's otherwise.
+    let total = match (&session, &meta) {
+        (Some(s), _) => s.page_count(),
+        (None, Some(m)) => m.page_count(),
+        (None, None) => 0,
+    };
+    // The object model's geometry and links are used whenever it read the same
+    // number of pages pdfium did (or pdfium is absent); a disagreeing file keeps
+    // pdfium's answers throughout.
+    let meta = meta.filter(|m| {
+        session
+            .as_ref()
+            .is_none_or(|s| s.page_count() == m.page_count())
+    });
+    // The pure-Rust renderer (phase 3 of retiring pdfium): the model inputs
+    // of every page the plugin does not render and the Rust raster declines
+    // — the default renderer.
+    let renderer = match (&meta, render_image) {
+        (Some(m), true) => Some(crate::render::Renderer::new(m)),
+        _ => None,
+    };
     let (first, last) = range.unwrap_or((0, total.saturating_sub(1)));
-    // Index the window directly: iterating `pages.iter()` from page 0 and
-    // skipping to `first` loads (and closes) every page before the window —
-    // ~0.7 ms each, 1.3 s of pure overhead for a one-page window over the
-    // 1913-page .NET reference.
-    for i in first..=last {
-        if i >= total {
-            break;
+    // The 2x bitmap of a page with a text layer renders on a helper thread
+    // (#682, `DeferredRender`) when the pure-Rust renderer is the only one
+    // drawing: the plugin and pdfium hold per-document handles the walk
+    // thread owns, so their pages render in place as before.
+    let defer_meta = match (&meta, &renderer, &dparse, &session) {
+        (Some(m), Some(_), None, None) => Some(m),
+        _ => None,
+    };
+    std::thread::scope(|scope| {
+        let defer = defer_meta.map(|m| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            scope.spawn(move || DeferredRender::serve(m, rx));
+            DeferredRender { tx }
+        });
+        // Index the window directly: iterating pdfium's pages from page 0 and
+        // skipping to `first` would load (and close) every page before the
+        // window — ~0.7 ms each, 1.3 s of pure overhead for a one-page window
+        // over the 1913-page .NET reference.
+        for i in first..=last {
+            if i >= total {
+                break;
+            }
+            let page = match &session {
+                Some(s) => Some(s.page(i)?),
+                None => None,
+            };
+            let geom = match (&meta, &page) {
+                (Some(m), _) => m.geometry(i).ok_or_else(|| no_raster(i as i32))?,
+                (None, Some(p)) => p.geom(),
+                (None, None) => return Err(no_raster(i as i32).into()),
+            };
+            let links = match (&meta, &page) {
+                (Some(m), _) => m.links(i),
+                (None, Some(p)) => p.links(geom.unrotated().1),
+                (None, None) => Vec::new(),
+            };
+            let rc = rust.as_mut().map(|p| p.cells_timed(i));
+            let extracted = extract_page(
+                PageSources {
+                    page: page.as_ref(),
+                    dparse: dparse.as_ref(),
+                    meta: meta.as_ref(),
+                    renderer: renderer.as_ref(),
+                    defer: defer.as_ref(),
+                },
+                geom,
+                links,
+                i as i32,
+                rc,
+                render_image,
+            )?;
+            f(i, total, extracted)?;
         }
-        let page = pages.get(i as pdfium_render::prelude::PdfPageIndex)?;
-        let rc = rust.as_mut().map(|p| p.cells_timed(i));
-        let extracted = extract_page(&page, &ffi, i as i32, rc, render_image, extract_text)?;
-        f(i, total, extracted)?;
-    }
+        // Dropping the job sender ends the helper; the scope joins it.
+        drop(defer);
+        Ok::<(), E>(())
+    })?;
     // Tearing down the parsed document (hundreds of thousands of lopdf
     // objects on a long PDF — 250 ms for the 1913-page .NET reference) is
     // nobody's business but the allocator's: hand it to a detached thread so
@@ -445,51 +502,104 @@ pub fn render_pages(
     range: Option<(usize, usize)>,
     scale: f32,
 ) -> Result<Vec<RenderedPage>, crate::PdfError> {
-    let pdfium = bind()?;
-    let doc = pdfium.load_pdf_from_byte_slice(bytes, password)?;
-    let pages = doc.pages();
-    let total = pages.len() as usize;
+    // The docling-parse renderer plugin renders the display bitmap when it is
+    // asked for (full-resolution bitmap decode: this is a viewer's render,
+    // not a model input); the Rust raster / renderer otherwise, pdfium under
+    // `DOCLING_RS_RENDERER=pdfium` or for a file lopdf cannot read.
+    let dparse = crate::dparse_render::Doc::open_if_enabled(bytes, password);
+    // The object model: the page count and the Rust raster / renderer.
+    let meta = crate::pdf_meta::PdfMeta::open_with_password(bytes, password)?;
+    let pdfium = match &dparse {
+        Some(_) => None,
+        None => bind_or_skip(meta.is_some())?,
+    };
+    let session = match &pdfium {
+        Some(p) => Some(p.open(bytes, password)?),
+        None => None,
+    };
+    let total = match (&session, &dparse, &meta) {
+        (Some(s), _, _) => s.page_count(),
+        (None, Some(dp), _) => dp.page_count(),
+        (None, None, Some(m)) => m.page_count(),
+        (None, None, None) => 0,
+    };
     let (first, last) = match range {
         None => (0, total.saturating_sub(1)),
         Some((first, last)) => {
             if first == 0 || last < first {
-                return Err(crate::PdfError::Pdfium(format!(
+                return Err(PdfError::Document(format!(
                     "invalid page range {first}-{last} (pages are 1-based, first <= last)"
                 )));
             }
             if first > total {
-                return Err(crate::PdfError::Pdfium(format!(
+                return Err(PdfError::Document(format!(
                     "page range {first}-{last} is outside the document ({total} page(s))"
                 )));
             }
             (first - 1, last.min(total) - 1)
         }
     };
+    let renderer = match (&dparse, &meta) {
+        // Page rasters a caller keeps decode every image at full size (the
+        // shim is asked with bitmap hint 0.0 below for the same reason).
+        (None, Some(m)) => Some(crate::render::Renderer::with_bitmap_hint(m, 0.0)),
+        _ => None,
+    };
     let mut out = Vec::with_capacity(last.saturating_sub(first) + 1);
     for i in first..=last {
         if i >= total {
             break;
         }
-        let page = pages.get(i as pdfium_render::prelude::PdfPageIndex)?;
-        // pdfium applies /Rotate itself, so the bitmap is the page as a viewer
-        // shows it — no orientation handling needed (the pipeline's scanned-page
-        // un-rotation is an OCR-conformance concern, not a display one).
-        let (tw, th) = checked_render_dims(
-            f64::from(page.width().value * scale),
-            f64::from(page.height().value * scale),
-            i + 1,
-        )?;
-        let cfg = PdfRenderConfig::new()
-            .set_target_width(tw)
-            .set_target_height(th);
-        let bitmap = crate::timing::timed("pdfium.rasterize", || {
-            page.render_with_config(&cfg)
-                .map(|b| b.as_image().into_rgb8())
-        })?;
+        // Both renderers apply /Rotate themselves, so the bitmap is the page as
+        // a viewer shows it — no orientation handling needed (the pipeline's
+        // scanned-page un-rotation is an OCR-conformance concern, not a display
+        // one).
+        // The plugin's canvas first (the renderer whenever it resolves), then
+        // the Rust raster of an image-only page (pdfium's bitmap byte for
+        // byte, no library needed) or the Rust page renderer, then pdfium
+        // (`DOCLING_RS_RENDERER=pdfium`, or a file lopdf cannot read).
+        let rust = || {
+            let m = meta.as_ref()?;
+            let g = m.geometry(i)?;
+            let (tw, th) = checked_render_dims(
+                f64::from(g.width * scale),
+                f64::from(g.height * scale),
+                i + 1,
+            )
+            .ok()?;
+            rust_bitmap(
+                Some(m),
+                renderer.as_ref(),
+                session.is_some(),
+                i as i32,
+                tw as u32,
+                th as u32,
+                0.0,
+            )
+        };
+        let bitmap = match (&dparse, &session) {
+            (Some(dp), _) => {
+                crate::timing::timed("dparse.rasterize", || dp.render(i, f64::from(scale), 0.0))
+                    .map_err(PdfError::Document)?
+            }
+            (None, session) => match rust() {
+                Some(img) => img,
+                None => {
+                    let Some(s) = session else {
+                        return Err(no_raster(i as i32));
+                    };
+                    let page = s.page(i)?;
+                    let (pw, ph) = page.size();
+                    let (tw, th) =
+                        checked_render_dims(f64::from(pw * scale), f64::from(ph * scale), i + 1)?;
+                    page.render(tw, th, "pdfium.rasterize")?
+                }
+            },
+        };
         let mut png = Vec::new();
         bitmap
             .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
-            .map_err(|e| crate::PdfError::Pdfium(format!("PNG-encoding page {}: {e}", i + 1)))?;
+            .map_err(|e| PdfError::Document(format!("PNG-encoding page {}: {e}", i + 1)))?;
         out.push(RenderedPage {
             page_no: i + 1,
             width: bitmap.width(),
@@ -501,67 +611,228 @@ pub fn render_pages(
 }
 
 #[cfg(feature = "ml")]
+/// The error for a page that needs a raster when the object model could not
+/// be read and neither the docling-parse renderer plugin nor pdfium is there.
+fn no_raster(index: i32) -> PdfError {
+    PdfError::Document(format!(
+        "page {}: no page renderer — the file's object model could not be read (lopdf), \
+         the docling-parse renderer plugin is not installed (.docling-parse/lib) and \
+         pdfium is not available (the `pdfium` feature + PDFIUM_DYNAMIC_LIB_PATH / \
+         .pdfium/lib)",
+        index + 1
+    ))
+}
+
+/// The pure-Rust bitmap of a page at `width` × `height`: the raster of an
+/// image-only page (`raster::render`, pdfium's bytes) when the page
+/// qualifies, the page renderer (`render`) otherwise — `None` only when the
+/// object model is not loaded, or when `DOCLING_RS_RENDERER=pdfium` asks for
+/// pdfium's render of a page the raster declines *and* pdfium's page is open
+/// (`pdfium_page`; a build or machine without the library degrades to the
+/// Rust renderer, as [`bind_or_skip`] warned).
+#[cfg(feature = "ml")]
+fn rust_bitmap(
+    meta: Option<&crate::pdf_meta::PdfMeta>,
+    renderer: Option<&crate::render::Renderer<'_>>,
+    pdfium_page: bool,
+    index: i32,
+    width: u32,
+    height: u32,
+    bitmap_hint: f64,
+) -> Option<RgbImage> {
+    let meta = meta?;
+    if let Some(img) = crate::timing::timed("raster.render", || {
+        crate::raster::render(meta, index as usize, width, height)
+    }) {
+        return Some(img);
+    }
+    if pdfium_page && crate::dparse_render::choice() == crate::dparse_render::Choice::Pdfium {
+        return None;
+    }
+    let renderer = renderer?;
+    crate::timing::timed("render.page", || {
+        renderer.render_with_hint(index as usize, width, height, bitmap_hint)
+    })
+}
+
+#[cfg(feature = "ml")]
+/// Bind pdfium for a conversion, or decide it can run without it. pdfium has
+/// a job in two cases only: its own render was asked for
+/// (`DOCLING_RS_RENDERER=pdfium`, which only the `pdfium` feature offers), or
+/// the pure-Rust object model could not read the file (`meta_ok` false) — then
+/// pdfium's page tree, geometry and render stand in, and a build without the
+/// feature (or without the library) fails the conversion with the hint.
+/// Otherwise the library is never loaded.
+fn bind_or_skip(meta_ok: bool) -> Result<Option<native::Lib>, PdfError> {
+    if meta_ok && crate::dparse_render::choice() != crate::dparse_render::Choice::Pdfium {
+        return Ok(None);
+    }
+    match native::bind() {
+        Ok(p) => Ok(Some(p)),
+        Err(e) if meta_ok => {
+            // The library was asked for by name and is not there: say so
+            // once, then degrade — the Rust renderer draws every page.
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                eprintln!(
+                    "docling-pdf: DOCLING_RS_RENDERER=pdfium but the pdfium library could not be \
+                     loaded ({e}); rendering with the Rust renderer"
+                );
+            });
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// The native sources a page may draw on, each optional: pdfium's page handle
+/// (present only when [`bind_or_skip`] opened the library) and the
+/// docling-parse renderer (absent when the plugin is not asked for or no
+/// raster is wanted).
+#[cfg(feature = "ml")]
+#[derive(Clone, Copy)]
+struct PageSources<'a> {
+    page: Option<&'a native::Page<'a>>,
+    dparse: Option<&'a crate::dparse_render::Doc>,
+    /// The object model, for the Rust raster of an image-only page.
+    meta: Option<&'a crate::pdf_meta::PdfMeta>,
+    /// The pure-Rust page renderer over the same object model (its
+    /// per-document caches live for the whole conversion).
+    renderer: Option<&'a crate::render::Renderer<'a>>,
+    /// The helper thread that renders the 2x bitmap of pages with a text
+    /// layer off the walk (#682); `None` when another renderer draws.
+    defer: Option<&'a DeferredRender>,
+}
+
+/// A page's 2x bitmap being rendered on the walk's helper thread (#682):
+/// the result arrives through a one-shot channel. Cloning a page clones the
+/// handle; whichever copy resolves first gets the bitmap.
+#[cfg(feature = "ml")]
+#[derive(Clone)]
+pub struct PendingImage(std::sync::Arc<std::sync::Mutex<Option<PendingReceiver>>>);
+
+/// The one-shot channel a [`PendingImage`] waits on.
+#[cfg(feature = "ml")]
+type PendingReceiver = std::sync::mpsc::Receiver<Result<RgbImage, PdfError>>;
+
+#[cfg(feature = "ml")]
+impl PendingImage {
+    fn wait(self) -> Result<RgbImage, PdfError> {
+        let rx = self.0.lock().unwrap_or_else(|p| p.into_inner()).take();
+        match rx {
+            Some(rx) => rx
+                .recv()
+                .unwrap_or_else(|_| Err(PdfError::Pdfium("page render thread ended early".into()))),
+            None => Err(PdfError::Pdfium("page bitmap resolved twice".into())),
+        }
+    }
+}
+
+#[cfg(feature = "ml")]
+impl std::fmt::Debug for PendingImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PendingImage")
+    }
+}
+
+/// One deferred render: the 3x supersample of page `index` at `w` × `h`
+/// with the decode `hint`, box-downscaled to `dw` × `dh` — exactly the
+/// synchronous path's steps, on another thread.
+#[cfg(feature = "ml")]
+struct RenderJob {
+    index: i32,
+    w: u32,
+    h: u32,
+    hint: f64,
+    dw: u32,
+    dh: u32,
+    reply: std::sync::mpsc::SyncSender<Result<RgbImage, PdfError>>,
+}
+
+/// The walk's render helper (#682): a second pure-Rust renderer, with its
+/// own per-document caches, on a scoped thread, fed one [`RenderJob`] per
+/// page with a text layer. Its bitmaps are the ones the walk thread would
+/// have drawn — the same renderer code over the same object model — so the
+/// output is byte-identical; what changes is that the page leaves the walk
+/// as soon as its 1x layout image is drawn and the 2x bitmap lands while
+/// layout runs. The walk's own channel bounds the jobs in flight.
+#[cfg(feature = "ml")]
+struct DeferredRender {
+    tx: std::sync::mpsc::Sender<RenderJob>,
+}
+
+#[cfg(feature = "ml")]
+impl DeferredRender {
+    fn submit(&self, index: i32, w: u32, h: u32, hint: f64, dw: u32, dh: u32) -> PendingImage {
+        let (reply, rx) = std::sync::mpsc::sync_channel(1);
+        // A helper that is gone surfaces as the page's resolve error.
+        let _ = self.tx.send(RenderJob {
+            index,
+            w,
+            h,
+            hint,
+            dw,
+            dh,
+            reply,
+        });
+        PendingImage(std::sync::Arc::new(std::sync::Mutex::new(Some(rx))))
+    }
+
+    /// The helper's loop: runs until the job sender is dropped.
+    fn serve(meta: &crate::pdf_meta::PdfMeta, jobs: std::sync::mpsc::Receiver<RenderJob>) {
+        let renderer = crate::render::Renderer::new(meta);
+        for job in jobs {
+            let out = rust_bitmap(
+                Some(meta),
+                Some(&renderer),
+                false,
+                job.index,
+                job.w,
+                job.h,
+                job.hint,
+            )
+            .map(|big| {
+                crate::timing::timed("image.resize", || fast_downscale(&big, job.dw, job.dh))
+            })
+            .ok_or_else(|| no_raster(job.index));
+            let _ = job.reply.send(out);
+        }
+    }
+}
+
+#[cfg(feature = "ml")]
 fn extract_page(
-    page: &pdfium_render::prelude::PdfPage<'_>,
-    ffi: &FfiText<'_>,
+    sources: PageSources<'_>,
+    geom: crate::pdf_meta::PageGeom,
+    links: Vec<LinkAnnot>,
     index: i32,
     rust_cells: Option<crate::textparse::PageParserCells>,
     render_image: bool,
-    extract_text: bool,
-) -> Result<PdfPage, PdfiumError> {
-    // pdfium reports the page size (and renders) in the *display* frame —
-    // `/Rotate` applied — while every text coordinate (its own text page, the
+) -> Result<PdfPage, PdfError> {
+    let PageSources {
+        page,
+        dparse,
+        meta,
+        renderer,
+        defer,
+    } = sources;
+    // The page size (and the render) is the *display* frame — `/Rotate`
+    // applied — while every text coordinate (pdfium's own text page, the
     // pure-Rust parser's MediaBox-based glyphs, link annotation rects) lives
     // in the unrotated frame (docling#4008, 2.121). Keep the unrotated box
     // around for the y-flips and bring every rect into the display frame.
-    let width = page.width().value;
-    let height = page.height().value;
-    let rotation = match page.rotation() {
-        Ok(PdfPageRenderRotation::Degrees90) => 90u16,
-        Ok(PdfPageRenderRotation::Degrees180) => 180,
-        Ok(PdfPageRenderRotation::Degrees270) => 270,
-        _ => 0,
-    };
-    let (unrot_w, unrot_h) = if rotation == 90 || rotation == 270 {
-        (height, width)
-    } else {
-        (width, height)
-    };
+    let width = geom.width;
+    let height = geom.height;
+    let rotation = geom.rotation;
+    let (unrot_w, unrot_h) = geom.unrotated();
 
-    // Default: use the pure-Rust text parser instead of pdfium's text layer
-    // (override with `DOCLING_PDFIUM_TEXT`). Prose line cells always come from the
-    // parser; word and code cells do too unless `DOCLING_PDFIUM_WORDS` keeps them
-    // on pdfium (the parser's word grouping reproduces docling-parse's, which
-    // TableFormer matches against — roadmap item 6). A page the parser couldn't
-    // read (no text layer) keeps pdfium's cells.
+    // The text layer: the pure-Rust parser's prose, word and code cells (its
+    // word grouping reproduces docling-parse's, which TableFormer matches
+    // against). A page it reads nothing from is a scanned page for the OCR
+    // path — pdfium's text page is gone (phase 4 of "Retiring pdfium").
     let rc = rust_cells.unwrap_or_default();
-    let need_pdfium_prose = extract_text && rc.prose.is_empty();
-    let need_pdfium_words = extract_text && (!use_parser_words() || rc.words.is_empty());
-    let need_pdfium_code = extract_text && (!use_parser_code() || rc.code.is_empty());
-
-    // The parser covers prose/words/code from one shared glyph pass, so on the
-    // common (parser-succeeded) page all three are already satisfied and this
-    // pdfium FFI call — otherwise fully discarded below — is skipped outright.
-    let (mut cells, mut code_cells, mut word_cells) =
-        if need_pdfium_prose || need_pdfium_words || need_pdfium_code {
-            let (mut cells, code_cells, word_cells) =
-                crate::timing::timed("ffi.page_cells", || ffi.page_cells(index, unrot_h));
-            if cells.is_empty() {
-                cells = segment_cells(&page.text()?, unrot_h);
-            }
-            (cells, code_cells, word_cells)
-        } else {
-            (Vec::new(), Vec::new(), Vec::new())
-        };
-    if !rc.prose.is_empty() {
-        cells = rc.prose;
-    }
-    if use_parser_words() && !rc.words.is_empty() {
-        word_cells = rc.words;
-    }
-    if use_parser_code() && !rc.code.is_empty() {
-        code_cells = rc.code;
-    }
+    let (mut cells, mut code_cells, mut word_cells) = (rc.prose, rc.code, rc.words);
+    let mut checkboxes = rc.checkboxes;
     if rotation != 0 {
         for c in cells
             .iter_mut()
@@ -571,12 +842,70 @@ fn extract_page(
             let (l, t, r, b) = to_display_frame((c.l, c.t, c.r, c.b), rotation, unrot_w, unrot_h);
             (c.l, c.t, c.r, c.b) = (l, t, r, b);
         }
+        for c in &mut checkboxes {
+            let (l, t, r, b) = to_display_frame((c.l, c.t, c.r, c.b), rotation, unrot_w, unrot_h);
+            (c.l, c.t, c.r, c.b) = (l, t, r, b);
+        }
     }
 
-    let image = if render_image {
-        // docling renders at 1.5× the target scale and downsamples "to make it
-        // sharper" (pypdfium2 → PIL BICUBIC). Replicate exactly: the TableFormer
-        // model is pixel-sensitive, so the page bitmap must match byte-for-byte.
+    // The docling-parse renderer (#478, `dparse_render.rs`): the model inputs
+    // come from docling-parse's Blend2D canvas, requested in docling's order
+    // and with its decode hint — the scale-1.0 layout image (docling decodes
+    // the page once, at its `render_scale` of 1.0), then the scale-2.0 bitmap
+    // TableFormer crops from (`_render_image_at_scale` on the same decoder,
+    // hence the same hint). One deliberate exception: a *scanned* page — no
+    // text layer, the OCR path — keeps pdfium's bitmap. docling's 2.0/3.0
+    // re-renders draw the raster its decoders reduced to 72 dpi, and Blend2D's
+    // blit of a scan differs from pdfium's render + downscale in a way the
+    // `ch` conformance recognizer feels (`scanned/ocr_test.pdf` read `JsON` for
+    // `JSON` from either docling-parse raster, hint 1.0 or full resolution);
+    // pdfium's raster is the one the scanned groundtruth was matched with, so
+    // OCR keeps it (recorded in PDF_CONFORMANCE.md) — as long as pdfium is
+    // loaded: a checkout with the plugin and no `libpdfium` OCRs the
+    // docling-parse raster rather than failing the page (degradation over
+    // failure). The canvases are `ceil`-sized where pdfium's are `round`ed;
+    // every consumer maps points through `RENDER_SCALE`, not through the
+    // image size, so the extra row/column is harmless.
+    let scanned = cells.is_empty() && word_cells.is_empty() && code_cells.is_empty();
+    let mut pending_image = None;
+    let (mut dp_image, mut dp_layout) = (None, None);
+    if let (true, Some(dp)) = (render_image, dparse) {
+        let layout = crate::timing::timed("dparse.render_layout", || {
+            dp.render(index as usize, 1.0, 1.0)
+        })
+        .map_err(PdfError::Document)?;
+        if !scanned {
+            let full = crate::timing::timed("dparse.render", || {
+                dp.render(index as usize, f64::from(RENDER_SCALE), 1.0)
+            })
+            .map_err(PdfError::Document)?;
+            dp_image = Some(full);
+        }
+        dp.release_page(index as usize);
+        dp_layout = Some(layout);
+    }
+    // A scanned page's bitmap, in order: the pure-Rust raster (pdfium's bytes;
+    // `raster`), pdfium itself, and — with neither — the plugin's scale-2.0
+    // canvas rather than a failed page.
+    let scanned_fallback = |page: Option<&native::Page<'_>>| match (page, dparse) {
+        (None, Some(dp)) if scanned => {
+            let full = crate::timing::timed("dparse.render", || {
+                dp.render(index as usize, f64::from(RENDER_SCALE), 1.0)
+            })
+            .map_err(PdfError::Document)?;
+            dp.release_page(index as usize);
+            Ok(Some(full))
+        }
+        _ => Ok::<_, PdfError>(None),
+    };
+    let image = if let Some(img) = dp_image.take() {
+        img
+    } else if render_image {
+        // docling's pypdfium2 backend renders at 1.5× the target scale and
+        // downsamples "to make it sharper" (pypdfium2 → PIL BICUBIC). Replicate
+        // exactly: the TableFormer model is pixel-sensitive, so the page bitmap
+        // must match that backend's byte-for-byte (docling 2.123+'s default
+        // docling-parse backend renders it itself — #478).
         // `CatmullRom` is the same a=-0.5 cubic kernel as PIL's BICUBIC.
         const SUPERSAMPLE: f32 = 1.5;
         // The 3x supersample is the largest bitmap the pipeline renders, so the
@@ -586,37 +915,81 @@ fn extract_page(
             f64::from(width * RENDER_SCALE * SUPERSAMPLE),
             f64::from(height * RENDER_SCALE * SUPERSAMPLE),
             (index + 1) as usize,
-        )
-        .map_err(|e| PdfiumError::IoError(std::io::Error::other(e.to_string())))?;
-        let cfg = PdfRenderConfig::new()
-            .set_target_width(tw)
-            .set_target_height(th);
-        let big = crate::timing::timed("pdfium.render", || {
-            page.render_with_config(&cfg)
-                .map(|b| b.as_image().into_rgb8())
-        })?;
+        )?;
+        // An image-only page (a scan) is rendered by the pure-Rust raster —
+        // pdfium's bitmap byte for byte (`raster`, its oracle test) — and any
+        // other page by the pure-Rust renderer (`render`), so the OCR path
+        // needs no `libpdfium`; pdfium renders only when asked for
+        // (`DOCLING_RS_RENDERER=pdfium`).
         let dw = (width * RENDER_SCALE).round().max(1.0) as u32;
         let dh = (height * RENDER_SCALE).round().max(1.0) as u32;
-        crate::timing::timed("image.resize", || fast_downscale(&big, dw, dh))
+        // A page without a text layer takes this bitmap to OCR: decode its
+        // images at full size (hint 0.0); a digital page's TableFormer input
+        // follows docling's hint 1.0 like the layout image below.
+        let hint = if cells.is_empty() { 0.0 } else { 1.0 };
+        // A page with a text layer needs this bitmap only after layout
+        // (TableFormer, crops): the helper thread draws it meanwhile (#682).
+        // A scanned page reads it first (orientation, OCR) and renders here.
+        if let (Some(defer), false) = (defer, scanned) {
+            pending_image = Some(defer.submit(index, tw as u32, th as u32, hint, dw, dh));
+            RgbImage::new(1, 1)
+        } else {
+            let big = match rust_bitmap(
+                meta,
+                renderer,
+                page.is_some(),
+                index,
+                tw as u32,
+                th as u32,
+                hint,
+            ) {
+                Some(img) => Some(img),
+                None if page.is_some() => {
+                    let page = page.ok_or_else(|| no_raster(index))?;
+                    Some(page.render(tw, th, "pdfium.render")?)
+                }
+                None => None,
+            };
+            match (big, scanned_fallback(page)?) {
+                (Some(big), _) => {
+                    crate::timing::timed("image.resize", || fast_downscale(&big, dw, dh))
+                }
+                (None, Some(canvas)) => canvas,
+                (None, None) => return Err(no_raster(index)),
+            }
+        }
     } else {
         RgbImage::new(1, 1)
     };
-    // The layout model's input image, built exactly like docling's
+    // The layout model's input image, built exactly like docling's pypdfium2
     // `get_page_image(scale=1.0)`: a pdfium render at 1.5× (pypdfium2 sizes
     // with `ceil`), PIL-BICUBIC down to the point-size image (PIL `resize`'s
     // default kernel; Python `round` = ties-to-even). Distinct from the 2×
     // bitmap above — resampling 1224→640 and 612→640 are different regimes,
-    // and the heron model's borderline scores follow the pixels.
-    let image_layout = if render_image {
+    // and the heron model's borderline scores follow the pixels. "Exactly" is
+    // against the pypdfium2 backend: docling 2.123+'s default docling-parse
+    // backend renders this image with its own renderer (#478, see
+    // docs/PDF_CONFORMANCE.md).
+    let image_layout = if let Some(img) = dp_layout.take() {
+        Some(img)
+    } else if render_image {
         let tw = f64::from(width * 1.5).ceil().max(1.0) as i32;
         let th = f64::from(height * 1.5).ceil().max(1.0) as i32;
-        let cfg = PdfRenderConfig::new()
-            .set_target_width(tw)
-            .set_target_height(th);
-        let big = crate::timing::timed("pdfium.render_layout", || {
-            page.render_with_config(&cfg)
-                .map(|b| b.as_image().into_rgb8())
-        })?;
+        let big = match rust_bitmap(
+            meta,
+            renderer,
+            page.is_some(),
+            index,
+            tw as u32,
+            th as u32,
+            1.0,
+        ) {
+            Some(img) => img,
+            None => {
+                let page = page.ok_or_else(|| no_raster(index))?;
+                page.render(tw, th, "pdfium.render_layout")?
+            }
+        };
         let dw = f64::from(width).round_ties_even().max(1.0) as u32;
         let dh = f64::from(height).round_ties_even().max(1.0) as u32;
         Some(crate::timing::timed("image.resize_layout", || {
@@ -626,7 +999,7 @@ fn extract_page(
         None
     };
 
-    let mut links = extract_links(page, unrot_h);
+    let mut links = links;
     if rotation != 0 {
         for l in &mut links {
             let (a, t, r, b) = to_display_frame((l.l, l.t, l.r, l.b), rotation, unrot_w, unrot_h);
@@ -644,15 +1017,16 @@ fn extract_page(
     // 90° steps), `width`/`height` swap to the upright box, and the display
     // rotation is recorded so assembly can rotate the finished geometry back
     // into display space (docling reports rotated pages in display coords).
-    let scanned = cells.is_empty() && word_cells.is_empty() && code_cells.is_empty();
     let mut page = PdfPage {
         width,
         height,
         scale: RENDER_SCALE,
         image_layout,
+        pending_image,
         cells,
         code_cells,
         word_cells,
+        checkboxes,
         image,
         links,
         rotation: 0,
@@ -700,40 +1074,6 @@ fn fast_downscale(big: &RgbImage, dw: u32, dh: u32) -> RgbImage {
     image::imageops::resize(big, dw, dh, image::imageops::FilterType::CatmullRom)
 }
 
-#[cfg(feature = "ml")]
-/// Collect web/mail/tel hyperlink annotations on a page, mapping each link's
-/// rectangle into top-left page coordinates (like [`TextCell`]). `file://` and
-/// in-document destinations are skipped — only externally meaningful targets are
-/// rendered. pdfium occasionally lists a link twice; rects are kept as-is and the
-/// caller dedupes by resolved anchor text.
-fn extract_links(page: &pdfium_render::prelude::PdfPage<'_>, page_h: f32) -> Vec<LinkAnnot> {
-    let mut out = Vec::new();
-    for link in page.links().iter() {
-        let Some(uri) = link
-            .action()
-            .and_then(|a| a.as_uri_action().and_then(|u| u.uri().ok()))
-        else {
-            continue;
-        };
-        let scheme_ok = ["http://", "https://", "mailto:", "tel:"]
-            .iter()
-            .any(|s| uri.starts_with(s));
-        if !scheme_ok {
-            continue;
-        }
-        if let Ok(rect) = link.rect() {
-            out.push(LinkAnnot {
-                l: rect.left().value,
-                t: page_h - rect.top().value,
-                r: rect.right().value,
-                b: page_h - rect.bottom().value,
-                uri,
-            });
-        }
-    }
-    out
-}
-
 /// Map a top-left-origin rect from a page's unrotated (MediaBox) frame into its
 /// `/Rotate`d display frame — the counterpart of docling's pypdfium2
 /// `_rect_to_display_frame` (docling#4008) for our y-down coordinates.
@@ -755,38 +1095,6 @@ pub(crate) fn to_display_frame(
     }
 }
 
-#[cfg(feature = "ml")]
-/// Fallback line cells from pdfium-render's style segments (one cell per
-/// segment). Used only when the raw-FFI text page can't be loaded.
-fn segment_cells(text: &PdfPageText, page_h: f32) -> Vec<TextCell> {
-    text.segments()
-        .iter()
-        .filter_map(|seg| {
-            let s = seg.text();
-            if s.trim().is_empty() {
-                return None;
-            }
-            let r = seg.bounds();
-            Some(TextCell {
-                text: s,
-                l: r.left().value,
-                t: page_h - r.top().value,
-                r: r.right().value,
-                b: page_h - r.bottom().value,
-            })
-        })
-        .collect()
-}
-
-#[cfg(feature = "ml")]
-/// A second, raw-FFI handle on the same PDF used to drive the character loop
-/// (`FPDFText_GetUnicode`/`GetCharBox`) that pdfium-render's safe API doesn't
-/// expose. Closes the document on drop.
-struct FfiText<'a> {
-    bindings: &'a dyn PdfiumLibraryBindings,
-    doc: FPDF_DOCUMENT,
-}
-
 /// One glyph: codepoint + native (y-up) box edges. `l/b/r/t` is pdfium's *tight*
 /// ink box (used by the legacy `lines_from_glyphs`); `ll/lb/lr/lt` is the *loose*
 /// box (font ascent/descent + advance — uniform per font/size), which the
@@ -805,445 +1113,39 @@ pub(crate) struct Glyph {
     /// it for docling-parse's `enforce_same_font` (keeps a bold label and regular
     /// value as separate line cells, e.g. `LABEL : value`).
     pub(crate) font: u64,
+    /// The loose box as the text matrix actually lays it — corners
+    /// bottom-left, bottom-right, top-right, top-left as `[x0, y0, … x3, y3]`
+    /// (docling-parse's `r_x0…r_y3`) — for a glyph whose baseline is **not**
+    /// upright: rotated 90°/180°/270° or tilted (#528). `ll/lb/lr/lt` are then
+    /// this quad's axis-aligned extent. `None` for upright text, whose quad is
+    /// the `ll/lb/lr/lt` rectangle itself — that path stays exactly as it was.
+    pub(crate) quad: Option<[f32; 8]>,
 }
 
-#[cfg(feature = "ml")]
-impl<'a> FfiText<'a> {
-    fn load(bindings: &'a dyn PdfiumLibraryBindings, bytes: &[u8], password: Option<&str>) -> Self {
-        let doc = bindings.FPDF_LoadMemDocument(bytes, password);
-        FfiText { bindings, doc }
-    }
-
-    /// Reconstruct line cells for page `index` (zero-based) via the
-    /// chars→words→lines grouping. Returns `(prose_cells, code_cells)` — the same
-    /// glyphs grouped two ways (gap-heuristic for prose, space-glyph-only for
-    /// code). Both empty on any failure (caller falls back).
-    fn page_cells(&self, index: i32, page_h: f32) -> (Vec<TextCell>, Vec<TextCell>, Vec<TextCell>) {
-        let empty = || (Vec::new(), Vec::new(), Vec::new());
-        if self.doc.is_null() {
-            return empty();
-        }
-        let b = self.bindings;
-        let page = b.FPDF_LoadPage(self.doc, index);
-        if page.is_null() {
-            return empty();
-        }
-        let tp = b.FPDFText_LoadPage(page);
-        let out = if tp.is_null() {
-            empty()
-        } else {
-            let dp = use_dp_lines();
-            let g = glyphs(b, tp, dp);
-            b.FPDFText_ClosePage(tp);
-            // Prose line cells: the docling-parse-style sanitizer (behind a flag
-            // while it's validated) or the legacy gap-heuristic reconstruction.
-            let prose = if dp {
-                crate::dp_lines::line_cells(&g, page_h, false)
-            } else {
-                lines_from_glyphs(&g, page_h, Grouping::Prose)
-            };
-            (
-                prose,
-                lines_from_glyphs(&g, page_h, Grouping::CodeSpaceOnly),
-                words_from_glyphs(&g, page_h),
-            )
-        };
-        b.FPDF_ClosePage(page);
-        out
-    }
-}
-
-#[cfg(feature = "ml")]
-impl Drop for FfiText<'_> {
-    fn drop(&mut self) {
-        if !self.doc.is_null() {
-            self.bindings.FPDF_CloseDocument(self.doc);
+impl Glyph {
+    /// The font's height on the glyph's own axis (ascent − descent): the
+    /// loose box's height for upright text, the quad's left edge otherwise —
+    /// a 90°-turned glyph's vertical extent is its advance, not its size.
+    pub(crate) fn height(&self) -> f32 {
+        match self.quad {
+            Some(q) => (q[6] - q[0]).hypot(q[7] - q[1]),
+            None => self.lt - self.lb,
         }
     }
 }
 
-#[cfg(feature = "ml")]
-/// Read every glyph (codepoint + native box) from the text page, in document
-/// order. A space glyph is kept as a word-boundary marker (NaN box, char `' '`);
-/// pdfium emits these on most lines and they pin word splits exactly. Hard line
-/// breaks are dropped (line structure comes from geometry); the gap heuristic in
-/// [`lines_from_glyphs`] is the fallback for the lines pdfium leaves space-less.
-/// Debug helper: the raw pdfium glyph stream (codepoint + native bottom-left
-/// box) for a page, in pdfium's character order. For comparing against
-/// docling-parse's char cells.
-pub fn debug_glyphs(bytes: &[u8], index: i32) -> Vec<(char, f32, f32)> {
-    let Ok(pdfium) = bind() else {
-        return Vec::new();
-    };
-    let ffi = FfiText::load(pdfium.bindings(), bytes, None);
-    if ffi.doc.is_null() {
-        return Vec::new();
-    }
-    let b = ffi.bindings;
-    let page = b.FPDF_LoadPage(ffi.doc, index);
-    if page.is_null() {
-        return Vec::new();
-    }
-    let tp = b.FPDFText_LoadPage(page);
-    let mut out = Vec::new();
-    if !tp.is_null() {
-        for g in glyphs(b, tp, true) {
-            out.push((g.ch, g.ll, g.lr));
-        }
-        b.FPDFText_ClosePage(tp);
-    }
-    b.FPDF_ClosePage(page);
-    out
-}
-
-#[cfg(feature = "ml")]
-/// One text object on a page, for the hidden-layer diagnostic.
-#[derive(Debug, Clone)]
-pub struct DebugTextObject {
-    /// True when the object is drawn invisibly (text render mode 3) — the marker of
-    /// a hidden duplicate text layer.
-    pub invisible: bool,
-    /// Bounding box in native PDF points (bottom-left origin).
-    pub l: f32,
-    pub b: f32,
-    pub r: f32,
-    pub t: f32,
-    /// The object's text (best-effort; empty if it could not be read).
-    pub text: String,
-}
-
-#[cfg(feature = "ml")]
-/// Diagnostic: every text object on page `index`, each tagged visible/invisible
-/// (via the object-level [`FPDFTextObj_GetTextRenderMode`], which — unlike the
-/// per-character render-mode API — is available on the default pdfium binding).
-/// A hidden duplicate text layer shows up as invisible objects repeating the
-/// visible text. Used by the `dump_render_modes` example.
-///
-/// [`FPDFTextObj_GetTextRenderMode`]: pdfium_render::prelude::PdfiumLibraryBindings::FPDFTextObj_GetTextRenderMode
-pub fn debug_text_objects(bytes: &[u8], index: i32) -> Vec<DebugTextObject> {
-    let Ok(pdfium) = bind() else {
-        return Vec::new();
-    };
-    let ffi = FfiText::load(pdfium.bindings(), bytes, None);
-    if ffi.doc.is_null() {
-        return Vec::new();
-    }
-    let b = ffi.bindings;
-    let page = b.FPDF_LoadPage(ffi.doc, index);
-    if page.is_null() {
-        return Vec::new();
-    }
-    let tp = b.FPDFText_LoadPage(page);
-    let mut out = Vec::new();
-    let n = b.FPDFPage_CountObjects(page);
-    for i in 0..n {
-        let obj = b.FPDFPage_GetObject(page, i);
-        if obj.is_null() || b.FPDFPageObj_GetType(obj) != FPDF_PAGEOBJ_TEXT as i32 {
-            continue;
-        }
-        let (mut l, mut bot, mut r, mut top) = (0f32, 0f32, 0f32, 0f32);
-        if b.FPDFPageObj_GetBounds(obj, &mut l, &mut bot, &mut r, &mut top) == 0 {
-            continue;
-        }
-        let invisible = b.FPDFTextObj_GetTextRenderMode(obj) == INVISIBLE_RENDER_MODE;
-        let text = if tp.is_null() {
-            String::new()
-        } else {
-            // FPDFTextObj_GetText returns the count of UTF-16 code units, including
-            // the trailing NUL; call once for the size, once to fill.
-            let need = b.FPDFTextObj_GetText(obj, tp, std::ptr::null_mut(), 0);
-            if need <= 1 {
-                String::new()
-            } else {
-                let mut buf = vec![0u16; need as usize];
-                b.FPDFTextObj_GetText(obj, tp, buf.as_mut_ptr(), need);
-                if let Some(&0) = buf.last() {
-                    buf.pop();
-                }
-                String::from_utf16_lossy(&buf)
-            }
-        };
-        out.push(DebugTextObject {
-            invisible,
-            l,
-            b: bot,
-            r,
-            t: top,
-            text,
-        });
-    }
-    if !tp.is_null() {
-        b.FPDFText_ClosePage(tp);
-    }
-    b.FPDF_ClosePage(page);
-    out
-}
-
-#[cfg(feature = "ml")]
-/// Hash a glyph's PDF font name + flags, for `enforce_same_font`. 0 if unavailable.
-fn font_hash(b: &dyn PdfiumLibraryBindings, tp: FPDF_TEXTPAGE, i: i32) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut flags: std::os::raw::c_int = 0;
-    let len = b.FPDFText_GetFontInfo(tp, i, std::ptr::null_mut(), 0, &mut flags);
-    if len == 0 {
-        return 0;
-    }
-    let mut buf = vec![0u8; len as usize];
-    b.FPDFText_GetFontInfo(
-        tp,
-        i,
-        buf.as_mut_ptr() as *mut std::os::raw::c_void,
-        len,
-        &mut flags,
-    );
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    buf.hash(&mut h);
-    flags.hash(&mut h);
-    h.finish()
-}
-
-#[cfg(feature = "ml")]
-/// A glyph's PDF font name (NUL-trimmed), or empty if unavailable.
-fn font_name_bytes(b: &dyn PdfiumLibraryBindings, tp: FPDF_TEXTPAGE, i: i32) -> Vec<u8> {
-    let mut flags: std::os::raw::c_int = 0;
-    let len = b.FPDFText_GetFontInfo(tp, i, std::ptr::null_mut(), 0, &mut flags);
-    if len == 0 {
-        return Vec::new();
-    }
-    let mut buf = vec![0u8; len as usize];
-    b.FPDFText_GetFontInfo(
-        tp,
-        i,
-        buf.as_mut_ptr() as *mut std::os::raw::c_void,
-        len,
-        &mut flags,
-    );
-    while buf.last() == Some(&0) {
-        buf.pop();
-    }
-    buf
-}
-
-#[cfg(feature = "ml")]
-/// Read the text layer's glyph boxes and font styles for the given **1-based**
-/// pages — the heading-hierarchy stage's style signal (#302). A separate,
-/// on-demand pass over the text pages (no rendering), so the extraction
-/// pipeline itself stays byte-identical whether or not the stage runs; pages
-/// without a text layer (scans) simply yield no glyphs and the stage falls
-/// back to its other signals. Boxes are the *loose* char boxes (font ascent +
-/// descent — the font-size proxy), converted to top-left origin.
-pub(crate) fn glyph_styles(
-    bytes: &[u8],
-    password: Option<&str>,
-    pages: &[usize],
-) -> std::collections::HashMap<usize, Vec<crate::heading_hierarchy::GlyphStyle>> {
-    use crate::heading_hierarchy::GlyphStyle;
-    let mut out = std::collections::HashMap::new();
-    let Ok(pdfium) = bind() else {
-        return out;
-    };
-    let ffi = FfiText::load(pdfium.bindings(), bytes, password);
-    if ffi.doc.is_null() {
-        return out;
-    }
-    let b = ffi.bindings;
-    // Each distinct font name parses once per document.
-    let mut cache: std::collections::HashMap<Vec<u8>, crate::font_style::FontStyle> =
-        std::collections::HashMap::new();
-    for &page_no in pages {
-        if page_no == 0 {
-            continue;
-        }
-        let page = b.FPDF_LoadPage(ffi.doc, (page_no - 1) as i32);
-        if page.is_null() {
-            continue;
-        }
-        let page_h = b.FPDF_GetPageHeightF(page);
-        let tp = b.FPDFText_LoadPage(page);
-        if !tp.is_null() {
-            let n = b.FPDFText_CountChars(tp);
-            let mut styles = Vec::with_capacity(n.max(0) as usize);
-            for i in 0..n {
-                let ch = match char::from_u32(b.FPDFText_GetUnicode(tp, i)) {
-                    Some(c) => c,
-                    None => continue,
-                };
-                if ch.is_whitespace() {
-                    continue;
-                }
-                let mut lr = FS_RECTF {
-                    left: 0.0,
-                    top: 0.0,
-                    right: 0.0,
-                    bottom: 0.0,
-                };
-                if b.FPDFText_GetLooseCharBox(tp, i, &mut lr) == 0 {
-                    continue;
-                }
-                let name = font_name_bytes(b, tp, i);
-                let style = *cache.entry(name).or_insert_with_key(|n| {
-                    crate::font_style::parse_font_style(&String::from_utf8_lossy(n))
-                });
-                styles.push(GlyphStyle {
-                    l: lr.left,
-                    t: page_h - lr.top,
-                    r: lr.right,
-                    b: page_h - lr.bottom,
-                    height: lr.top - lr.bottom,
-                    weight_cls: crate::font_style::weight_class(style.weight),
-                    italic: style.italic,
-                    styled: style.known,
-                });
-            }
-            b.FPDFText_ClosePage(tp);
-            out.insert(page_no, styles);
-        }
-        b.FPDF_ClosePage(page);
-    }
-    out
-}
-
-#[cfg(feature = "ml")]
-/// pdfium text render mode 3: the glyph is drawn with neither fill nor stroke —
-/// an invisible glyph. Web-to-PDF exporters put a hidden plain-text copy of
-/// syntax-highlighted code (and other "copy"/accessibility layers) in this mode,
-/// which the char-level text API then extracts as a duplicate of the visible text.
-const INVISIBLE_RENDER_MODE: i32 = 3;
-
-#[cfg(feature = "ml")]
-fn glyphs(b: &dyn PdfiumLibraryBindings, tp: FPDF_TEXTPAGE, fetch_font: bool) -> Vec<Glyph> {
-    let n = b.FPDFText_CountChars(tp);
-    let mut out = Vec::with_capacity(n.max(0) as usize);
-    for i in 0..n {
-        let ch = match char::from_u32(b.FPDFText_GetUnicode(tp, i)) {
-            Some(c) => c,
-            None => continue,
-        };
-        if ch == '\r' || ch == '\n' {
-            continue;
-        }
-        // Spaces are font-neutral (0): pdfium's generated spaces carry a default
-        // font that would otherwise block every word↔space merge under
-        // enforce_same_font; docling-parse's spaces inherit the run's font.
-        let font = if fetch_font && !ch.is_whitespace() {
-            font_hash(b, tp, i)
-        } else {
-            0
-        };
-        let (mut l, mut r, mut bot, mut top) = (0f64, 0f64, 0f64, 0f64);
-        let has_box = b.FPDFText_GetCharBox(tp, i, &mut l, &mut r, &mut bot, &mut top) != 0;
-        // Loose box: font ascent/descent + glyph advance, uniform per font/size.
-        let mut lr = FS_RECTF {
-            left: 0.0,
-            top: 0.0,
-            right: 0.0,
-            bottom: 0.0,
-        };
-        let (ll, lb, lrt, ltop) = if b.FPDFText_GetLooseCharBox(tp, i, &mut lr) != 0 {
-            (lr.left, lr.bottom, lr.right, lr.top)
-        } else if has_box {
-            (l as f32, bot as f32, r as f32, top as f32)
-        } else {
-            (f32::NAN, 0.0, 0.0, 0.0)
-        };
-        if ch.is_whitespace() {
-            // Keep the space *with its box* (the docling-parse-style line sanitizer
-            // needs literal space glyphs); NaN `l` if pdfium reports no box (the
-            // legacy `lines_from_glyphs` ignores the box and only flags a space).
-            out.push(Glyph {
-                ch: ' ',
-                l: if has_box { l as f32 } else { f32::NAN },
-                b: if has_box { bot as f32 } else { 0.0 },
-                r: if has_box { r as f32 } else { 0.0 },
-                t: if has_box { top as f32 } else { 0.0 },
-                ll,
-                lb,
-                lr: lrt,
-                lt: ltop,
-                font,
-            });
-            continue;
-        }
-        if !has_box {
-            continue;
-        }
-        out.push(Glyph {
-            ch,
-            l: l as f32,
-            b: bot as f32,
-            r: r as f32,
-            t: top as f32,
-            ll,
-            lb,
-            lr: lrt,
-            lt: ltop,
-            font,
-        });
-    }
-    // pdfium splits the Arabic lam-alef ligature into two chars at the *same* x
-    // (it's one glyph) in visual order — `alef-variant, lam`. docling-parse and
-    // logical order are `lam, alef-variant`. Detect the ligature by the shared x
-    // and swap. The shared-x test reliably distinguishes a true ligature from a
-    // genuine `alef + lam` sequence (the article `ال`, or `فعالة`), whose two
-    // glyphs sit at different x and must NOT be reordered.
-    for i in 0..out.len().saturating_sub(1) {
-        let same_x = out[i].l.is_finite()
-            && out[i + 1].l.is_finite()
-            && (out[i].l - out[i + 1].l).abs() < 1.0;
-        if same_x
-            && matches!(out[i].ch, '\u{0622}' | '\u{0623}' | '\u{0625}' | '\u{0627}')
-            && out[i + 1].ch == '\u{0644}'
-        {
-            out.swap(i, i + 1);
-        }
-    }
-    // Reconstruct degenerate (zero-width) loose space boxes by spanning the gap to
-    // the next glyph on the same line, so the sanitizer keeps them as word
-    // separators rather than dropping them (which would merge `Information systems`
-    // → `Informationsystems`). pdfium gives generated spaces a zero-width box at a
-    // wrong baseline; a wrap (different baseline) or a touching gap is left alone.
-    for i in 0..out.len() {
-        if out[i].ch != ' ' || (out[i].lr - out[i].ll).abs() >= 0.5 {
-            continue;
-        }
-        let prev = out[..i]
-            .iter()
-            .rev()
-            .find(|g| g.ch != ' ' && g.ll.is_finite())
-            .map(|g| (g.lr, g.lb, g.lt));
-        let next = out[i + 1..]
-            .iter()
-            .find(|g| g.ch != ' ' && g.ll.is_finite())
-            .map(|g| (g.ll, g.lb));
-        if let (Some((plr, plb, plt)), Some((nll, nlb))) = (prev, next) {
-            let line_h = (plt - plb).abs().max(1.0);
-            if (plb - nlb).abs() < line_h * 0.5 && nll > plr + 0.5 {
-                out[i].ll = plr;
-                out[i].lr = nll;
-                out[i].lb = plb;
-                out[i].lt = plt;
-            }
-        }
-    }
-    out
-}
-
-/// How [`lines_from_glyphs`] splits a line into words.
+/// How [`lines_from_glyphs`] splits a line into words. Two more modes lived
+/// here — the prose gap heuristic with punctuation glue and pdfium's
+/// space-glyph-only code split — for pdfium's glyph stream; the parser's
+/// prose goes through `dp_lines` and pdfium's text page is gone.
 #[derive(Clone, Copy, PartialEq)]
 enum Grouping {
-    /// Gap heuristic + punctuation glue (`engines,`, `[37`, `98.5`) — prose.
-    Prose,
-    /// Split only at literal space glyphs, never glue — pdfium code cells.
-    /// pdfium's monospace listings carry a real space glyph at every source space,
-    /// and its overhanging loose boxes would make the gap heuristic over-split
-    /// (`f un c t i o n`), so honouring just the spaces reproduces the spacing.
-    CodeSpaceOnly,
     /// Split on the inter-glyph **gap** (or a space glyph), but never glue — for
     /// the parser's code cells: the parser emits no space glyphs (a source space
     /// is a positioning gap), and its clean advance boxes make the gap reliable.
-    /// Unlike [`Grouping::Prose`] there is no punctuation glue, so a real gap
-    /// always splits (`et al. 2000`, not `et al.2000`) while genuinely touching
-    /// tokens stay joined (`add(a,` / `b)`).
+    /// There is no punctuation glue, so a real gap always splits (`et al.
+    /// 2000`, not `et al.2000`) while genuinely touching tokens stay joined
+    /// (`add(a,` / `b)`).
     CodeGap,
 }
 
@@ -1297,30 +1199,10 @@ fn lines_from_glyphs(gs: &[Glyph], page_h: f32, mode: Grouping) -> Vec<TextCell>
                 g.l < p.r
             };
             new_line = (p.b - g.b > h * 0.5 && x_reset) || (p.b - g.b > line_h.max(h) * 1.5);
-            // Don't split before closing punctuation, after opening punctuation, or
-            // after a period that runs into a digit/lowercase letter — docling
-            // keeps `engines,` / `[37` / `i.e.` / `98.5` together even across a
-            // space or gap.
-            let glued = is_close_punct(g.ch)
-                || is_open_punct(p.ch)
-                || (p.ch.is_ascii_digit() && g.ch.is_ascii_digit())
-                || (p.ch == '.'
-                    && !pending_space
-                    && (g.ch.is_ascii_digit() || g.ch.is_ascii_lowercase()));
             let word_gap = line_h.max(h) * 0.25;
-            new_word = if mode == Grouping::CodeSpaceOnly {
-                new_line || pending_space
-            } else if mode == Grouping::CodeGap {
+            new_word = match mode {
                 // Gap-based, no glue: a real gap always splits, touching tokens join.
-                new_line || pending_space || g.l - p.r > word_gap
-            } else if is_arabic(g.ch) || is_arabic(p.ch) {
-                // RTL runs right-to-left, so the inter-word gap is `p.l - g.r`. A
-                // real word space has a gap; pdfium also emits spurious zero-gap
-                // space glyphs inside words (`التي`), so require the gap rather
-                // than trusting a bare space glyph.
-                new_line || (p.l - g.r > word_gap && !glued)
-            } else {
-                new_line || ((pending_space || g.l - p.r > word_gap) && !glued)
+                Grouping::CodeGap => new_line || pending_space || g.l - p.r > word_gap,
             };
         }
         pending_space = false;
@@ -1350,114 +1232,19 @@ fn lines_from_glyphs(gs: &[Glyph], page_h: f32, mode: Grouping) -> Vec<TextCell>
     cells
 }
 
-/// Code line cells from the **parser**'s glyph stream. Unlike pdfium — whose
-/// monospace listings carry explicit space glyphs (so [`Grouping::CodeSpaceOnly`]
-/// keeps their spacing) — the parser emits no space glyphs: a source space is a
-/// positioning gap. So code cells use [`Grouping::CodeGap`], which splits on the
-/// inter-glyph gap (a space wherever it exceeds ~0.25× the line height) but never
-/// glues punctuation, so `et al. 2000` keeps its space while `add(a,` / `b)` stay
-/// joined. The parser's clean advance boxes make the gap heuristic reliable here,
-/// where pdfium's overhanging loose boxes would over-split (`f un c t i o n`).
+/// Code line cells from the parser's glyph stream. The parser emits no space
+/// glyphs — a source space is a positioning gap — so code cells use
+/// [`Grouping::CodeGap`], which splits on the inter-glyph gap (a space
+/// wherever it exceeds ~0.25× the line height) but never glues punctuation,
+/// so `et al. 2000` keeps its space while `add(a,` / `b)` stay joined. The
+/// parser's clean advance boxes make the gap heuristic reliable here, where
+/// pdfium's overhanging loose boxes used to over-split (`f un c t i o n`).
 pub(crate) fn code_cells_from_glyphs(gs: &[Glyph], page_h: f32) -> Vec<TextCell> {
     lines_from_glyphs(gs, page_h, Grouping::CodeGap)
 }
 
-/// Per-word cells (each word's text + top-left bbox), using the same word/line
-/// splitting as [`lines_from_glyphs`] but emitting one cell per word instead of
-/// joining into lines — the legacy gap-heuristic word grouping, kept for the
-/// pdfium word path (`DOCLING_PDFIUM_WORDS`). The default parser path uses
-/// [`crate::dp_lines::word_cells`] instead.
-pub(crate) fn words_from_glyphs(gs: &[Glyph], page_h: f32) -> Vec<TextCell> {
-    let mut cells = Vec::new();
-    let mut word = String::new();
-    let inf = (
-        f32::INFINITY,
-        f32::INFINITY,
-        f32::NEG_INFINITY,
-        f32::NEG_INFINITY,
-    );
-    let (mut wl, mut wb, mut wr, mut wt) = inf;
-    let mut line_h: f32 = 0.0;
-    let mut prev: Option<&Glyph> = None;
-    let mut pending_space = false;
-    for g in gs {
-        if g.ch == ' ' {
-            pending_space = true;
-            continue;
-        }
-        let h = (g.t - g.b).abs().max(1.0);
-        let mut new_line = false;
-        let mut new_word = false;
-        if let Some(p) = prev {
-            // LTR wraps reset x leftward (`g.l < p.r`); RTL (Arabic) wraps reset
-            // rightward (the new line begins at the far right). A large drop
-            // (≥1.5× line height) is a new line regardless of x.
-            let x_reset = if is_arabic(g.ch) || is_arabic(p.ch) {
-                g.l > p.r
-            } else {
-                g.l < p.r
-            };
-            new_line = (p.b - g.b > h * 0.5 && x_reset) || (p.b - g.b > line_h.max(h) * 1.5);
-            // No digit-digit glue here (unlike the prose grouping): table cells in
-            // adjacent columns are numeric and a column gap must still split them
-            // (`0.965` `0.934`, not `0.9650.934`). Intra-number digits have no gap
-            // so they stay together regardless.
-            let glued = is_close_punct(g.ch)
-                || is_open_punct(p.ch)
-                || (p.ch == '.'
-                    && !pending_space
-                    && (g.ch.is_ascii_digit() || g.ch.is_ascii_lowercase()));
-            let word_gap = line_h.max(h) * 0.25;
-            new_word = new_line || ((pending_space || g.l - p.r > word_gap) && !glued);
-        }
-        pending_space = false;
-        if new_word && !word.is_empty() {
-            cells.push(TextCell {
-                text: std::mem::take(&mut word),
-                l: wl,
-                t: page_h - wt,
-                r: wr,
-                b: page_h - wb,
-            });
-            (wl, wb, wr, wt) = inf;
-        }
-        if new_line {
-            line_h = 0.0;
-        }
-        word.push(g.ch);
-        wl = wl.min(g.l);
-        wb = wb.min(g.b);
-        wr = wr.max(g.r);
-        wt = wt.max(g.t);
-        line_h = line_h.max(h);
-        prev = Some(g);
-    }
-    if !word.is_empty() {
-        cells.push(TextCell {
-            text: word,
-            l: wl,
-            t: page_h - wt,
-            r: wr,
-            b: page_h - wb,
-        });
-    }
-    cells
-}
-
 fn is_arabic(c: char) -> bool {
     ('\u{0600}'..='\u{06FF}').contains(&c)
-}
-
-fn is_close_punct(c: char) -> bool {
-    matches!(
-        c,
-        ',' | '.' | ';' | '!' | '?' | ')' | ']' | '}' | '%' | '\'' | '\u{2019}' | '\u{2018}'
-    )
-}
-
-fn is_open_punct(c: char) -> bool {
-    // `@` glues to what follows (`mAP @0.5`, `bpf@zurich`, `@decorator`).
-    matches!(c, '(' | '[' | '{' | '@')
 }
 
 fn push_word(word: &mut String, words: &mut Vec<String>) {
@@ -1486,9 +1273,319 @@ fn push_line(
     });
 }
 
+/// The pdfium library, behind the `pdfium` feature (phase 5 of "Retiring
+/// pdfium"): the render `DOCLING_RS_RENDERER=pdfium` asks for — docling's
+/// pypdfium2 chain — the last resort for a file lopdf cannot read, and the
+/// oracle of the raster and object-model tests. The default build has the
+/// stub below and never links or loads pdfium.
+#[cfg(feature = "pdfium")]
+mod native {
+    use super::LinkAnnot;
+    use crate::PdfError;
+    use image::RgbImage;
+    use pdfium_render::prelude::*;
+
+    /// The bound library.
+    pub(super) struct Lib(Pdfium);
+    /// An open document.
+    pub(super) struct Session<'a> {
+        doc: PdfDocument<'a>,
+    }
+    /// A loaded page.
+    pub(super) struct Page<'a>(PdfPage<'a>);
+
+    /// Try binding pdfium from a directory (or a literal library file path):
+    /// `<dir>/<platform library name>` first, else `<dir>` itself as the file.
+    fn try_bind_dir(path: &str) -> Option<Box<dyn PdfiumLibraryBindings>> {
+        let name = Pdfium::pdfium_platform_library_name_at_path(path);
+        if let Ok(b) = Pdfium::bind_to_library(&name) {
+            return Some(b);
+        }
+        Pdfium::bind_to_library(path).ok()
+    }
+
+    /// Bind to the pdfium dynamic library. Honors `PDFIUM_DYNAMIC_LIB_PATH` (a
+    /// directory or file) first; else falls back to `.pdfium/lib` relative to
+    /// the current directory (the layout `scripts/install/pdf_setup.sh`
+    /// produces); else the system library.
+    pub(super) fn bind() -> Result<Lib, PdfError> {
+        if let Some(path) = docling_core::env::nonempty("PDFIUM_DYNAMIC_LIB_PATH") {
+            if let Some(b) = try_bind_dir(&path) {
+                return Ok(Lib(Pdfium::new(b)));
+            }
+        }
+        if let Some(b) = try_bind_dir(&crate::resolve_asset(".pdfium/lib")) {
+            return Ok(Lib(Pdfium::new(b)));
+        }
+        Pdfium::bind_to_system_library()
+            .map(|b| Lib(Pdfium::new(b)))
+            .map_err(Into::into)
+    }
+
+    /// `bind()` for unit tests: point `PDFIUM_DYNAMIC_LIB_PATH` at the
+    /// repo-root `.pdfium/lib` first (tests run with CWD = the crate dir,
+    /// where the CWD-relative default cannot see it).
+    #[cfg(test)]
+    pub(crate) fn bind_for_tests() -> Result<Pdfium, PdfError> {
+        if std::env::var_os("PDFIUM_DYNAMIC_LIB_PATH").is_none() {
+            let lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.pdfium/lib");
+            if lib.is_dir() {
+                std::env::set_var("PDFIUM_DYNAMIC_LIB_PATH", &lib);
+            }
+        }
+        bind().map(|l| l.0)
+    }
+
+    impl Lib {
+        pub(super) fn open<'a>(
+            &'a self,
+            bytes: &'a [u8],
+            password: Option<&str>,
+        ) -> Result<Session<'a>, PdfError> {
+            crate::timing::timed("pdfium.open", || {
+                self.0
+                    .load_pdf_from_byte_slice(bytes, password)
+                    .map(|doc| Session { doc })
+                    .map_err(Into::into)
+            })
+        }
+    }
+
+    impl Session<'_> {
+        pub(super) fn page_count(&self) -> usize {
+            self.doc.pages().len() as usize
+        }
+
+        pub(super) fn page(&self, index: usize) -> Result<Page<'_>, PdfError> {
+            self.doc
+                .pages()
+                .get(index as PdfPageIndex)
+                .map(Page)
+                .map_err(Into::into)
+        }
+    }
+
+    impl Page<'_> {
+        /// The display size in points.
+        pub(super) fn size(&self) -> (f32, f32) {
+            (self.0.width().value, self.0.height().value)
+        }
+
+        /// pdfium's view of the page's geometry, for the files lopdf cannot
+        /// read — the same numbers `pdf_meta` computes from the object model.
+        pub(super) fn geom(&self) -> crate::pdf_meta::PageGeom {
+            crate::pdf_meta::PageGeom {
+                width: self.0.width().value,
+                height: self.0.height().value,
+                rotation: match self.0.rotation() {
+                    Ok(PdfPageRenderRotation::Degrees90) => 90u16,
+                    Ok(PdfPageRenderRotation::Degrees180) => 180,
+                    Ok(PdfPageRenderRotation::Degrees270) => 270,
+                    _ => 0,
+                },
+            }
+        }
+
+        /// Render the page into a `w` × `h` RGB bitmap under timing `stage`.
+        pub(super) fn render(
+            &self,
+            w: i32,
+            h: i32,
+            stage: &'static str,
+        ) -> Result<RgbImage, PdfError> {
+            let cfg = PdfRenderConfig::new()
+                .set_target_width(w)
+                .set_target_height(h);
+            crate::timing::timed(stage, || {
+                self.0
+                    .render_with_config(&cfg)
+                    .map(|b| b.as_image().into_rgb8())
+                    .map_err(Into::into)
+            })
+        }
+
+        /// Collect web/mail/tel hyperlink annotations on the page, mapping
+        /// each link's rectangle into top-left page coordinates (like
+        /// [`super::TextCell`]). `file://` and in-document destinations are
+        /// skipped — only externally meaningful targets are rendered. pdfium
+        /// occasionally lists a link twice; rects are kept as-is and the
+        /// caller dedupes by resolved anchor text.
+        pub(super) fn links(&self, page_h: f32) -> Vec<LinkAnnot> {
+            let mut out = Vec::new();
+            for link in self.0.links().iter() {
+                let Some(uri) = link
+                    .action()
+                    .and_then(|a| a.as_uri_action().and_then(|u| u.uri().ok()))
+                else {
+                    continue;
+                };
+                let scheme_ok = ["http://", "https://", "mailto:", "tel:"]
+                    .iter()
+                    .any(|s| uri.starts_with(s));
+                if !scheme_ok {
+                    continue;
+                }
+                if let Ok(rect) = link.rect() {
+                    out.push(LinkAnnot {
+                        l: rect.left().value,
+                        t: page_h - rect.top().value,
+                        r: rect.right().value,
+                        b: page_h - rect.bottom().value,
+                        uri,
+                    });
+                }
+            }
+            out
+        }
+    }
+}
+
+/// The `pdfium`-less build: pdfium never binds, so every entry point falls
+/// through to the pure-Rust stack, and a file the object model cannot read
+/// fails with [`no_raster`]'s hint.
+#[cfg(all(feature = "ml", not(feature = "pdfium")))]
+mod native {
+    use super::LinkAnnot;
+    use crate::PdfError;
+    use image::RgbImage;
+    use std::convert::Infallible;
+    use std::marker::PhantomData;
+
+    pub(super) struct Lib(Infallible);
+    pub(super) struct Session<'a>(Infallible, PhantomData<&'a ()>);
+    pub(super) struct Page<'a>(Infallible, PhantomData<&'a ()>);
+
+    /// Reached only for a file the pure-Rust object model could not read
+    /// (every entry point tries it first), so the error is about the file:
+    /// naming the missing library sent users of a corrupt or non-PDF upload
+    /// looking for a pdfium install that would not have helped either.
+    pub(super) fn bind() -> Result<Lib, PdfError> {
+        Err(PdfError::Document(crate::UNREADABLE.into()))
+    }
+
+    impl Lib {
+        pub(super) fn open<'a>(
+            &'a self,
+            _bytes: &'a [u8],
+            _password: Option<&str>,
+        ) -> Result<Session<'a>, PdfError> {
+            match self.0 {}
+        }
+    }
+
+    impl Session<'_> {
+        pub(super) fn page_count(&self) -> usize {
+            match self.0 {}
+        }
+
+        pub(super) fn page(&self, _index: usize) -> Result<Page<'_>, PdfError> {
+            match self.0 {}
+        }
+    }
+
+    impl Page<'_> {
+        pub(super) fn size(&self) -> (f32, f32) {
+            match self.0 {}
+        }
+
+        pub(super) fn geom(&self) -> crate::pdf_meta::PageGeom {
+            match self.0 {}
+        }
+
+        pub(super) fn render(
+            &self,
+            _w: i32,
+            _h: i32,
+            _stage: &'static str,
+        ) -> Result<RgbImage, PdfError> {
+            match self.0 {}
+        }
+
+        pub(super) fn links(&self, _page_h: f32) -> Vec<LinkAnnot> {
+            match self.0 {}
+        }
+    }
+}
+
+#[cfg(all(test, feature = "pdfium"))]
+pub(crate) use native::bind_for_tests;
+
 #[cfg(test)]
 mod tests {
     use super::{checked_render_dims, max_render_side, to_display_frame};
+
+    /// The pure-Rust object model must answer exactly what pdfium answers —
+    /// page count, display size, `/Rotate`, URI links — on every corpus PDF,
+    /// or a checkout without pdfium would convert differently. Needs the
+    /// library; skips cleanly without it (CI has no pdfium).
+    #[test]
+    #[cfg(feature = "pdfium")]
+    fn pdf_meta_matches_pdfium_on_the_corpus() {
+        let Ok(_) = super::bind_for_tests() else {
+            eprintln!("skipping: pdfium not found");
+            return;
+        };
+        let lib = super::native::bind().unwrap();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut files: Vec<std::path::PathBuf> = Vec::new();
+        for dir in ["tests/data/pdf/sources", "tests/data/scanned/sources"] {
+            let Ok(rd) = std::fs::read_dir(root.join(dir)) else {
+                continue;
+            };
+            files.extend(
+                rd.flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.extension().is_some_and(|e| e == "pdf")),
+            );
+        }
+        files.sort();
+        assert!(!files.is_empty(), "corpus not found");
+        let mut checked = 0;
+        for path in files {
+            let bytes = std::fs::read(&path).unwrap();
+            let Ok(doc) = lib.open(&bytes, None) else {
+                continue; // password fixtures etc.
+            };
+            let Some(meta) = crate::pdf_meta::PdfMeta::open(&bytes) else {
+                panic!(
+                    "{}: lopdf could not read a file pdfium reads",
+                    path.display()
+                );
+            };
+            assert_eq!(meta.page_count(), doc.page_count(), "{}", path.display());
+            for i in 0..meta.page_count() {
+                let page = doc.page(i).unwrap();
+                let want = page.geom();
+                let got = meta.geometry(i).unwrap();
+                assert!(
+                    (got.width - want.width).abs() < 0.01
+                        && (got.height - want.height).abs() < 0.01
+                        && got.rotation == want.rotation,
+                    "{} p{}: meta {got:?} vs pdfium {want:?}",
+                    path.display(),
+                    i + 1
+                );
+                let mut want_links = page.links(want.unrotated().1);
+                let mut got_links = meta.links(i);
+                let key = |l: &super::LinkAnnot| {
+                    (
+                        l.uri.clone(),
+                        (l.l * 10.0) as i64,
+                        (l.t * 10.0) as i64,
+                        (l.r * 10.0) as i64,
+                        (l.b * 10.0) as i64,
+                    )
+                };
+                want_links.sort_by_key(key);
+                got_links.sort_by_key(key);
+                let want_keys: Vec<_> = want_links.iter().map(key).collect();
+                let got_keys: Vec<_> = got_links.iter().map(key).collect();
+                assert_eq!(got_keys, want_keys, "{} p{}: links", path.display(), i + 1);
+                checked += 1;
+            }
+        }
+        eprintln!("pdf_meta checked against pdfium on {checked} pages");
+    }
 
     /// A page whose declared size renders past the per-side cap is rejected
     /// with a recoverable error, before pdfium or `image` allocates the

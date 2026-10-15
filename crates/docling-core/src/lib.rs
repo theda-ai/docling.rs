@@ -17,19 +17,34 @@ pub mod confidence;
 mod doclang;
 pub mod doctags;
 mod document;
+mod encryption;
 pub mod env;
+mod html;
+pub mod jpeg;
 mod json;
 mod labels;
 mod latex;
 mod markdown;
+mod mathml;
+pub mod pandoc;
+mod pixel_digest;
+pub mod redact;
 pub mod tree;
+mod vtt;
 
 pub use confidence::{ConfidenceReport, PageConfidence, QualityGrade};
 pub use doclang::inline_runs_from_markdown;
 pub use document::{
-    inline_paragraph_node, CaptionParent, ContentLayer, DoclingDocument, FieldItem, InlineRun,
-    ListItemDclx, Node, PictureClass, PictureImage, Script, Table, TableCell, TableStructure,
+    inline_paragraph_node, CaptionParent, ContentLayer, ContentLayers, DoclingDocument, FieldItem,
+    GraphCell, GraphLink, HtmlExportOptions, InlineRun, ListItemDclx, MarkdownExportOptions, Node,
+    PictureClass, PictureDescription, PictureImage, Script, Table, TableCell, TableStructure,
 };
+pub use encryption::EncryptionError;
 pub use json::code_language_label;
 pub use labels::DocItemLabel;
 pub use markdown::{ImageMode, MarkdownStreamer};
+pub use redact::{
+    CustomPattern, ImageRedaction, PiiDetector, PiiKind, RedactionOptions, RedactionReport,
+    Replacement,
+};
+pub use vtt::VttExportOptions;

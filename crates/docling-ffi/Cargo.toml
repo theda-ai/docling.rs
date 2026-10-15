@@ -25,7 +25,7 @@ publish = false
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
-docling = { path = "../docling", version = "1.69.1" }
+docling = { path = "../docling", version = "2.26.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
@@ -37,3 +37,5 @@ cuda = ["docling/cuda"]
 tensorrt = ["docling/tensorrt"]
 directml = ["docling/directml"]
 coreml = ["docling/coreml"]
+# ONNX Runtime loaded at run time instead of linked (#504) — the s390x build.
+ort-load-dynamic = ["docling/ort-load-dynamic"]

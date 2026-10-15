@@ -1,0 +1,94 @@
+# Build docling-parse's Blend2D page renderer as the runtime plugin docling.rs
+# loads for its model inputs (#478 — crates/docling-pdf/src/dparse_render.rs)
+# and publish it into the models release, next to libpdfium.so, so
+# scripts/install/download_dependencies.sh can fetch it with everything else.
+#
+# One tarball per platform, docling-parse-render-<os>-<arch>.tar.gz, holding
+#   lib/libdparse_render.so|.dylib   (the C shim + docling-parse and its deps,
+#                                     statically linked: qpdf, FreeType,
+#                                     Blend2D, libjpeg, OpenJPEG, lcms2, JBIG2)
+#   pdf_resources/                   (docling-parse's fallback fonts, encodings, cmaps)
+# — the layout scripts/install/build_docling_parse_render.sh produces locally.
+#
+# Trigger: manual (workflow_dispatch). The build compiles docling-parse's whole
+# dependency tree from source (~40 minutes on a 4-core runner). Re-running
+# with the same tag clobbers the matching asset names; publish-models.yml's
+# prune step leaves these assets alone.
+#
+#   gh workflow run docling-parse-render.yml                       # tag = models-v1
+#   gh workflow run docling-parse-render.yml -f docling_parse_tag=v7.23.0
+
+name: docling-parse renderer plugin
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Models release tag to publish into."
+        required: false
+        default: "models-v1"
+      docling_parse_tag:
+        description: "docling-parse tag to build (the version the shim is checked against)."
+        required: false
+        default: "v7.22.1"
+
+permissions:
+  contents: write # gh release upload
+
+jobs:
+  build:
+    name: build ${{ matrix.os }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.host }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - host: ubuntu-24.04
+            os: linux
+            arch: x64
+          - host: ubuntu-24.04-arm
+            os: linux
+            arch: arm64
+          - host: macos-14
+            os: mac
+            arch: arm64
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ inputs.tag }}
+      DOCLING_PARSE_TAG: ${{ inputs.docling_parse_tag }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Build tools (Linux)
+        if: matrix.os == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build build-essential
+
+      - name: Build tools (macOS)
+        if: matrix.os == 'mac'
+        run: brew install cmake ninja
+
+      - name: Build the plugin
+        run: |
+          JOBS="$(nproc 2>/dev/null || sysctl -n hw.ncpu)" \
+          OUT_DIR="$PWD/.docling-parse" \
+            bash scripts/install/build_docling_parse_render.sh
+
+      - name: Stage tarball
+        run: |
+          mkdir -p release-assets
+          tar czf "release-assets/docling-parse-render-${{ matrix.os }}-${{ matrix.arch }}.tar.gz" \
+            -C .docling-parse lib pdf_resources
+          ls -la release-assets/
+
+      - name: Publish into the models release
+        run: |
+          if ! gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "release $TAG does not exist — run publish-models.yml first" >&2
+            exit 1
+          fi
+          gh release upload "$TAG" release-assets/* --repo "${{ github.repository }}" --clobber

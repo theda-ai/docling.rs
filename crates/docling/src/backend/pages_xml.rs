@@ -21,15 +21,18 @@ use super::pages::{
 use crate::error::ConversionError;
 
 pub(crate) const SF_NS: &str = "http://developer.apple.com/namespaces/sf";
-const SFA_NS: &str = "http://developer.apple.com/namespaces/sfa";
+pub(crate) const SFA_NS: &str = "http://developer.apple.com/namespaces/sfa";
 /// Decompressed-size ceiling for a legacy `index.xml.gz` (docling's
 /// `MAX_LEGACY_XML_BYTES`): the package size caps only see the stored size.
 const MAX_LEGACY_XML_BYTES: u64 = 100 * 1024 * 1024;
 
+/// How many `sf:parent-ident` links a style chain is followed for.
+const MAX_STYLE_INHERITANCE: usize = 8;
+
 /// `sf:text-label` types that draw a fixed marker rather than a number.
 const BULLET_LABEL_TYPES: [&str; 4] = ["bullet", "image", "string", "text"];
 
-fn is_sf(node: XmlNode, name: &str) -> bool {
+pub(crate) fn is_sf(node: XmlNode, name: &str) -> bool {
     node.is_element()
         && node.tag_name().namespace() == Some(SF_NS)
         && node.tag_name().name() == name
@@ -39,17 +42,17 @@ fn is_sf(node: XmlNode, name: &str) -> bool {
 /// the `sf` namespace, but a few — `href` on `sf:link`, `path` on `sf:data` —
 /// are written unqualified, and which spelling a document uses varies with the
 /// release that wrote it.
-fn sf_attr<'a>(node: XmlNode<'a, 'a>, name: &str) -> Option<&'a str> {
+pub(crate) fn sf_attr<'a>(node: XmlNode<'a, 'a>, name: &str) -> Option<&'a str> {
     node.attribute((SF_NS, name))
         .or_else(|| node.attribute(name))
 }
 
-fn sfa_attr<'a>(node: XmlNode<'a, 'a>, name: &str) -> Option<&'a str> {
+pub(crate) fn sfa_attr<'a>(node: XmlNode<'a, 'a>, name: &str) -> Option<&'a str> {
     node.attribute((SFA_NS, name))
 }
 
 /// `int_attr`: an integer `sf:` attribute, tolerating absent or malformed values.
-fn int_attr(node: XmlNode, name: &str) -> Option<usize> {
+pub(crate) fn int_attr(node: XmlNode, name: &str) -> Option<usize> {
     node.attribute((SF_NS, name))?.trim().parse().ok()
 }
 
@@ -61,7 +64,7 @@ fn is_furniture(node: XmlNode) -> bool {
         .any(|t| is_sf(node, t))
 }
 
-fn is_media(node: XmlNode) -> bool {
+pub(crate) fn is_media(node: XmlNode) -> bool {
     is_sf(node, "media") || is_sf(node, "image")
 }
 
@@ -72,18 +75,7 @@ fn is_placeholder(node: XmlNode) -> bool {
 /// docling's `read_content`: the content of an iWork '09 document out of its
 /// `index.xml` member (optionally gzipped, decompressed against a ceiling).
 pub(crate) fn read_content(pkg: &mut Package, member: &str) -> Result<Content, ConversionError> {
-    let raw = pkg.read_bytes(member).ok_or_else(|| {
-        ConversionError::Parse(format!(
-            "iwork: could not read '{member}' from the Pages document"
-        ))
-    })?;
-    let raw = if member.ends_with(".gz") {
-        gunzip_capped(&raw, MAX_LEGACY_XML_BYTES, member)?
-    } else {
-        raw
-    };
-    let xml = String::from_utf8(raw)
-        .map_err(|_| ConversionError::Parse(format!("iwork: '{member}' is not UTF-8")))?;
+    let xml = read_index_xml(pkg, member, "Pages")?;
     let dom = Document::parse(&xml)
         .map_err(|e| ConversionError::Parse(format!("iwork: could not parse '{member}': {e}")))?;
     let root = dom.root_element();
@@ -143,10 +135,100 @@ pub(crate) fn read_content(pkg: &mut Package, member: &str) -> Result<Content, C
     })
 }
 
+/// docling's `parse_index`, up to the parse: the index member's XML text
+/// (gunzipped against a ceiling when it is a `.gz`).
+pub(crate) fn read_index_xml(
+    pkg: &mut Package,
+    member: &str,
+    kind: &str,
+) -> Result<String, ConversionError> {
+    let raw = pkg.read_bytes(member).ok_or_else(|| {
+        ConversionError::Parse(format!(
+            "iwork: could not read '{member}' from the {kind} document"
+        ))
+    })?;
+    let raw = if member.ends_with(".gz") {
+        gunzip_capped(&raw, MAX_LEGACY_XML_BYTES, member)?
+    } else {
+        raw
+    };
+    String::from_utf8(raw)
+        .map_err(|_| ConversionError::Parse(format!("iwork: '{member}' is not UTF-8")))
+}
+
+/// `legacy_geometry`: where an iWork '09 drawable sits, from the first
+/// `sf:geometry` below it — its `sf:position` (required) and `sf:size`
+/// (missing → zero). `None` is what an element that merely refers to a
+/// positioned one looks like.
+pub(crate) fn legacy_geometry(element: XmlNode) -> Option<super::keynote::Geometry> {
+    let geometry = element.descendants().find(|n| is_sf(*n, "geometry"))?;
+    let position = geometry.descendants().find(|n| is_sf(*n, "position"))?;
+    let left = float_attr(position, "x")?;
+    let top = float_attr(position, "y")?;
+    let size = geometry.descendants().find(|n| is_sf(*n, "size"));
+    let width = size.and_then(|s| float_attr(s, "w")).unwrap_or(0.0);
+    let height = size.and_then(|s| float_attr(s, "h")).unwrap_or(0.0);
+    Some(super::keynote::Geometry {
+        left,
+        top,
+        width,
+        height,
+    })
+}
+
+/// `float_attr`: an `sfa:` measurement attribute, tolerating absent or
+/// malformed values.
+pub(crate) fn float_attr(node: XmlNode, name: &str) -> Option<f64> {
+    sfa_attr(node, name)?.trim().parse().ok()
+}
+
+/// `legacy_inherited_lists`: the list style each paragraph style ends up
+/// carrying, keyed by every name the paragraph style answers to. A style
+/// that names none inherits its parent's (`sf:parent-ident`), so the chains
+/// are walked once here and flattened into a single lookup.
+pub(crate) fn legacy_inherited_lists<'a>(root: XmlNode<'a, 'a>) -> HashMap<String, String> {
+    let mut styles: HashMap<&'a str, XmlNode<'a, 'a>> = HashMap::new();
+    for element in root.descendants().filter(|n| is_sf(*n, "paragraphstyle")) {
+        for key in [element.attribute((SF_NS, "ident")), sfa_attr(element, "ID")]
+            .into_iter()
+            .flatten()
+        {
+            styles.entry(key).or_insert(element);
+        }
+    }
+    let mut resolved = HashMap::new();
+    for (key, element) in &styles {
+        let mut current = Some(*element);
+        for _ in 0..MAX_STYLE_INHERITANCE {
+            let Some(style) = current else {
+                break;
+            };
+            if let Some(named) = own_list_style(style) {
+                resolved.insert(key.to_string(), named.to_string());
+                break;
+            }
+            current = style
+                .attribute((SF_NS, "parent-ident"))
+                .and_then(|p| styles.get(p).copied());
+        }
+    }
+    resolved
+}
+
+/// `own_list_style`: the list style one paragraph style names
+/// (`sf:listStyle` → `sf:liststyle-ref`), ignoring what it inherits.
+fn own_list_style<'a>(style: XmlNode<'a, 'a>) -> Option<&'a str> {
+    style
+        .descendants()
+        .filter(|n| is_sf(*n, "listStyle"))
+        .flat_map(|named| named.descendants().filter(|n| is_sf(*n, "liststyle-ref")))
+        .find_map(|r| sfa_attr(r, "IDREF").filter(|id| !id.is_empty()))
+}
+
 /// `legacy_table`: table data from one `sf:tabular-model`. Cells are stored
 /// flat in `sf:datasource`, in row-major order, so the grid dimensions on
 /// `sf:grid` are what give them their positions.
-fn legacy_table(model: XmlNode) -> Option<docling_core::Table> {
+pub(crate) fn legacy_table(model: XmlNode) -> Option<docling_core::Table> {
     let grid = model.descendants().find(|n| is_sf(*n, "grid"))?;
     let num_cols = int_attr(grid, "numcols")?;
     let num_rows = int_attr(grid, "numrows")?;
@@ -154,15 +236,25 @@ fn legacy_table(model: XmlNode) -> Option<docling_core::Table> {
     if num_cols == 0 || num_rows == 0 {
         return None;
     }
-    let values: Vec<String> = model
-        .descendants()
-        .filter(|n| is_sf(*n, "ct"))
+    // `legacy_cell_text`: the datasource holds one element per cell of the
+    // grid, in row-major order, named for what the cell holds — `sf:t` for
+    // text, `sf:n` for a number, and so on. Only text is recovered (a number,
+    // a date or a formula result is left empty rather than guessed at), but
+    // every cell still takes its place, or everything after the first
+    // non-text one would shift along a column (docling#4330, #466).
+    let source = grid.descendants().find(|n| is_sf(*n, "datasource"))?;
+    let values: Vec<String> = source
+        .children()
+        .filter(XmlNode::is_element)
         .map(|cell| {
-            let text = match sfa_attr(cell, "s") {
+            let Some(ct) = cell.descendants().find(|n| is_sf(*n, "ct")) else {
+                return String::new();
+            };
+            let text = match sfa_attr(ct, "s") {
                 Some(s) if !s.is_empty() => s.to_string(),
                 // Text *nodes* only: an element's `text()` is its first text
                 // child, which would count the same text twice.
-                _ => cell
+                _ => ct
                     .descendants()
                     .filter(|n| n.is_text())
                     .filter_map(|n| n.text())
@@ -171,7 +263,7 @@ fn legacy_table(model: XmlNode) -> Option<docling_core::Table> {
             clean(&text).trim().to_string()
         })
         .collect();
-    if values.is_empty() {
+    if values.iter().all(String::is_empty) {
         return None;
     }
     let cells = values
@@ -186,7 +278,7 @@ fn legacy_table(model: XmlNode) -> Option<docling_core::Table> {
 /// `legacy_picture`: an '09 image, whose bytes are a member of the container.
 /// `None` when the element names no stored data; a named member that is
 /// missing still places the picture, without an image.
-fn legacy_picture(media: XmlNode, pkg: &mut Package) -> Option<Picture> {
+pub(crate) fn legacy_picture(media: XmlNode, pkg: &mut Package) -> Option<Picture> {
     for data in media.descendants().filter(|n| is_sf(*n, "data")) {
         let Some(path) = sf_attr(data, "path").filter(|p| !p.is_empty()) else {
             continue;
@@ -225,7 +317,7 @@ fn iter_body_elements<'a>(root: XmlNode<'a, 'a>) -> Vec<XmlNode<'a, 'a>> {
 /// node rather than flattened; a child's tail text sits outside it and keeps
 /// the parent's formatting, and template placeholder text is skipped. Walked
 /// with an explicit stack: nesting depth is attacker-controlled.
-fn legacy_runs(
+pub(crate) fn legacy_runs(
     paragraph: XmlNode,
     character_styles: &HashMap<String, Option<Formatting>>,
 ) -> Vec<Run> {
@@ -336,7 +428,7 @@ fn legacy_comments(root: XmlNode) -> Vec<Comment> {
 /// what it puts there is sometimes the style's `sf:ident` and sometimes its
 /// `sfa:ID`. Both are indexed so a reference resolves either way; the first
 /// definition of a key wins.
-fn legacy_styles<'a, T: Clone>(
+pub(crate) fn legacy_styles<'a, T: Clone>(
     root: XmlNode<'a, 'a>,
     tag: &str,
     decode: impl Fn(XmlNode<'a, 'a>) -> T,
@@ -359,7 +451,7 @@ fn legacy_styles<'a, T: Clone>(
 
 /// `legacy_list_styles`: the `sf:liststyle` definitions by identifier — one
 /// `sf:list-label-typeinfo` per nesting level.
-fn legacy_list_styles(root: XmlNode) -> HashMap<String, ListStyle> {
+pub(crate) fn legacy_list_styles(root: XmlNode) -> HashMap<String, ListStyle> {
     let mut styles: HashMap<String, ListStyle> = HashMap::new();
     for element in root.descendants().filter(|n| is_sf(*n, "liststyle")) {
         let keys = [element.attribute((SF_NS, "ident")), sfa_attr(element, "ID")];
@@ -420,7 +512,7 @@ fn legacy_list_label(
 /// `legacy_formatting`: an iWork '09 character style's property map as
 /// formatting. A property element (`sf:bold`, `sf:superscript`, …) holds its
 /// value in a child carrying `sfa:number`; zero (or none) leaves it unset.
-fn legacy_formatting(style: XmlNode) -> Option<Formatting> {
+pub(crate) fn legacy_formatting(style: XmlNode) -> Option<Formatting> {
     let (mut bold, mut italic, mut underline, mut strike) = (false, false, false, false);
     let mut script = None;
     for element in style.descendants().filter(|n| n.is_element()) {
@@ -580,6 +672,7 @@ mod tests {
                 Block::Paragraph(_) => "p",
                 Block::Table(_) => "table",
                 Block::Picture(_) => "picture",
+                Block::Chart(_) => "chart",
             })
             .collect();
         assert_eq!(kinds, ["p", "p", "p", "p", "table", "picture"]);

@@ -1,0 +1,170 @@
+[ Header
+    3
+    ( "" , [] , [] )
+    [ Str "Table" , Space , Str "with" , Space , Str "options" ]
+, Table
+    ( "" , [] , [] )
+    (Caption Nothing [])
+    [ ( AlignDefault , ColWidthDefault ) ]
+    (TableHead
+       ( "" , [] , [] )
+       [ Row
+           ( "" , [] , [] )
+           [ Cell
+               ( "" , [] , [] )
+               AlignDefault
+               (RowSpan 1)
+               (ColSpan 1)
+               [ Para
+                   [ Strong
+                       [ Str "List"
+                       , Space
+                       , Str "of"
+                       , Space
+                       , Str "services"
+                       ]
+                   ]
+               ]
+           ]
+       ])
+    [ TableBody
+        ( "" , [] , [] )
+        (RowHeadColumns 0)
+        []
+        [ Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Breakfast" , Space , Str "options" ] ]
+            ]
+        , Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Para
+                    [ Str "Choose"
+                    , Space
+                    , Str "as"
+                    , Space
+                    , Str "many"
+                    , Space
+                    , Str "as"
+                    , Space
+                    , Str "you"
+                    , Space
+                    , Str "like:"
+                    ]
+                , Para
+                    [ Str "\9746"
+                    , Space
+                    , Str "Orange"
+                    , Space
+                    , Str "juice"
+                    ]
+                , Para [ Str "\9744" , Space , Str "Tea" ]
+                , Para [ Str "\9746" , Space , Str "Coffee" ]
+                , Para [ Str "\9744" , Space , Str "Milk" ]
+                , Para [ Str "\9746" , Space , Str "Water" ]
+                ]
+            ]
+        , Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Para
+                    [ Str "Choose"
+                    , Space
+                    , Str "as"
+                    , Space
+                    , Str "many"
+                    , Space
+                    , Str "as"
+                    , Space
+                    , Str "you"
+                    , Space
+                    , Str "like:"
+                    ]
+                , Para
+                    [ Str "\9746"
+                    , Space
+                    , Str "Scramble"
+                    , Space
+                    , Str "eggs"
+                    ]
+                , Para [ Str "\9744" , Space , Str "Porridge" ]
+                , Para [ Str "\9746" , Space , Str "Bread" ]
+                , Para [ Str "\9746" , Space , Str "Croissant" ]
+                ]
+            ]
+        ]
+    ]
+    (TableFoot ( "" , [] , [] ) [])
+, Header
+    3
+    ( "" , [] , [] )
+    [ Str "Paragraph"
+    , Space
+    , Str "with"
+    , Space
+    , Str "options"
+    ]
+, Para
+    [ Str "Tasks"
+    , Space
+    , Str "before"
+    , Space
+    , Str "release:"
+    ]
+, Para [ Str "\9746" , Space , Str "Design" ]
+, Para [ Str "\9746" , Space , Str "Implementation" ]
+, Para
+    [ Str "\9744"
+    , Space
+    , Str "Documentation"
+    , Space
+    , Str "of"
+    , Space
+    , Str "the"
+    , Space
+    , Str "task"
+    , Space
+    , Str "with"
+    , Space
+    , Str "a"
+    , Space
+    , Str "very"
+    , Space
+    , Str "long"
+    , Space
+    , Str "text"
+    , Space
+    , Str "that"
+    , Space
+    , Str "goes"
+    , Space
+    , Str "beyond"
+    , Space
+    , Str "the"
+    , Space
+    , Str "maximum"
+    , Space
+    , Str "length"
+    , Space
+    , Str "of"
+    , Space
+    , Str "a"
+    , Space
+    , Str "single"
+    , Space
+    , Str "line."
+    ]
+]

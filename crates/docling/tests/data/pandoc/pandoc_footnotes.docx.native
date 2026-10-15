@@ -1,0 +1,162 @@
+[ Header
+    2
+    ( "" , [] , [] )
+    [ Str "Notes"
+    , Note
+        [ Para
+            [ Str "Note"
+            , Space
+            , Str "on"
+            , Space
+            , Str "the"
+            , Space
+            , Str "heading."
+            ]
+        ]
+    ]
+, Para
+    [ Str "debut"
+    , Note
+        [ Para
+            [ Str "MARKFN"
+            , Space
+            , Str "first"
+            , Space
+            , Str "footnote."
+            ]
+        ]
+    , Space
+    , Str "suite"
+    , Space
+    , Str "of"
+    , Space
+    , Str "the"
+    , Space
+    , Str "sentence."
+    ]
+, Para
+    [ Str "Plain"
+    , Space
+    , Str "start,"
+    , Space
+    , Strong
+        [ Str "bold"
+        , Space
+        , Str "run"
+        , Note
+            [ Para
+                [ Str "MARKEN"
+                , Space
+                , Str "the"
+                , Space
+                , Str "endnote."
+                ]
+            ]
+        ]
+    , Space
+    , Str "and"
+    , Space
+    , Str "the"
+    , Space
+    , Str "end."
+    ]
+, BulletList
+    [ [ Plain
+          [ Str "An"
+          , Space
+          , Str "item"
+          , Note
+              [ Para
+                  [ Str "Note"
+                  , Space
+                  , Str "on"
+                  , Space
+                  , Str "the"
+                  , Space
+                  , Str "list"
+                  , Space
+                  , Str "item."
+                  ]
+              ]
+          ]
+      ]
+    ]
+, Para
+    [ Str "Between"
+    , Space
+    , Str "the"
+    , Space
+    , Str "list"
+    , Space
+    , Str "and"
+    , Space
+    , Str "the"
+    , Space
+    , Str "table."
+    ]
+, Table
+    ( "" , [] , [] )
+    (Caption Nothing [])
+    [ ( AlignDefault , ColWidthDefault )
+    , ( AlignDefault , ColWidthDefault )
+    ]
+    (TableHead
+       ( "" , [] , [] )
+       [ Row
+           ( "" , [] , [] )
+           [ Cell
+               ( "" , [] , [] )
+               AlignDefault
+               (RowSpan 1)
+               (ColSpan 1)
+               [ Plain [ Str "Cell" , Space , Str "A" ] ]
+           , Cell
+               ( "" , [] , [] )
+               AlignDefault
+               (RowSpan 1)
+               (ColSpan 1)
+               [ Para
+                   [ Str "Cell"
+                   , Space
+                   , Str "B"
+                   , Note
+                       [ Para
+                           [ Str "Note"
+                           , Space
+                           , Str "in"
+                           , Space
+                           , Str "a"
+                           , Space
+                           , Str "table"
+                           , Space
+                           , Str "cell."
+                           ]
+                       ]
+                   ]
+               ]
+           ]
+       ])
+    [ TableBody
+        ( "" , [] , [] )
+        (RowHeadColumns 0)
+        []
+        [ Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Cell" , Space , Str "C" ] ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Cell" , Space , Str "D" ] ]
+            ]
+        ]
+    ]
+    (TableFoot ( "" , [] , [] ) [])
+, Para [ Str "closing" , Space , Str "paragraph" ]
+]

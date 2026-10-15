@@ -13,12 +13,15 @@
 //! docling_result_free(r);
 //! ```
 //!
-//! Options are one JSON object whose keys mirror docling-serve's request
-//! options (`to`, `strict`, `images`, `no_ocr`, `force_full_page_ocr`,
-//! `no_table_former`, `no_text_panels`, `fetch_images`, `asr_model`,
-//! `asr_lang`, `encoding`, `video_frames`, `pages`, `ocr_lang`); unknown keys fail the
-//! conversion with a clear message rather than silently doing nothing — an
-//! embedder's typo should not go unnoticed. `NULL` or `""` means defaults.
+//! Options are one JSON object: the output selection (`to`, `images`) plus
+//! every key of [`docling::ConvertOptions`] — the conversion options shared
+//! with the CLI, docling-serve, the wasm module and the Python/Node bindings
+//! (#577; `strict`, `no_ocr`, `pages`, `ocr_lang`, `list_attachments`,
+//! `document_timeout`, `pipeline`/`vlm_*`, …), validated by the same
+//! [`ConvertOptions::validate`](docling::ConvertOptions::validate) rules.
+//! Unknown keys fail the conversion with a clear message rather than
+//! silently doing nothing — an embedder's typo should not go unnoticed.
+//! `NULL` or `""` means defaults.
 //!
 //! The output is NUL-terminated for the textual formats (`to`: `md` |
 //! `json`), so `docling_result_output` reads as a plain C string there;
@@ -33,53 +36,40 @@
 use std::ffi::{c_char, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-use docling::{DocumentConverter, ImageMode, InputFormat, SourceDocument};
+use docling::{ConvertOptions, DocumentConverter, ImageMode, InputFormat, SourceDocument};
 use serde::Deserialize;
 
-/// Conversion options, one JSON object — the same keys as docling-serve's
-/// request options. Unknown keys are rejected so misspellings fail loudly.
+/// The request: output selection plus the shared conversion options.
 #[derive(Default, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Options {
-    /// Output format: `md` (default) | `json` | `dclx` | `latex`.
+    /// Output format: `md` (default) | `json` | `text` | `dclx` | `latex` | `html` |
+    /// `pandoc` (Pandoc's JSON AST, #515) | `vtt` (WebVTT, #614).
     to: Option<String>,
-    /// Strict (docling-faithful) Markdown instead of the readable default.
-    strict: Option<bool>,
     /// Picture rendering in Markdown: `placeholder` (default) | `embedded`
     /// (base64 data URIs — the only way to carry pixels through one buffer).
     images: Option<String>,
-    no_ocr: Option<bool>,
-    force_full_page_ocr: Option<bool>,
-    no_table_former: Option<bool>,
-    no_text_panels: Option<bool>,
-    /// Resolve external `<img src>` for HTML/EPUB. Unlike docling-serve there
-    /// is no server-side gate — the embedder owns its network policy.
-    fetch_images: Option<bool>,
-    asr_model: Option<String>,
-    asr_lang: Option<String>,
-    /// Character encoding of text inputs (docling's
-    /// `TextBackendOptions.encoding`, a WHATWG label); unset = detect.
-    encoding: Option<String>,
-    video_frames: Option<usize>,
-    /// PDF page window, `"A-B"` or a single `"N"` (1-based inclusive, #80).
-    pages: Option<String>,
-    /// OCR recognition language for scanned pages: `en` (default) | `ch`.
-    ocr_lang: Option<String>,
-    /// Keep layout + TableFormer, never OCR (docling's independent
-    /// `do_ocr=False`, #244).
-    skip_ocr: Option<bool>,
-    /// Infer section-header levels (docling's HeadingHierarchyModel, #302).
-    heading_hierarchy: Option<bool>,
-    /// Which regions feed the OCR (docling's `OcrMode`, #254): `default` |
-    /// `full_page` | `layout_regions` | `pdf_aware_layout_regions`.
-    ocr_mode: Option<String>,
-    /// OCR render scale in px per PDF point (docling's `OcrOptions.scale`,
-    /// #254); unset reads the pipeline's own 2.0 px/pt render.
-    ocr_scale: Option<f32>,
-    /// Unpadded `| a | b |` Markdown tables (#271, docling.rs extension).
-    compact_tables: Option<bool>,
-    /// Omit empty cells from sparse XLSX/XLS grids (#271, docling.rs extension).
-    skip_empty_cells: Option<bool>,
+    /// Everything that configures the conversion itself (#577).
+    #[serde(flatten)]
+    convert: ConvertOptions,
+}
+
+/// Parse the options JSON. Unknown keys are rejected here (serde's
+/// `deny_unknown_fields` cannot see through the `flatten`), so a misspelled
+/// key fails loudly.
+fn parse_options(options_json: &str) -> Result<Options, String> {
+    if options_json.trim().is_empty() {
+        return Ok(Options::default());
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(options_json).map_err(|e| format!("options: {e}"))?;
+    let Some(map) = value.as_object() else {
+        return Err("options: expected a JSON object".into());
+    };
+    let unknown = ConvertOptions::unknown_keys(map.keys().map(String::as_str), &["to", "images"]);
+    if let Some(key) = unknown.first() {
+        return Err(format!("options: unknown field `{key}`"));
+    }
+    serde_json::from_value(value).map_err(|e| format!("options: {e}"))
 }
 
 /// An opaque conversion result. Exactly one of output/error is set; the
@@ -100,60 +90,30 @@ fn err_result(message: String) -> *mut DoclingResult {
 }
 
 fn convert_impl(bytes: &[u8], filename: &str, options_json: &str) -> Result<Vec<u8>, String> {
-    let options: Options = if options_json.trim().is_empty() {
-        Options::default()
-    } else {
-        serde_json::from_str(options_json).map_err(|e| format!("options: {e}"))?
-    };
+    let options = parse_options(options_json)?;
 
     let ext = filename.rsplit('.').next().unwrap_or_default();
     let format = InputFormat::from_extension(ext)
         .ok_or_else(|| format!("unknown or unsupported extension: {filename:?}"))?;
     let source = SourceDocument::from_bytes(filename.to_string(), format, bytes.to_vec());
 
-    let mut converter = DocumentConverter::new()
-        .strict(options.strict.unwrap_or(false))
-        .fetch_images(options.fetch_images.unwrap_or(false))
-        .asr_model(options.asr_model.clone())
-        .asr_lang(options.asr_lang.clone())
-        .encoding(options.encoding.clone())
-        .video_frames(
-            options
-                .video_frames
-                .unwrap_or(docling::DEFAULT_VIDEO_FRAMES),
-        )
-        .no_ocr(options.no_ocr.unwrap_or(false))
-        .force_full_page_ocr(options.force_full_page_ocr.unwrap_or(false))
-        .no_table_former(options.no_table_former.unwrap_or(false))
-        .no_text_panels(options.no_text_panels.unwrap_or(false))
-        .skip_ocr(options.skip_ocr.unwrap_or(false))
-        .heading_hierarchy(options.heading_hierarchy.unwrap_or(false))
-        .compact_tables(options.compact_tables.unwrap_or(false))
-        .skip_empty_cells(options.skip_empty_cells.unwrap_or(false));
-    if let Some(mode) = &options.ocr_mode {
-        converter = converter.ocr_mode(mode.clone());
-    }
-    if let Some(scale) = options.ocr_scale {
-        converter = converter.ocr_scale(scale);
-    }
-    if let Some(pages) = &options.pages {
-        let (first, last) = docling::parse_page_range(pages).map_err(|e| format!("pages: {e}"))?;
-        converter = converter.page_range(first, last);
-    }
-    if let Some(lang) = &options.ocr_lang {
-        docling::OcrLang::parse(lang).ok_or_else(|| {
-            format!(
-                "ocr_lang {lang:?} is not a supported OCR language ({})",
-                docling::OcrLang::ACCEPTED
-            )
-        })?;
-        converter = converter.ocr_lang(lang.clone());
-    }
+    // The shared validation + builder mapping (#577): the same rejections
+    // and the same defaults as every other surface.
+    let converter = options
+        .convert
+        .apply(DocumentConverter::new())
+        .map_err(|e| e.to_string())?;
 
     let result = converter.convert(source).map_err(|e| e.to_string())?;
     let document = result.document;
 
-    let image_mode = match options.images.as_deref().unwrap_or("placeholder") {
+    // #537: the Pandoc AST embeds its pictures unless `images` says otherwise.
+    let default_images = if options.to.as_deref() == Some("pandoc") {
+        "embedded"
+    } else {
+        "placeholder"
+    };
+    let image_mode = match options.images.as_deref().unwrap_or(default_images) {
         "placeholder" => ImageMode::Placeholder,
         "embedded" => ImageMode::Embedded,
         other => {
@@ -177,8 +137,21 @@ fn convert_impl(bytes: &[u8], filename: &str, options_json: &str) -> Result<Vec<
         // C string.
         "dclx" => Ok(docling::dclx::to_dclx_bytes(&document)),
         "latex" => Ok(document.export_to_latex().into_bytes()),
+        // #613: docling's plain text (`export_to_text`).
+        "text" => Ok(document.export_to_text().into_bytes()),
+        "html" => Ok(document.export_to_html().into_bytes()),
+        // #515: pictures follow `images` like Markdown.
+        "pandoc" => document
+            .export_to_pandoc_json_with(&docling::pandoc::PandocExportOptions {
+                image_mode,
+                ..Default::default()
+            })
+            .map(|(json, _)| json.into_bytes())
+            .map_err(|e| e.to_string()),
+        // #614: docling's `--to vtt`.
+        "vtt" => Ok(document.export_to_vtt().into_bytes()),
         other => Err(format!(
-            "unknown to={other:?} (expected: md, json, dclx, latex)"
+            "unknown to={other:?} (expected: md, json, text, dclx, latex, html, pandoc, vtt)"
         )),
     }
 }
@@ -249,7 +222,8 @@ pub unsafe extern "C" fn docling_convert(
 }
 
 /// The converted output, or NULL when the conversion failed. NUL-terminated
-/// (readable as a C string for `to` = `md` / `json` / `latex`); for binary output
+/// (readable as a C string for `to` = `md` / `json` / `text` / `latex` / `html` /
+/// `pandoc` / `vtt`); for binary output
 /// (`dclx`) pair it with [`docling_result_output_len`]. Owned by the result —
 /// valid until [`docling_result_free`].
 ///
@@ -374,6 +348,20 @@ mod tests {
         let tex = output_string(r);
         assert!(tex.starts_with("\\documentclass"), "{tex}");
         assert!(tex.ends_with("\\end{document}"), "{tex}");
+        unsafe { docling_result_free(r) };
+        let r = convert(md, "note.md", r#"{"to":"text"}"#);
+        assert_eq!(output_string(r), "Title\n\nHello world");
+        unsafe { docling_result_free(r) };
+        // #614: no timed text → the bare header, titled.
+        let r = convert(md, "note.md", r#"{"to":"vtt"}"#);
+        assert_eq!(output_string(r), "WEBVTT Title");
+        unsafe { docling_result_free(r) };
+        let r = convert(md, "note.md", r#"{"to":"pandoc"}"#);
+        let ast = output_string(r);
+        assert!(
+            ast.starts_with("{\"pandoc-api-version\":[1,23,1,1]"),
+            "{ast}"
+        );
         unsafe { docling_result_free(r) };
         let r = convert(md, "note.md", r#"{"to":"dclx"}"#);
         unsafe {

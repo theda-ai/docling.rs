@@ -16,6 +16,7 @@
 //! them through LibreOffice into a single image, which serializes as the same
 //! `<!-- image -->` placeholder.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use docling_core::{DoclingDocument, InlineRun, ListItemDclx, Node, PictureImage, Script, Table};
@@ -23,6 +24,7 @@ use roxmltree::{Document, Node as XmlNode};
 
 use crate::backend::markdown::escape_text;
 use crate::backend::ooxml::{resolve, Package};
+use crate::backend::symbol_fonts::{self, SymbolFont};
 use crate::backend::DeclarativeBackend;
 use crate::error::ConversionError;
 use crate::source::SourceDocument;
@@ -38,6 +40,7 @@ impl DeclarativeBackend for DocxBackend {
             .ok_or_else(|| ConversionError::Parse("docx: no document.xml".into()))?;
         let styles = pkg.read("word/styles.xml").unwrap_or_default();
         let numbering = pkg.read("word/numbering.xml").unwrap_or_default();
+        let even_and_odd_headers = even_and_odd_headers(&mut pkg);
         // Hyperlink relationship ids → target URLs.
         let rels = part_rels(&mut pkg, "word/document.xml");
 
@@ -48,6 +51,9 @@ impl DeclarativeBackend for DocxBackend {
         let sm = parse_styles(&styles);
         let num_levels = parse_numbering(&numbering);
 
+        // Settle every `mc:AlternateContent` on the chosen branch first
+        // (#572), so the walks below see one document without alternatives.
+        let document = super::mc::resolve_alternate_content(&document);
         let dom =
             Document::parse(&document).map_err(|e| ConversionError::with_source("docx", e))?;
         let ctx = Ctx {
@@ -61,7 +67,9 @@ impl DeclarativeBackend for DocxBackend {
             rels: &rels,
             images: &images,
             charts: &charts,
+            even_and_odd_headers,
             table_depth: std::cell::Cell::new(0),
+            orphan_inline_groups: std::cell::Cell::new(0),
         };
 
         let mut doc = DoclingDocument::new(&source.name);
@@ -105,8 +113,23 @@ impl DeclarativeBackend for DocxBackend {
         // (docling's `_add_header_footer`): the first section always
         // contributes, later sections only when they define a distinct first
         // page (`<w:titlePg/>`), which also switches both to the first-page
-        // parts.
+        // parts; the even-page parts come too when the document uses them
+        // (`<w:evenAndOddHeaders/>`, #590 — docling never reads those).
         add_header_footer(&mut pkg, body, &ctx, &mut doc);
+        // Footnote / endnote bodies follow as furniture too (docling#4374):
+        // a `w:footnoteReference` in the body carries no text of its own, so
+        // without reading `word/footnotes.xml` / `word/endnotes.xml` the
+        // notes were silently dropped.
+        for note in footnote_texts(&mut pkg) {
+            doc.nodes.push(Node::Furniture {
+                layer: docling_core::ContentLayer::Furniture,
+                inner: Box::new(Node::Paragraph {
+                    text: super::markdown::escape_html(&super::markdown::escape_underscores(
+                        &note.text,
+                    )),
+                }),
+            });
+        }
         // Reviewer comments (docling's `notes` layer) are appended after the
         // body as `comment_section` groups: Markdown/LaTeX drop them, JSON
         // emits the group plus its notes text (and the `comments` back-refs on
@@ -142,7 +165,10 @@ impl DeclarativeBackend for DocxBackend {
 /// inheritance case) is skipped by part name so it isn't duplicated. A section
 /// with `<w:titlePg/>` contributes both its first-page **and** its regular
 /// header/footer, since both are actually used — headers first, then footers,
-/// first-page before regular within each.
+/// first-page before regular within each; with `<w:evenAndOddHeaders/>` in
+/// the settings, the even-page part follows the regular one (#590: Word
+/// shows it on every even page, docling leaves it out — python-docx's
+/// `Section` exposes `even_page_header`, `_add_header_footer` never asks).
 fn add_header_footer(pkg: &mut Package, body: XmlNode, ctx: &Ctx, doc: &mut DoclingDocument) {
     for (_, part) in header_footer_parts(body, ctx) {
         emit_header_footer_part(pkg, &part, ctx, doc);
@@ -179,10 +205,15 @@ pub(super) fn header_footer_parts(body: XmlNode, ctx: &Ctx) -> Vec<(&'static str
                 && attr(n, "val") != Some("0")
         });
         for kind in ["hdr", "ftr"] {
-            let types: &[&str] = if title_pg {
-                &["first", "default"]
-            } else {
-                &["default"]
+            // A part Word actually shows: the first page's with `titlePg`,
+            // the regular (odd) one, and the even pages' when the document
+            // distinguishes them — without `evenAndOddHeaders` an `even`
+            // reference is a leftover Word ignores, so it is skipped here too.
+            let types: &[&str] = match (title_pg, ctx.even_and_odd_headers) {
+                (true, true) => &["first", "default", "even"],
+                (true, false) => &["first", "default"],
+                (false, true) => &["default", "even"],
+                (false, false) => &["default"],
             };
             for ty in types {
                 let Some(rid) = effective.get(&(kind, ty.to_string())) else {
@@ -206,6 +237,85 @@ pub(super) fn header_footer_parts(body: XmlNode, ctx: &Ctx) -> Vec<(&'static str
     out
 }
 
+/// `word/settings.xml`'s `<w:evenAndOddHeaders/>` (#590): whether the
+/// document shows different headers/footers on even pages — only then do the
+/// sections' `w:type="even"` references mean anything to Word.
+fn even_and_odd_headers(pkg: &mut Package) -> bool {
+    let Some(xml) = pkg.read("word/settings.xml") else {
+        return false;
+    };
+    let Ok(dom) = Document::parse(&xml) else {
+        return false;
+    };
+    dom.descendants()
+        .find(|n| n.has_tag_name("evenAndOddHeaders"))
+        .is_some_and(|n| on_off(attr(n, "val")))
+}
+
+/// One footnote / endnote body ([`footnote_texts`]).
+pub(super) struct DocxNote {
+    /// `footnote` or `endnote` — which reference element calls it.
+    pub(super) kind: &'static str,
+    /// The note's `w:id`.
+    pub(super) id: String,
+    pub(super) text: String,
+}
+
+/// The body text of every footnote and endnote, in part order (footnotes,
+/// then endnotes) and document order — docling's `_add_footnotes_and_endnotes`
+/// (docling#4374): the parts are reached through the document's FOOTNOTES /
+/// ENDNOTES relationships, the `separator` / `continuationSeparator` /
+/// `continuationNotice` placeholders Word writes into every document are
+/// skipped, and a note's non-blank paragraphs (python-docx's `Paragraph.text`)
+/// are joined with one space. Each becomes a furniture-layer `footnote` item.
+/// The note's kind (`footnote` / `endnote`) and `w:id` come along: a body
+/// `w:footnoteReference` / `w:endnoteReference` names it by those (#538).
+pub(super) fn footnote_texts(pkg: &mut Package) -> Vec<DocxNote> {
+    const SKIP_TYPES: [&str; 3] = ["separator", "continuationSeparator", "continuationNotice"];
+    let mut out = Vec::new();
+    for (rel_suffix, tag) in [("/footnotes", "footnote"), ("/endnotes", "endnote")] {
+        let Some(part) = pkg
+            .rels_for("word/document.xml")
+            .into_iter()
+            .find(|r| r.rel_type.ends_with(rel_suffix))
+            .map(|r| super::ooxml::resolve("word", &r.target))
+        else {
+            continue;
+        };
+        let Some(xml) = pkg.read(&part) else {
+            continue;
+        };
+        let xml = super::mc::resolve_alternate_content(&xml);
+        let Ok(dom) = Document::parse(&xml) else {
+            eprintln!("docling: failed to parse {tag}s part");
+            continue;
+        };
+        for note in dom
+            .root_element()
+            .children()
+            .filter(|n| n.has_tag_name(tag))
+        {
+            if attr(note, "type").is_some_and(|t| SKIP_TYPES.contains(&t)) {
+                continue;
+            }
+            let texts: Vec<String> = note
+                .children()
+                .filter(|n| n.has_tag_name("p"))
+                .map(|p| plain_paragraph_text(p).trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect();
+            if !texts.is_empty() {
+                out.push(DocxNote {
+                    kind: tag,
+                    id: attr(note, "id").unwrap_or_default().to_string(),
+                    text: texts.join(" "),
+                });
+            }
+        }
+    }
+    out
+}
+
 /// Walk one header/footer part and append its blocks wrapped in the furniture
 /// layer. docling skips a part with no visible content (no non-blank paragraph
 /// text, tables, images, or textboxes).
@@ -213,6 +323,7 @@ fn emit_header_footer_part(pkg: &mut Package, part: &str, ctx: &Ctx, doc: &mut D
     let Some(xml) = pkg.read(part) else {
         return;
     };
+    let xml = super::mc::resolve_alternate_content(&xml);
     let Ok(dom) = Document::parse(&xml) else {
         return;
     };
@@ -275,6 +386,7 @@ pub(super) fn parse_comments(pkg: &mut Package) -> Vec<(String, String)> {
     let Some(xml) = pkg.read("word/comments.xml") else {
         return Vec::new();
     };
+    let xml = super::mc::resolve_alternate_content(&xml);
     let Ok(dom) = Document::parse(&xml) else {
         return Vec::new();
     };
@@ -373,11 +485,18 @@ pub(super) struct Ctx<'a> {
     /// Native charts by relationship id: `(classified kind, title, data grid)`
     /// parsed from the `word/charts/*.xml` parts (docling PR #3809).
     pub(super) charts: &'a HashMap<String, (String, Option<String>, docling_core::Table)>,
+    /// `word/settings.xml` has `<w:evenAndOddHeaders/>`: the sections' even-page
+    /// headers/footers are in use (#590).
+    pub(super) even_and_odd_headers: bool,
     /// Nesting depth of the table being parsed (a table inside a cell inside a
     /// table …), bounded by [`MAX_TABLE_DEPTH`]: `parse_table_with` recurses
     /// per level, and a 35 KB file with 2 000 tables nested one inside the next
     /// overflowed the stack — an abort, not an error.
     pub(super) table_depth: std::cell::Cell<u32>,
+    /// Empty inline groups the last top-level table's rich cells left on
+    /// the body (see [`super::docx_tree::rich_cell_orphan_groups`]) — taken
+    /// by the caller that pushes the table.
+    pub(super) orphan_inline_groups: std::cell::Cell<usize>,
 }
 
 impl<'a> Ctx<'a> {
@@ -400,7 +519,9 @@ impl<'a> Ctx<'a> {
             rels,
             images,
             charts,
+            even_and_odd_headers: self.even_and_odd_headers,
             table_depth: std::cell::Cell::new(0),
+            orphan_inline_groups: std::cell::Cell::new(0),
         }
     }
 }
@@ -452,6 +573,18 @@ fn process_block(node: XmlNode, ctx: &Ctx, state: &mut ListState, doc: &mut Docl
                 }
             } else if let Some(table) = parse_table(node, ctx) {
                 doc.push(Node::Table(table));
+                // docling leaves an empty inline group at `parents[level-1]`
+                // for every multi-run paragraph of a rich cell (its runs move
+                // into the cell group). DocLang wraps it as `<text></text>`
+                // under the body, but not under a heading `TextItem` — where
+                // it sits once a heading was emitted (`seen_heading`); the
+                // other serializers write nothing either way.
+                let orphans = ctx.orphan_inline_groups.replace(0);
+                for _ in 0..if state.seen_heading { 0 } else { orphans } {
+                    doc.push(Node::DoclangOnly(Box::new(Node::Paragraph {
+                        text: String::new(),
+                    })));
+                }
                 state.list_run_base = None;
                 state.last_list_num_id = None;
             }
@@ -497,27 +630,23 @@ fn handle_paragraph_inner(
     // Textbox content is emitted first, before the paragraph's own content — and
     // for *every* paragraph (a textbox can be anchored to a heading or list item,
     // not just a plain one). Each `<w:txbxContent>` yields its paragraphs' text
-    // then any nested images, in document order. A whole textbox is skipped when
-    // its combined text was already seen, dropping the `<mc:AlternateContent>`
-    // duplicate (modern DrawingML + VML fallback carry the same textbox).
+    // then any nested images, in document order. Every paragraph of every box
+    // is emitted: the `mc:AlternateContent` alternatives were settled before
+    // parsing (`mc.rs`, #572), so a box arrives once — docling's text-keyed
+    // dedup in `_handle_textbox_content`, which existed for that duplicate,
+    // also dropped a paragraph legitimately repeated in a box, and is not
+    // reproduced.
     if !skip_textbox {
-        // Dedup textbox *paragraphs* (not whole textboxes): a non-empty one by
-        // its text, an image-only one by its position — exactly docling's
-        // `_handle_textbox_content`, which drops the `<mc:AlternateContent>`
-        // duplicate as well as repeated identical labels in the same drawing.
-        let mut seen: Vec<(String, usize)> = Vec::new();
         for tc in p.descendants().filter(|n| n.has_tag_name("txbxContent")) {
-            for (idx, tp) in tc.children().filter(|n| n.has_tag_name("p")).enumerate() {
+            // Every paragraph of the box — docling's `.//w:p` — so a table
+            // inside a text box reads as its cells' paragraphs (#532); one in
+            // a box nested deeper belongs to that box's own pass.
+            let paragraphs = tc.descendants().filter(|n| {
+                n.has_tag_name("p")
+                    && n.ancestors().find(|a| a.has_tag_name("txbxContent")) == Some(tc)
+            });
+            for tp in paragraphs {
                 let trimmed = paragraph_markdown(tp, ctx).trim().to_string();
-                let key = if trimmed.is_empty() {
-                    (String::new(), idx)
-                } else {
-                    (trimmed.clone(), usize::MAX)
-                };
-                if seen.contains(&key) {
-                    continue;
-                }
-                seen.push(key);
                 // Process the paragraph fully (list items, formatting); `skip_textbox`
                 // stops it re-extracting nested textboxes, which this loop covers.
                 if !trimmed.is_empty() {
@@ -536,7 +665,9 @@ fn handle_paragraph_inner(
                         caption_href: None,
                         image,
                         classification: None,
+                        description: None,
                         caption_parent: Default::default(),
+                        caption_location: None,
                     });
                 }
             }
@@ -557,7 +688,9 @@ fn handle_paragraph_inner(
             caption_href: None,
             image,
             classification: None,
+            description: None,
             caption_parent: Default::default(),
+            caption_location: None,
         });
     }
     // Native charts anchored in this paragraph (docling PR #3809): classified
@@ -755,22 +888,37 @@ fn handle_paragraph_inner(
                     layer: None,
                 });
             } else {
-                // A multilevel marker (`1.1.`) is a Markdown bullet with the
-                // marker kept as a text prefix (`- 1.1. text`), but an ordered
-                // DocLang item with a clean-text `<marker>` — carried in `dclx`.
+                // Any other marker is an ordered DocLang item with a clean-text
+                // `<marker>` — carried in `dclx` — and renders in Markdown by
+                // docling-core's rules (`ensure_valid_list_item_marker` with
+                // `orig_list_item_marker_mode=AUTO`): a marker of Unicode
+                // digits and a dot (`１.`, docling#4336) is already valid and
+                // prints verbatim; one holding an ASCII letter or digit
+                // (`1.1.`, `a)`) is kept as a text prefix behind the bullet
+                // (`- 1.1. text`); one without any (`第九条`, `甲.`, `①`) is
+                // dropped and the item is a plain bullet.
                 let dclx = Some(ListItemDclx {
                     ordered: true,
                     marker: Some(marker.clone()),
                     text: text.clone(),
                     runs: Vec::new(),
                 });
+                let already_valid = cached_regex!(r"^\d+\.$").is_match(&marker);
+                let ascii_alnum = marker.bytes().any(|b| b.is_ascii_alphanumeric());
+                let (ordered, marker, text) = if already_valid {
+                    (true, Some(marker), text)
+                } else if ascii_alnum {
+                    (false, None, format!("{marker} {text}"))
+                } else {
+                    (false, None, text)
+                };
                 doc.push(Node::ListItem {
-                    ordered: false,
+                    ordered,
                     number,
                     first_in_list,
-                    text: format!("{marker} {text}"),
+                    text,
                     level,
-                    marker: None,
+                    marker,
                     location: None,
                     dclx,
                     href: None,
@@ -1090,8 +1238,10 @@ fn heading_label_level(label: &str) -> Option<u8> {
     };
     match split {
         Some((text, digits)) if text.trim().eq_ignore_ascii_case("heading") => {
-            let level = digits.parse::<u8>().unwrap_or(u8::MAX - 1).max(1);
-            Some(level.saturating_add(1))
+            // OOXML headings are 1–9: a custom "Heading 0" or "Heading 111"
+            // clamps into that range (docling#4319).
+            let level = digits.parse::<u8>().unwrap_or(u8::MAX).clamp(1, 9);
+            Some(level + 1)
         }
         Some(_) => None,
         // No digit split: level-less heading iff the label itself says
@@ -1495,8 +1645,11 @@ fn collect_one(
                 out.push((text, lfmt, url.or(link.map(str::to_string))));
             }
         }
-        // Transparent inline wrappers.
-        "smartTag" | "ins" | "fldSimple" | "sdt" | "sdtContent" => {
+        // Transparent inline wrappers — `customXml` included (#589): a run
+        // inside a custom XML markup element is ordinary text to Word,
+        // python-docx and the JSON walk alike, and the Markdown used to drop
+        // it (`Prefix text.  Suffix text.`).
+        "smartTag" | "customXml" | "ins" | "moveTo" | "fldSimple" | "sdt" | "sdtContent" => {
             collect_run_tuples(child, fmt, link, ctx, out)
         }
         _ => {}
@@ -1595,6 +1748,17 @@ fn parse_table_inner(tbl: XmlNode, ctx: &Ctx, nested: bool) -> Option<Table> {
     let mut col_cont = vec![vec![false; num_cols]; rows.len()];
     let mut row_cont = vec![vec![false; num_cols]; rows.len()];
     let mut any_span = false;
+    // Positions a *rich* merged cell covers beyond its first (#527). docling
+    // writes a rich cell through its group ref and marks the items visited,
+    // so the Markdown table shows its content once — at the top-left grid
+    // position, the first the row-major walk reaches — and the rest of the
+    // merge empty; a plain merged cell repeats its text everywhere.
+    let mut rich_at = vec![vec![false; num_cols]; rows.len()];
+    let mut rich_cover = vec![vec![false; num_cols]; rows.len()];
+    // Counted for the outermost table only: a nested table's rich cells are
+    // part of the outer cell's walk.
+    let top_level = !nested && ctx.table_depth.get() == 1;
+    let mut orphans = 0usize;
     for (ri, row) in rows.iter().enumerate() {
         // The grid cursor starts past the row's skipped leading columns
         // (`w:gridBefore`) and advances by each cell's span — true grid
@@ -1639,6 +1803,20 @@ fn parse_table_inner(tbl: XmlNode, ctx: &Ctx, nested: bool) -> Option<Table> {
             for cell in grid[ri].iter_mut().take(col_end).skip(ci) {
                 *cell = text.clone();
             }
+            if !nested && ci < col_end {
+                let rich = if v_continue && ri > 0 {
+                    rich_at[ri - 1][ci]
+                } else {
+                    is_rich_cell(tc)
+                };
+                if top_level && rich && !(v_continue && ri > 0) {
+                    orphans += super::docx_tree::rich_cell_orphan_groups(tc, ctx);
+                }
+                for c in ci..col_end {
+                    rich_at[ri][c] = rich;
+                    rich_cover[ri][c] = rich && (c > ci || (v_continue && ri > 0));
+                }
+            }
             for c in col_cont[ri].iter_mut().take(col_end).skip(ci + 1) {
                 *c = true;
                 any_span = true;
@@ -1650,6 +1828,16 @@ fn parse_table_inner(tbl: XmlNode, ctx: &Ctx, nested: bool) -> Option<Table> {
                 any_span = true;
             }
             ci += span;
+        }
+    }
+    if top_level {
+        ctx.orphan_inline_groups.set(orphans);
+    }
+    for (row, cover) in grid.iter_mut().zip(&rich_cover) {
+        for (cell, &covered) in row.iter_mut().zip(cover) {
+            if covered {
+                cell.clear();
+            }
         }
     }
     let structure = any_span.then(|| {
@@ -1673,6 +1861,7 @@ fn parse_table_inner(tbl: XmlNode, ctx: &Ctx, nested: bool) -> Option<Table> {
         cells: None,
         caption: None,
         caption_parent: Default::default(),
+        caption_location: None,
     })
 }
 
@@ -1684,13 +1873,78 @@ pub(super) fn grid_span(tc: XmlNode) -> usize {
         .unwrap_or(1)
 }
 
+/// The symbol-encoded fonts a run's `w:rFonts` names (#588): the `w:ascii`
+/// font (characters below 0x80) and the `w:hAnsi` one (the rest — the
+/// 0x80–0xFF byte codes and their Private Use Area images), each `None` for
+/// an ordinary font or when the attribute is absent.
+fn run_symbol_fonts(r: XmlNode) -> (Option<SymbolFont>, Option<SymbolFont>) {
+    let Some(fonts) = r
+        .children()
+        .find(|n| n.has_tag_name("rPr"))
+        .and_then(|pr| pr.children().find(|n| n.has_tag_name("rFonts")))
+    else {
+        return (None, None);
+    };
+    let font = |name: &str| attr(fonts, name).and_then(SymbolFont::from_name);
+    (font("ascii"), font("hAnsi"))
+}
+
+/// The text of a `w:t` as Word shows it (#588): set in a symbol font
+/// (`Symbol`, `Wingdings`, …), each glyph code — a byte or its PUA image —
+/// becomes the Unicode character of that glyph; in any other font the text
+/// is returned as it is. The font is the run's own `w:rFonts` (the run the
+/// `w:t` sits in; a hyperlink's or content control's runs carry their own):
+/// a symbol font inherited from a style is not resolved here.
+pub(super) fn t_text<'a>(t: XmlNode<'a, '_>) -> Cow<'a, str> {
+    let text = t.text().unwrap_or("");
+    let Some(run) = t.parent().filter(|p| p.has_tag_name("r")) else {
+        return Cow::Borrowed(text);
+    };
+    let (ascii, hansi) = run_symbol_fonts(run);
+    if ascii.is_none() && hansi.is_none() || !text.chars().any(symbol_fonts::is_glyph_code) {
+        return Cow::Borrowed(text);
+    }
+    Cow::Owned(
+        text.chars()
+            .map(|c| {
+                let font = if (c as u32) < 0x80 {
+                    ascii.or(hansi)
+                } else {
+                    hansi.or(ascii)
+                };
+                font.and_then(|f| f.glyph(c as u32)).unwrap_or(c)
+            })
+            .collect(),
+    )
+}
+
+/// A `w:sym` (Insert ▸ Symbol): the glyph `w:char` (hex, `F06C` or `6C`) of
+/// the font `w:font` as Unicode (#588). A font this reader has no table for
+/// yields the code point as Word stores it (the PUA image a reader with the
+/// font would render), so the character is never silently dropped the way
+/// python-docx's `CT_R.text` drops every `w:sym`.
+pub(super) fn sym_text(n: XmlNode) -> String {
+    let Some(code) = attr(n, "char").and_then(|c| u32::from_str_radix(c.trim(), 16).ok()) else {
+        return String::new();
+    };
+    let mapped = attr(n, "font")
+        .and_then(SymbolFont::from_name)
+        .and_then(|f| f.glyph(code));
+    mapped
+        .or_else(|| char::from_u32(code).filter(|c| !c.is_control()))
+        .map(String::from)
+        .unwrap_or_default()
+}
+
 /// The plain text of one child of a `w:r`, python-docx's `CT_R.text` — which
 /// is where docling's paragraph text comes from, so this is the parity target.
 /// Anything not in its `w:br | w:cr | w:noBreakHyphen | w:ptab | w:t | w:tab`
-/// set contributes nothing.
+/// set contributes nothing — except `w:sym`, which python-docx drops and this
+/// reader maps to the glyph's Unicode character (#588).
 pub(super) fn run_child_text(n: XmlNode) -> String {
     match n.tag_name().name() {
-        "t" => n.text().unwrap_or("").to_string(),
+        "t" => t_text(n).into_owned(),
+        "sym" => sym_text(n),
         // A *line* break is a newline; a page or column break has no text
         // equivalent at all.
         "br" => match attr(n, "type") {
@@ -1708,13 +1962,15 @@ pub(super) fn run_child_text(n: XmlNode) -> String {
 
 /// The plain text of a run inner-content element, for the places that flatten
 /// a subtree with `descendants()` rather than walking a run's own children.
-/// Only `w:t` and `w:noBreakHyphen` are safe to pick up that way — `w:tab` and
-/// `w:br` also appear in paragraph *properties* (`w:pPr/w:tabs/w:tab`), which
-/// carry no text; `collect_run_tuples` handles those from the run itself.
-pub(super) fn flat_text<'a, 'i>(n: XmlNode<'a, 'i>) -> Option<&'a str> {
+/// Only `w:t`, `w:sym` and `w:noBreakHyphen` are safe to pick up that way —
+/// `w:tab` and `w:br` also appear in paragraph *properties*
+/// (`w:pPr/w:tabs/w:tab`), which carry no text; `collect_run_tuples` handles
+/// those from the run itself.
+pub(super) fn flat_text<'a, 'i>(n: XmlNode<'a, 'i>) -> Option<Cow<'a, str>> {
     match n.tag_name().name() {
-        "t" => Some(n.text().unwrap_or("")),
-        "noBreakHyphen" => Some("-"),
+        "t" => Some(t_text(n)),
+        "sym" => Some(Cow::Owned(sym_text(n))),
+        "noBreakHyphen" => Some(Cow::Borrowed("-")),
         _ => None,
     }
 }
@@ -1758,9 +2014,10 @@ pub(super) fn row_grid_offsets(tr: XmlNode) -> (usize, usize) {
 /// A table cell's Markdown. A "plain" cell (one paragraph, unformatted runs, no
 /// nested block/image) becomes its plain text; a "rich" cell renders its full
 /// block content (paragraphs, lists, formatting), which the table serializer
-/// then flattens (`\n` → space). Mirrors docling's `_is_rich_table_cell`.
+/// then flattens (`\n` → space). Mirrors docling's `_is_rich_table_cell`,
+/// plus [`renders_as_blocks`]' text boxes.
 fn cell_markdown(tc: XmlNode, ctx: &Ctx) -> String {
-    if is_rich_cell(tc) {
+    if renders_as_blocks(tc) {
         rich_cell_markdown(tc, ctx)
     } else {
         // No trim: the cell value is kept verbatim (docling uses `cell.text`);
@@ -1773,7 +2030,23 @@ fn cell_markdown(tc: XmlNode, ctx: &Ctx) -> String {
     }
 }
 
-/// Whether a cell must be parsed as rich content rather than plain text.
+/// Whether the flat outputs (Markdown, LaTeX, DocLang) render a cell from its
+/// block content: docling's rich cells, and a cell holding a text box (#532).
+/// A text box is not one of `_is_rich_table_cell`'s triggers, so docling
+/// takes such a cell as plain — python-docx's `cell.text`, which skips the
+/// box — and the box's paragraphs land *before the table* as a `textbox`
+/// section: the cell prints empty and the text appears out of place (with a
+/// second text box also inside the cell). Here the box's text stays in the
+/// cell it is drawn in. The JSON (and the HTML rendered from it) keeps
+/// docling's item tree — the text hoisted before the table — since that tree
+/// mirrors upstream's structure call for call (`docx_tree.rs`), which is why
+/// this is not folded into [`is_rich_cell`].
+fn renders_as_blocks(tc: XmlNode) -> bool {
+    is_rich_cell(tc) || tc.descendants().any(|n| n.has_tag_name("txbxContent"))
+}
+
+/// Whether a cell must be parsed as rich content rather than plain text
+/// (docling's `_is_rich_table_cell`).
 fn is_rich_cell(tc: XmlNode) -> bool {
     let paras: Vec<XmlNode> = child_elements(tc).filter(|c| c.has_tag_name("p")).collect();
     if paras.len() > 1 {
@@ -1811,30 +2084,126 @@ fn run_has_format(r: XmlNode) -> bool {
 fn rich_cell_markdown(tc: XmlNode, ctx: &Ctx) -> String {
     let mut sub = DoclingDocument::new("");
     let mut state = ListState::default();
+    // The node range each child element rendered to, for the regrouping
+    // below.
+    let mut spans: Vec<(roxmltree::NodeId, std::ops::Range<usize>)> = Vec::new();
     for child in child_elements(tc) {
-        match child.tag_name().name() {
-            "p" => handle_paragraph_inner(child, ctx, &mut state, &mut sub, true, false),
-            "tbl" => {
-                if let Some(table) = parse_table_with(child, ctx, true) {
-                    let text = table
-                        .rows
-                        .iter()
-                        .flatten()
-                        .filter(|c| !c.is_empty())
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    if !text.is_empty() {
-                        sub.push(Node::Paragraph { text });
-                    }
-                }
-            }
-            _ => {}
-        }
+        let start = sub.nodes.len();
+        cell_block(child, ctx, &mut state, &mut sub, true);
+        spans.push((child.id(), start..sub.nodes.len()));
     }
+    regroup_rich_cell(tc, ctx, &mut sub.nodes, &spans);
     // In-cell rendering: a heading inside the cell is plain text
     // (docling-core#540).
     sub.export_to_table_cell_markdown().trim().to_string()
+}
+
+/// One block of a rich cell: a paragraph, a nested table — flattened to its
+/// space-joined cell text for Markdown (`flatten`, docling's
+/// nested-in-table serialization), kept whole for DocLang — or a block
+/// content control, whose `w:sdtContent` is walked like the cell itself, as
+/// docling's `_walk_linear` does (#532: a cell holding only an `sdt` printed
+/// empty).
+fn cell_block(
+    child: XmlNode,
+    ctx: &Ctx,
+    state: &mut ListState,
+    sub: &mut DoclingDocument,
+    flatten: bool,
+) {
+    match child.tag_name().name() {
+        "p" => handle_paragraph_inner(child, ctx, state, sub, true, false),
+        "tbl" => {
+            let Some(table) = parse_table_with(child, ctx, flatten) else {
+                return;
+            };
+            if !flatten {
+                sub.push(Node::Table(table));
+                return;
+            }
+            let text = table
+                .rows
+                .iter()
+                .flatten()
+                .filter(|c| !c.is_empty())
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" ");
+            if !text.is_empty() {
+                sub.push(Node::Paragraph { text });
+            }
+        }
+        "sdt" => {
+            if let Some(content) = child.children().find(|n| n.has_tag_name("sdtContent")) {
+                for c in child_elements(content) {
+                    cell_block(c, ctx, state, sub, flatten);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A blank spacer between items of one list makes docling regroup a rich
+/// cell (#527): rearrange the cell's rendered `nodes` (`spans` = the node
+/// range each child element produced) into its block layout when it has one.
+fn regroup_rich_cell(
+    tc: XmlNode,
+    ctx: &Ctx,
+    nodes: &mut Vec<Node>,
+    spans: &[(roxmltree::NodeId, std::ops::Range<usize>)],
+) {
+    let blanks: std::collections::HashSet<roxmltree::NodeId> = child_elements(tc)
+        .filter(|c| c.has_tag_name("p") && plain_paragraph_text(*c).trim().is_empty())
+        .map(|c| c.id())
+        .collect();
+    if blanks.is_empty() {
+        return;
+    }
+    if let Some(layout) = super::docx_tree::rich_cell_layout(tc, ctx) {
+        if let Some(regrouped) = regroup_cell_nodes(nodes, spans, &layout, &blanks) {
+            *nodes = regrouped;
+        }
+    }
+}
+
+/// `nodes` rearranged into `layout`'s blocks (see
+/// [`super::docx_tree::rich_cell_layout`]): each block's elements' nodes in
+/// order, a list item opening a new list exactly at the start of a block.
+/// A blank paragraph the layout leaves out was deleted upstream and is
+/// dropped; `None` when any other element that rendered something is
+/// missing — the cell then keeps its own order.
+fn regroup_cell_nodes(
+    nodes: &[Node],
+    spans: &[(roxmltree::NodeId, std::ops::Range<usize>)],
+    layout: &[Vec<roxmltree::NodeId>],
+    blanks: &std::collections::HashSet<roxmltree::NodeId>,
+) -> Option<Vec<Node>> {
+    let placed: std::collections::HashSet<_> = layout.iter().flatten().collect();
+    if spans
+        .iter()
+        .any(|(id, range)| !range.is_empty() && !placed.contains(id) && !blanks.contains(id))
+    {
+        return None;
+    }
+    let mut out = Vec::with_capacity(nodes.len());
+    for block in layout {
+        let mut first = true;
+        for id in block {
+            let Some((_, range)) = spans.iter().find(|(s, _)| s == id) else {
+                continue;
+            };
+            for node in &nodes[range.clone()] {
+                let mut node = node.clone();
+                if let Node::ListItem { first_in_list, .. } = &mut node {
+                    *first_in_list = first;
+                }
+                first = false;
+                out.push(node);
+            }
+        }
+    }
+    Some(out)
 }
 
 /// A rich cell's DocLang block content — the structured counterpart of
@@ -1843,22 +2212,18 @@ fn rich_cell_markdown(tc: XmlNode, ctx: &Ctx) -> String {
 /// document body. Empty for a plain cell, whose flat text the serializer uses.
 /// Markdown/JSON never consult this (they render the flat cell text).
 fn cell_blocks_of(tc: XmlNode, ctx: &Ctx) -> Vec<Node> {
-    if !is_rich_cell(tc) {
+    if !renders_as_blocks(tc) {
         return Vec::new();
     }
     let mut sub = DoclingDocument::new("");
     let mut state = ListState::default();
+    let mut spans: Vec<(roxmltree::NodeId, std::ops::Range<usize>)> = Vec::new();
     for child in child_elements(tc) {
-        match child.tag_name().name() {
-            "p" => handle_paragraph_inner(child, ctx, &mut state, &mut sub, true, false),
-            "tbl" => {
-                if let Some(table) = parse_table_with(child, ctx, false) {
-                    sub.push(Node::Table(table));
-                }
-            }
-            _ => {}
-        }
+        let start = sub.nodes.len();
+        cell_block(child, ctx, &mut state, &mut sub, false);
+        spans.push((child.id(), start..sub.nodes.len()));
     }
+    regroup_rich_cell(tc, ctx, &mut sub.nodes, &spans);
     sub.nodes
 }
 
@@ -1917,10 +2282,10 @@ fn push_inline_text(node: XmlNode, out: &mut String) {
         }
         "sdt" => {
             for t in node.descendants().filter(|n| n.has_tag_name("t")) {
-                out.push_str(t.text().unwrap_or(""));
+                out.push_str(&t_text(t));
             }
         }
-        "smartTag" | "customXml" | "ins" | "fldSimple" => {
+        "smartTag" | "customXml" | "ins" | "moveTo" | "fldSimple" => {
             for c in child_elements(node) {
                 push_inline_text(c, out);
             }
@@ -2256,7 +2621,222 @@ const VISIBLE_NUMBERING_FORMATS: &[&str] = &[
     "lowerLetter",
     "upperLetter",
     "decimalZero",
+    // East Asian formats (docling#4336): rendered by `cjk_counter`.
+    "chineseCounting",
+    "chineseCountingThousand",
+    "chineseLegalSimplified",
+    "ideographDigital",
+    "ideographTraditional",
+    "ideographZodiac",
+    "japaneseCounting",
+    "decimalFullWidth",
+    "decimalEnclosedCircle",
 ];
+
+// East Asian numFmt rendering (docling#4336). Character sets follow
+// ECMA-376-1:2016 §17.18.59 (ST_NumberFormat); where the standard's prose and
+// its examples disagree, or are silent, the rules follow the markers Microsoft
+// Word 16.112 renders, as noted on each helper.
+const CJK_DIGITS: [char; 9] = ['一', '二', '三', '四', '五', '六', '七', '八', '九'];
+const CHINESE_LEGAL_DIGITS: [char; 9] = ['壹', '贰', '叁', '肆', '伍', '陆', '柒', '捌', '玖'];
+const HEAVENLY_STEMS: [char; 10] = ['甲', '乙', '丙', '丁', '戊', '己', '庚', '辛', '壬', '癸'];
+const EARTHLY_BRANCHES: [char; 12] = [
+    '子', '丑', '寅', '卯', '辰', '巳', '午', '未', '申', '酉', '戌', '亥',
+];
+/// Word renders an empty marker from this value on ([MS-OI29500] 2.1.548 j).
+const CJK_GROUPED_NUMBER_LIMIT: i64 = 1_000_000;
+
+/// Each decimal digit of `value` written with `zero` for 0 and `digits[d-1]`
+/// otherwise (`_int_to_positional_marker`).
+fn positional_marker(value: i64, zero: char, digits: &[char; 9]) -> String {
+    if value < 0 {
+        return value.to_string();
+    }
+    value
+        .to_string()
+        .bytes()
+        .map(|b| match b - b'0' {
+            0 => zero,
+            d => digits[usize::from(d) - 1],
+        })
+        .collect()
+}
+
+/// 1..=len(symbols) map to one symbol each; other values stay decimal
+/// (`_int_to_sequence_marker` — ECMA-376's fallback, which Word renders too).
+fn sequence_marker(value: i64, symbols: &[char]) -> String {
+    match usize::try_from(value) {
+        Ok(v) if (1..=symbols.len()).contains(&v) => symbols[v - 1].to_string(),
+        _ => value.to_string(),
+    }
+}
+
+/// 1..999,999 with Chinese unit characters (`_int_to_chinese_grouped_marker`):
+/// every non-zero digit is followed by its unit, the ten-thousands group is
+/// closed by `myriad`, and one `zero` is written for each run of zero digits
+/// that is followed by a non-zero digit: 101 → 一百〇一, 100010 → 一十万〇一十.
+/// This matches Word ([MS-OI29500] 2.1.548 e says Word omits the zero for
+/// 10,000–100,000; it does not).
+fn chinese_grouped_marker(
+    value: i64,
+    digits: &[char; 9],
+    units: [&str; 4],
+    myriad: &str,
+    zero: char,
+) -> String {
+    let text = value.to_string();
+    let mut parts = String::new();
+    let mut pending_zero = false;
+    for (power, b) in (0..text.len()).rev().zip(text.bytes()) {
+        let digit = usize::from(b - b'0');
+        if digit == 0 {
+            pending_zero = !parts.is_empty();
+        } else {
+            if pending_zero {
+                parts.push(zero);
+                pending_zero = false;
+            }
+            parts.push(digits[digit - 1]);
+            parts.push_str(units[power % 4]);
+        }
+        if power == 4 {
+            parts.push_str(myriad);
+        }
+    }
+    parts
+}
+
+/// `chineseCounting`: 十 and 二十一 up to 99, then digit by digit with U+25CB as
+/// zero (ECMA-376's pattern, which Word renders too).
+fn chinese_counting_marker(value: i64) -> String {
+    if value < 0 {
+        return value.to_string();
+    }
+    if value >= 100 || value == 0 {
+        return positional_marker(value, '\u{25cb}', &CJK_DIGITS);
+    }
+    let (tens, ones) = (value / 10, value % 10);
+    let mut text = String::new();
+    if tens > 0 {
+        if tens > 1 {
+            text.push(CJK_DIGITS[tens as usize - 1]);
+        }
+        text.push('十');
+    }
+    if ones > 0 {
+        text.push(CJK_DIGITS[ones as usize - 1]);
+    }
+    text
+}
+
+/// `chineseCountingThousand` the way Word does: 10–19 are 十…十九, every other
+/// ten keeps its digit (110 → 一百一十, 100000 → 一十万), U+3007 is the zero
+/// (101 → 一百〇一); from 1,000,000 the marker is empty.
+fn chinese_counting_thousand_marker(value: i64) -> String {
+    match value {
+        v if v < 0 => v.to_string(),
+        0 => "\u{3007}".to_string(),
+        v if v >= CJK_GROUPED_NUMBER_LIMIT => String::new(),
+        10 => "十".to_string(),
+        11..=19 => format!("十{}", CJK_DIGITS[value as usize - 11]),
+        v => chinese_grouped_marker(v, &CJK_DIGITS, ["", "十", "百", "千"], "万", '\u{3007}'),
+    }
+}
+
+/// `chineseLegalSimplified` (壹, 贰, …, 壹拾, 壹佰零壹): ECMA-376's digits and
+/// units, 10 keeps its leading 壹, ten thousand is U+842C as Word renders it;
+/// from 1,000,000 the marker is empty.
+fn chinese_legal_marker(value: i64) -> String {
+    match value {
+        v if v < 0 => v.to_string(),
+        0 => "零".to_string(),
+        v if v >= CJK_GROUPED_NUMBER_LIMIT => String::new(),
+        v => chinese_grouped_marker(v, &CHINESE_LEGAL_DIGITS, ["", "拾", "佰", "仟"], "萬", '零'),
+    }
+}
+
+/// 1..9999 with 千, 百, 十; a digit 1 is omitted before its unit (before 千
+/// only when `explicit_one_thousand` is off).
+fn japanese_counting_group(mut value: i64, explicit_one_thousand: bool) -> String {
+    let mut parts = String::new();
+    for (unit_value, unit) in [(1000, '千'), (100, '百'), (10, '十')] {
+        let digit = value / unit_value;
+        value %= unit_value;
+        if digit == 0 {
+            continue;
+        }
+        if digit > 1 || (unit == '千' && explicit_one_thousand) {
+            parts.push(CJK_DIGITS[digit as usize - 1]);
+        }
+        parts.push(unit);
+    }
+    if value > 0 {
+        parts.push(CJK_DIGITS[value as usize - 1]);
+    }
+    parts
+}
+
+/// `japaneseCounting` (十, 百一, 千百, 一万一千, 十万): no zero character inside
+/// a number, 百 and 十 without a leading 一, 千 without 一 below 10,000 and
+/// 一千 after a 万 group — Word's rendering; from 1,000,000 the marker is empty.
+fn japanese_counting_marker(value: i64) -> String {
+    if value < 0 {
+        return value.to_string();
+    }
+    if value == 0 {
+        return "\u{3007}".to_string();
+    }
+    if value >= CJK_GROUPED_NUMBER_LIMIT {
+        return String::new();
+    }
+    let (myriads, rest) = (value / 10_000, value % 10_000);
+    let mut text = String::new();
+    if myriads > 0 {
+        if myriads == 1 {
+            text.push(CJK_DIGITS[0]);
+        } else {
+            text.push_str(&japanese_counting_group(myriads, false));
+        }
+        text.push('万');
+    }
+    if rest > 0 {
+        text.push_str(&japanese_counting_group(rest, myriads > 0));
+    }
+    text
+}
+
+/// docling's `_CJK_ENUM_FORMATTERS`: the marker for an East Asian `numFmt`,
+/// `None` for any other format.
+fn cjk_counter(counter: i64, num_fmt: &str) -> Option<String> {
+    Some(match num_fmt {
+        "chineseCounting" => chinese_counting_marker(counter),
+        "chineseCountingThousand" => chinese_counting_thousand_marker(counter),
+        "chineseLegalSimplified" => chinese_legal_marker(counter),
+        "ideographDigital" => positional_marker(counter, '\u{3007}', &CJK_DIGITS),
+        "ideographTraditional" => sequence_marker(counter, &HEAVENLY_STEMS),
+        // ECMA-376 lists U+620C (戌), the eleventh Earthly Branch; Word 16.112
+        // renders the adjacent U+620D (戍), which breaks the 子丑寅卯 sequence,
+        // so the standard is kept here on purpose (as upstream does).
+        "ideographZodiac" => sequence_marker(counter, &EARTHLY_BRANCHES),
+        "japaneseCounting" => japanese_counting_marker(counter),
+        "decimalFullWidth" => {
+            if counter < 0 {
+                counter.to_string()
+            } else {
+                counter
+                    .to_string()
+                    .bytes()
+                    .map(|b| char::from_u32(0xFF10 + u32::from(b - b'0')).unwrap_or('?'))
+                    .collect()
+            }
+        }
+        "decimalEnclosedCircle" => {
+            let circles: Vec<char> = (0x2460..0x2474).filter_map(char::from_u32).collect();
+            sequence_marker(counter, &circles)
+        }
+        _ => return None,
+    })
+}
 
 /// Map `(numId, ilvl)` → its level properties, resolved through `numbering.xml`'s
 /// `num` → `abstractNum` → level (`numFmt`, `start`, `lvlText`).
@@ -2340,10 +2920,16 @@ fn is_non_decimal_format(num_fmt: Option<&str>) -> bool {
 }
 
 /// Render a list counter with an OOXML `numFmt` — docling's
-/// `_format_enum_counter`: `lowerLetter`/`upperLetter` run a…z, aa…zz (the
-/// letter repeated), roman numerals, `decimalZero` pads to two digits, and
+/// `_format_enum_counter`: the East Asian formats through [`cjk_counter`]
+/// (docling#4336), `lowerLetter`/`upperLetter` run a…z, aa…zz (the letter
+/// repeated), roman numerals, `decimalZero` pads to two digits, and
 /// everything else (including no format) is the plain decimal.
 fn format_enum_counter(counter: i64, num_fmt: Option<&str>) -> String {
+    if counter >= 0 {
+        if let Some(cjk) = num_fmt.and_then(|f| cjk_counter(counter, f)) {
+            return cjk;
+        }
+    }
     let letter = |v: i64| -> String {
         if v <= 0 {
             return v.to_string();
@@ -2801,8 +3387,11 @@ mod tests {
         assert_eq!(heading_label_level("heading 3"), Some(4));
         // <digits><text>, the rest ignored (upstream's `^(\d+)(\D+)` alt).
         assert_eq!(heading_label_level("2Heading"), Some(3));
-        // Custom "Heading 0" clamps to level 1 (md ##).
+        // Custom "Heading 0" clamps to level 1 (md ##), "Heading 111" to 9
+        // (docling#4319).
         assert_eq!(heading_label_level("Heading 0"), Some(2));
+        assert_eq!(heading_label_level("Heading 111"), Some(10));
+        assert_eq!(heading_label_level("Heading 99999"), Some(10));
         // A longer text part is not "heading": upstream's ("", 0) branch.
         assert_eq!(heading_label_level("My Heading 2"), None);
         // No digit split: heading only with a capital-H "Heading" in the raw

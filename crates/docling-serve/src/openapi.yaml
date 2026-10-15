@@ -8,10 +8,15 @@ info:
     HTTP conversion API over [docling.rs](https://github.com/docling-project/docling.rs):
     documents (PDF, DOCX, XLSX, PPTX, HTML, EPUB, images, audio, video, …) to
     Markdown, docling `DoclingDocument` JSON, DocLang (`.dclx`) archives,
-    LaTeX, or chunk records.
+    LaTeX, HTML, Pandoc AST JSON, or chunk records.
 
     Options may be sent as query parameters, multipart text fields, or JSON
     keys; a body value wins over the same option in the query string.
+
+    Python docling-serve's own routes (`/v1/convert/file`, `/v1/convert/source`,
+    their `/async` variants, `/v1/status/poll/{id}`, `/v1alpha/…`) are served
+    too, in upstream's request and response shapes (#615). With `--api-key`
+    (or `DOCLING_SERVE_API_KEY`) set, every `/v1` route needs `X-Api-Key`.
   version: 1.0.0
   license:
     name: MIT
@@ -41,7 +46,12 @@ paths:
         **Batch**: several `file` parts in one multipart request convert as a
         batch — the response is then `{"results": [...]}` with per-item
         status (one bad file fails its item, not the batch), regardless of
-        `to`; binary dclx output is base64 in `dclx_base64`.
+        `to`; binary dclx output is base64 in `dclx_base64`. A `.zip` file
+        (upload, `sources[]` file item or cloud object) is such a batch of
+        the documents inside it (#557); entries that do not convert —
+        unsupported types, nested archives, unsafe paths, over the
+        `DOCLING_RS_ZIP_MAX_*` limits — are left out (and logged), and an
+        archive with nothing convertible is a 400.
 
         **Confidence** (PDF/image ML conversions): every response carries an
         `X-Docling-Confidence` header with the document-level summary, and
@@ -55,6 +65,9 @@ paths:
         - { $ref: "#/components/parameters/images" }
         - { $ref: "#/components/parameters/no_ocr" }
         - { $ref: "#/components/parameters/skip_ocr" }
+        - { $ref: "#/components/parameters/text_layer_only" }
+        - { $ref: "#/components/parameters/password" }
+        - { $ref: "#/components/parameters/pdf_password" }
         - { $ref: "#/components/parameters/force_full_page_ocr" }
         - { $ref: "#/components/parameters/no_table_former" }
         - { $ref: "#/components/parameters/no_text_panels" }
@@ -62,10 +75,39 @@ paths:
         - { $ref: "#/components/parameters/do_picture_classification" }
         - { $ref: "#/components/parameters/do_code_enrichment" }
         - { $ref: "#/components/parameters/do_formula_enrichment" }
+        - { $ref: "#/components/parameters/do_picture_ocr" }
+        - { $ref: "#/components/parameters/picture_ocr_classes" }
+        - { $ref: "#/components/parameters/picture_ocr_min_side" }
+        - { $ref: "#/components/parameters/picture_ocr_scale" }
+        - { $ref: "#/components/parameters/keep_picture_images" }
+        - { $ref: "#/components/parameters/do_picture_description" }
+        - { $ref: "#/components/parameters/picture_description_endpoint" }
+        - { $ref: "#/components/parameters/picture_description_model" }
+        - { $ref: "#/components/parameters/picture_description_api_key" }
+        - { $ref: "#/components/parameters/picture_description_prompt" }
+        - { $ref: "#/components/parameters/picture_description_mode" }
+        - { $ref: "#/components/parameters/picture_description_concurrency" }
+        - { $ref: "#/components/parameters/redact_pii" }
+        - { $ref: "#/components/parameters/redact_mode" }
+        - { $ref: "#/components/parameters/redact_kinds" }
+        - { $ref: "#/components/parameters/redact_pattern" }
+        - { $ref: "#/components/parameters/redact_images" }
+        - { $ref: "#/components/parameters/redact_allow_terms" }
+        - { $ref: "#/components/parameters/redact_deny_terms" }
+        - { $ref: "#/components/parameters/redact_allow_patterns" }
+        - { $ref: "#/components/parameters/redact_ner_min_score" }
         - { $ref: "#/components/parameters/fetch_images" }
+        - { $ref: "#/components/parameters/image_sources" }
+        - { $ref: "#/components/parameters/image_hosts" }
+        - { $ref: "#/components/parameters/max_images" }
+        - { $ref: "#/components/parameters/max_image_bytes" }
+        - { $ref: "#/components/parameters/max_image_total_mb" }
+        - { $ref: "#/components/parameters/min_image_bytes" }
         - { $ref: "#/components/parameters/skip_empty_cells" }
         - { $ref: "#/components/parameters/compact_tables" }
+        - { $ref: "#/components/parameters/page_break_placeholder" }
         - { $ref: "#/components/parameters/md_page_break_placeholder" }
+        - { $ref: "#/components/parameters/pandoc_api_version" }
         - { $ref: "#/components/parameters/list_attachments" }
         - { $ref: "#/components/parameters/ebcdic_layout" }
         - { $ref: "#/components/parameters/pages" }
@@ -73,10 +115,21 @@ paths:
         - { $ref: "#/components/parameters/ocr_lang" }
         - { $ref: "#/components/parameters/ocr_mode" }
         - { $ref: "#/components/parameters/ocr_scale" }
+        - { $ref: "#/components/parameters/ocr_textline_orientation" }
+        - { $ref: "#/components/parameters/ocr_engine" }
+        - { $ref: "#/components/parameters/images_scale" }
+        - { $ref: "#/components/parameters/page_images" }
+        - { $ref: "#/components/parameters/document_timeout" }
+        - { $ref: "#/components/parameters/use_web_browser" }
         - { $ref: "#/components/parameters/asr_model" }
         - { $ref: "#/components/parameters/asr_lang" }
         - { $ref: "#/components/parameters/encoding" }
+        - { $ref: "#/components/parameters/ipynb_outputs" }
         - { $ref: "#/components/parameters/video_frames" }
+        - { $ref: "#/components/parameters/video_scene_threshold" }
+        - { $ref: "#/components/parameters/video_frame_max_side" }
+        - { $ref: "#/components/parameters/video_frame_dedupe" }
+        - { $ref: "#/components/parameters/xbrl_taxonomy" }
         - { $ref: "#/components/parameters/chunker" }
         - { $ref: "#/components/parameters/chunk_tokenizer" }
         - { $ref: "#/components/parameters/chunk_max_tokens" }
@@ -103,6 +156,10 @@ paths:
                 strict: { type: boolean }
                 images: { $ref: "#/components/schemas/Images" }
                 no_ocr: { type: boolean }
+                skip_ocr: { type: boolean, deprecated: true }
+                text_layer_only: { type: boolean }
+                password: { type: string, format: password }
+                pdf_password: { type: string, format: password, description: "Alias of password." }
                 force_full_page_ocr: { type: boolean }
                 no_table_former: { type: boolean }
                 no_text_panels: { type: boolean }
@@ -110,18 +167,60 @@ paths:
                 do_picture_classification: { type: boolean }
                 do_code_enrichment: { type: boolean }
                 do_formula_enrichment: { type: boolean }
+                do_picture_ocr: { type: boolean }
+                picture_ocr_classes: { type: string }
+                picture_ocr_min_side: { type: integer }
+                picture_ocr_scale: { $ref: "#/components/schemas/PictureOcrScale" }
+                keep_picture_images: { type: boolean }
+                do_picture_description: { type: boolean }
+                picture_description_endpoint: { type: string }
+                picture_description_model: { type: string }
+                picture_description_api_key: { type: string }
+                picture_description_prompt: { type: string }
+                picture_description_mode: { $ref: "#/components/schemas/PictureDescriptionMode" }
+                picture_description_concurrency: { type: integer, minimum: 1 }
+                redact_pii: { type: boolean }
+                redact_mode: { type: string }
+                redact_kinds: { type: string }
+                redact_pattern: { type: string }
+                redact_images: { type: string }
+                redact_allow_terms: { type: string }
+                redact_deny_terms: { type: string }
+                redact_allow_patterns: { type: string }
+                redact_ner_min_score: { type: number, minimum: 0, maximum: 1 }
                 fetch_images: { type: boolean }
+                image_sources: { $ref: "#/components/schemas/ImageSources" }
+                image_hosts: { oneOf: [{ type: array, items: { type: string } }, { type: string }] }
+                max_images: { type: integer, minimum: 0 }
+                max_image_bytes: { type: integer, minimum: 1 }
+                max_image_total_mb: { type: integer, minimum: 0 }
+                min_image_bytes: { type: integer, minimum: 0 }
                 skip_empty_cells: { type: boolean }
                 compact_tables: { type: boolean }
-                md_page_break_placeholder: { type: string, examples: ["<!-- page break -->"] }
+                list_attachments: { type: boolean }
+                ebcdic_layout: { type: string }
+                page_break_placeholder: { type: string, examples: ["<!-- page break -->"] }
+                md_page_break_placeholder: { type: string, description: "Alias of page_break_placeholder." }
+                pandoc_api_version: { type: string, examples: ["1.23"] }
                 pages: { type: string, examples: ["2-5"] }
                 ocr_lang: { $ref: "#/components/schemas/OcrLang" }
                 ocr_mode: { $ref: "#/components/schemas/OcrMode" }
                 ocr_scale: { $ref: "#/components/schemas/OcrScale" }
+                ocr_textline_orientation: { type: boolean }
+                ocr_engine: { $ref: "#/components/schemas/OcrEngine" }
+                images_scale: { $ref: "#/components/schemas/ImagesScale" }
+                page_images: { type: boolean }
+                document_timeout: { type: number, exclusiveMinimum: 0, examples: [90] }
+                use_web_browser: { type: boolean }
                 asr_model: { type: string }
                 asr_lang: { type: string, examples: ["auto", "en", "de"] }
                 encoding: { type: string, examples: ["shift_jis", "koi8-r", "windows-1251"] }
-                video_frames: { type: integer, minimum: 0 }
+                ipynb_outputs: { $ref: "#/components/schemas/IpynbOutputs" }
+                video_frames: { oneOf: [{ type: integer, minimum: 0 }, { type: string, enum: ["all"] }] }
+                video_scene_threshold: { type: number, minimum: 0, maximum: 1 }
+                video_frame_max_side: { type: integer, minimum: 0 }
+                video_frame_dedupe: { type: integer, minimum: 0, maximum: 64 }
+                xbrl_taxonomy: { type: string }
                 chunker: { $ref: "#/components/schemas/Chunker" }
                 chunk_tokenizer: { type: string }
                 chunk_max_tokens: { type: integer, minimum: 1 }
@@ -186,6 +285,7 @@ paths:
                 oneOf:
                   - $ref: "#/components/schemas/DoclingDocument"
                   - $ref: "#/components/schemas/Chunks"
+                  - $ref: "#/components/schemas/PandocAst"
             application/vnd.openxmlformats-officedocument.doclang:
               schema: { type: string, format: binary }
             text/x-tex:
@@ -299,6 +399,145 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+  /v1/convert/file:
+    post:
+      summary: Convert uploads — upstream docling-serve's API (#615)
+      description: |
+        Python docling-serve's route, for the clients written against it
+        (Open WebUI, n8n, Dify, LangChain's docling-serve client). Uploads go
+        in repeatable `files` parts; options are upstream's names
+        (`UpstreamOptions`) as form fields, a list option one field per item.
+        Options with no equivalent here are accepted and ignored. One document
+        answers a `ConvertDocumentResponse`; several (or `target_type=zip`) a
+        zip of `<stem>.<ext>` outputs. A document that fails to convert is a
+        200 with `status: failure`. Also served at `/v1alpha/convert/file`.
+      operationId: compatConvertFile
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              allOf:
+                - type: object
+                  properties:
+                    files:
+                      type: array
+                      items: { type: string, format: binary }
+                  required: [files]
+                - $ref: "#/components/schemas/UpstreamOptions"
+      responses:
+        "200":
+          description: The conversion (a failed document included).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConvertDocumentResponse" }
+            application/zip:
+              schema: { type: string, format: binary }
+        "400":
+          description: Malformed request (no `files` part, unreadable option value).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: An API key is configured and `X-Api-Key` is missing or wrong.
+
+  /v1/convert/source:
+    post:
+      summary: Convert URL / base64 sources — upstream docling-serve's API (#615)
+      description: |
+        `sources` are `kind`-tagged: `{"kind": "file", "base64_string",
+        "filename"}` always, `{"kind": "http", "url", "headers"}` with
+        `--allow-url-fetch`; docling-serve 0.x's `file_sources` /
+        `http_sources` lists are read too. `options` holds `UpstreamOptions`;
+        `target` is `{"kind": "inbody"}` (default) or `{"kind": "zip"}`. Also
+        served at `/v1alpha/convert/source`.
+      operationId: compatConvertSource
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                sources: { type: array, items: { type: object } }
+                file_sources: { type: array, items: { type: object } }
+                http_sources: { type: array, items: { type: object } }
+                options: { $ref: "#/components/schemas/UpstreamOptions" }
+                target:
+                  type: object
+                  properties:
+                    kind: { type: string, enum: [inbody, zip] }
+      responses:
+        "200":
+          description: The conversion (a failed document included).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConvertDocumentResponse" }
+            application/zip:
+              schema: { type: string, format: binary }
+        "400":
+          description: Malformed body.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: A URL source without `--allow-url-fetch`, or an unsupported target kind.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /v1/convert/file/async:
+    post:
+      summary: Queue an upload conversion — upstream docling-serve's API (#615)
+      description: |
+        The `/v1/convert/file` request, answered at once with a
+        `TaskStatusResponse`; poll `GET /v1/status/poll/{id}`, then fetch the
+        `ConvertDocumentResponse` from `GET /v1/result/{id}`.
+      operationId: compatConvertFileAsync
+      responses:
+        "200":
+          description: The queued task.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TaskStatusResponse" }
+        "429":
+          description: The job queue is full.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /v1/convert/source/async:
+    post:
+      summary: Queue a source conversion — upstream docling-serve's API (#615)
+      operationId: compatConvertSourceAsync
+      responses:
+        "200":
+          description: The queued task.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TaskStatusResponse" }
+        "429":
+          description: The job queue is full.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /v1/status/poll/{id}:
+    get:
+      summary: Task status in upstream's shape (#615)
+      description: Any task's status (compat or `/v1/convert/async`). Also at `/v1alpha/status/poll/{id}`.
+      operationId: compatStatusPoll
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: The task's state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TaskStatusResponse" }
+        "404":
+          description: "Unknown or expired task — `{\"detail\": \"Task not found.\"}`."
+
   /v1/config:
     get:
       summary: Server capabilities
@@ -313,7 +552,10 @@ paths:
                 properties:
                   allow_url_fetch:
                     type: boolean
-                    description: Whether URL inputs and `fetch_images` are enabled.
+                    description: Whether URL inputs and `fetch_images` / `image_sources=remote` are enabled.
+                  allow_local_images:
+                    type: boolean
+                    description: Whether `image_sources=local` is accepted (#646, `--allow-local-images`).
                   models:
                     type: array
                     description: >
@@ -349,7 +591,11 @@ paths:
     get:
       summary: Readiness probe
       operationId: ready
-      description: 503 until `--warmup` finishes loading the ML models; 200 immediately when the server runs without it.
+      description: >-
+        With `--warmup`: 503 while the PDF/image models load, 200 once they are
+        loaded (`models: warm`), and 503 `warmup_failed` with the error when
+        they cannot load. Without it: 200 immediately (`models: lazy` — the
+        first PDF/image request loads them).
       responses:
         "200":
           description: Ready to serve conversions.
@@ -359,14 +605,16 @@ paths:
                 type: object
                 properties:
                   status: { type: string, const: ready }
+                  models: { type: string, enum: [warm, lazy] }
         "503":
-          description: Still loading models.
+          description: Models still loading, or failed to load.
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  status: { type: string, const: loading }
+                  status: { type: string, enum: [warming_up, warmup_failed] }
+                  error: { type: string, description: "Why the warmup failed (`warmup_failed` only)." }
 
   /metrics:
     get:
@@ -399,14 +647,26 @@ components:
   schemas:
     To:
       type: string
-      enum: [md, json, dclx, chunks, latex, images]
+      enum: [md, json, html, text, dclx, chunks, latex, pandoc, vtt, images]
       default: md
       description: |
         `md` — Markdown, streamed as it converts.
         `json` — docling `DoclingDocument` JSON.
+        `html` — a complete HTML page (docling-core's HTML serializer, #492).
+        `text` — plain text (docling's `--to text`, `export_to_text`, #613):
+        the Markdown without `#`, emphasis, link URLs, code fences or image
+        placeholders; lists and tables stay. `text/plain`; in a batch, inline
+        under `text`.
+        `pandoc` — Pandoc's AST as JSON (#515), `application/json`, for
+        `pandoc -f json -t docx|odt|rst|typst|…`; pictures per `images`; in a
+        batch, inline under `pandoc` as an object.
         `dclx` — DocLang OPC archive, returned as a download.
         `latex` — a complete LaTeX document (docling 2.124's `--to latex`,
         #317), `text/x-tex`; in a batch, inline under `latex`.
+        `vtt` — WebVTT subtitles (docling's `--to vtt`, #614): a cue per
+        timed text item — an audio/video transcript's segments, a WebVTT
+        input's cues — or the bare `WEBVTT` header when there is none;
+        `text/vtt`; in a batch, inline under `vtt`.
         `chunks` — chunker records (hierarchical, plus hybrid when a tokenizer is installed).
         `images` — PDF only: per-page PNG renders as
         `{"pages": [{"page", "width", "height", "png_base64"}]}` (no
@@ -444,6 +704,50 @@ components:
         OCR render scale in pixels per PDF point (docling's
         `OcrOptions.scale`). Unset reads the pipeline's own 2.0 px/pt render;
         docling's default is 3 (216 dpi).
+    PictureDescriptionMode:
+      type: string
+      enum: [caption, ocr]
+      default: caption
+      description: >-
+        With `do_picture_description` (#670): `caption` sends MarkItDown's
+        "Write a detailed caption for this image.", `ocr` markitdown-ocr's
+        "Extract all text from this image …" — LLM-vision OCR where the local
+        models read poorly.
+    IpynbOutputs:
+      type: string
+      enum: [none, text]
+      default: none
+      description: >-
+        Jupyter notebooks (#673): which cell outputs the document keeps.
+        `none` reads the notebook as written — markdown cells as Markdown,
+        code cells as code items in the kernel's language, raw cells as
+        code blocks; `text` keeps stream and `text/plain` results as code
+        blocks after their cell and image outputs as pictures.
+    PictureOcrScale:
+      type: number
+      exclusiveMinimum: 0
+      description: >-
+        With `do_picture_ocr` (#666): the picture OCR's resolution in pixels
+        per picture pixel, shrunk to RapidOCR's 2000 px longer side — `1.0`
+        reads pictures at their native pixels, as RapidOCR does. Unset keeps
+        the image-input rule (`ocr_scale`, else 3x under the cap; the
+        server's `DOCLING_RS_PICTURE_OCR_SCALE`). Pages are unaffected.
+    OcrEngine:
+      type: string
+      enum: [ppocr, tesseract]
+      description: >-
+        Which OCR engine reads scanned pages (#460): the built-in PP-OCR
+        recognizer (default) or the server's `tesseract` binary; under
+        Tesseract `ocr_lang` is its language list (tessdata stems such as
+        `deu+fra`, or BCP-47 tags).
+    ImagesScale:
+      type: number
+      minimum: 0.1
+      maximum: 4.0
+      description: >-
+        Picture crops (and page images) in pixels per PDF point — docling's
+        `images_scale` (#520). Unset keeps the pipeline's 2.0 px/pt render;
+        the JSON picture `dpi` is 72·scale.
     Scale:
       type: number
       minimum: 0.1
@@ -462,18 +766,37 @@ components:
           default: false
           description: Cleaner strict Markdown dialect instead of byte-for-byte docling-legacy output.
         images: { $ref: "#/components/schemas/Images" }
-        skip_ocr:
+        no_ocr:
           type: boolean
           default: false
           description: >
             PDF/image — keep layout detection and TableFormer but never run OCR
-            (docling's independent `do_ocr=False`, #244): structure survives,
-            text that exists only as pixels comes back empty. `no_ocr` (the
-            whole-stack skip) wins when both are set.
-        no_ocr:
+            (docling's `do_ocr=False`, its `--no-ocr`; #244, and since 2.0 the
+            meaning of `no_ocr`, #611): structure survives, text that exists
+            only as pixels comes back empty.
+        skip_ocr:
           type: boolean
           default: false
-          description: PDF/image — skip layout/OCR/TableFormer; emit the embedded text layer only.
+          deprecated: true
+          description: "`no_ocr` under its pre-2.0 name, still read."
+        text_layer_only:
+          type: boolean
+          default: false
+          description: >
+            PDF/image — skip layout/OCR/TableFormer; emit the embedded text
+            layer only (what `no_ocr` meant before 2.0, #611). Wins over
+            `no_ocr` when both are set.
+        password:
+          type: string
+          format: password
+          description: >-
+            The password of an encrypted PDF (docling's `--pdf-password`, #611)
+            or Office document — .docx/.xlsx/.pptx/.doc/.xls/.ppt (#625). A
+            missing or wrong one is a 422 saying so.
+        pdf_password:
+          type: string
+          format: password
+          description: Alias of `password` (docling's PDF-only name).
         force_full_page_ocr:
           type: boolean
           default: false
@@ -525,6 +848,152 @@ components:
             `$$latex$$` instead of the formula placeholder comment, the JSON
             formula item carries the LaTeX in `text`. Same model and cost as
             `do_code_enrichment`.
+        do_picture_ocr:
+          type: boolean
+          default: false
+          description: >
+            Non-PDF documents — OCR the embedded pictures (DOCX/PPTX
+            screenshots, HTML figures, sampled video frames) with the
+            pipeline's OCR models and attach the text to the picture as
+            docling's description annotation (#645): Markdown prints it
+            between the caption and the image placeholder, the JSON picture
+            item carries `meta.description` + the `description` annotation,
+            chunks include it. Needs the OCR models on the server (the
+            recognizer pair; `ocr_det.onnx` for line detection; Tesseract
+            under `ocr_engine`); with `no_ocr` / `text_layer_only` or without
+            them, one warning and no text. PDF/image pages are OCR'd by the
+            pipeline itself and are left alone.
+        picture_ocr_classes:
+          type: string
+          description: >
+            With `do_picture_ocr`: only read the pictures the
+            DocumentFigureClassifier labels as one of these comma-separated
+            classes (`screenshot_from_computer,screenshot_from_manual`, …);
+            unset = every picture. An unknown label is rejected (422). Needs
+            `.models/picture_classifier.onnx`; a missing model waives the
+            filter with a warning.
+        picture_ocr_min_side:
+          type: integer
+          minimum: 0
+          default: 32
+          description: >
+            With `do_picture_ocr`: skip pictures whose smaller side is under
+            this many pixels — icons, bullets, rules. The server's
+            `DOCLING_RS_PICTURE_OCR_MIN_SIDE` sets the default.
+        picture_ocr_scale: { $ref: "#/components/schemas/PictureOcrScale" }
+        keep_picture_images:
+          type: boolean
+          default: true
+          description: >
+            `false` drops the embedded image bytes from every picture after
+            the enrichment pass (#645): a slim JSON/DCLX and placeholder-only
+            Markdown, the OCR text and captions kept.
+        do_picture_description:
+          type: boolean
+          default: false
+          description: >-
+            Describe every picture — the embedded pictures of DOCX/PPTX/XLSX/
+            HTML, a PDF's figures, video frames, an image input as a whole —
+            through an OpenAI-compatible vision endpoint (#670); the answer is
+            the picture's description annotation, where `do_picture_ocr` puts
+            its text (Markdown after the caption, JSON `meta.description`).
+            `picture_ocr_min_side` / `picture_ocr_classes` select the
+            pictures here too; identical images are sent once; an endpoint
+            error warns and the conversion goes on. Also docling-serve's
+            `picture_description_api` on the compat routes.
+        picture_description_endpoint:
+          type: string
+          description: >-
+            The vision endpoint: the server's `/v1` base or the full
+            `chat/completions` URL. Falls back to `vlm_endpoint`, then the
+            server's `DOCLING_RS_VLM_ENDPOINT`. A request-supplied endpoint
+            needs `--allow-url-fetch`, like `vlm_endpoint`.
+        picture_description_model:
+          type: string
+          description: Model name; falls back to `vlm_model`, then `DOCLING_RS_VLM_MODEL`.
+        picture_description_api_key:
+          type: string
+          description: Bearer token; falls back to `vlm_api_key`, then `DOCLING_RS_VLM_API_KEY`.
+        picture_description_prompt:
+          type: string
+          description: >-
+            The instruction sent with every picture; unset = the mode's
+            prompt.
+        picture_description_mode: { $ref: "#/components/schemas/PictureDescriptionMode" }
+        picture_description_concurrency:
+          type: integer
+          minimum: 1
+          default: 1
+          description: Pictures in flight at once.
+        redact_pii:
+          type: boolean
+          default: false
+          description: >
+            Redact personal data from the converted document before any
+            export (#621, a docling.rs extension): e-mail, phone, card
+            numbers (Luhn-checked), IBANs (mod-97), IP addresses, URL
+            credentials, national IDs (US SSN, UK NINO, Aadhaar) and — with
+            the NER model under `.models/ner/` on the server — names,
+            organizations and locations. Every string of the document model
+            is rewritten (the JSON's item tree, links, captions, hrefs, code,
+            comments, table cells included), so Markdown, JSON, DCLX, text
+            and chunks all come out clean. What was removed is reported as
+            counts per label: `X-Docling-Redaction` on a single response,
+            `redaction` on a batch / async item — never the values. Not a
+            compliance guarantee.
+        redact_mode:
+          type: string
+          enum: [label, pseudonym]
+          default: label
+          description: >
+            `label` (`[EMAIL]`, `[PERSON]`), `pseudonym` (`[EMAIL_1]`,
+            `[EMAIL_2]`: one number per distinct value, consistent within the
+            document) or `fixed:<text>` (one string for everything).
+        redact_kinds:
+          type: string
+          description: >
+            Comma-separated kinds to redact — `email, phone, credit_card,
+            iban, ip_address, url_credentials, national_id, person,
+            organization, location, address`; unset = every kind. An unknown
+            kind is rejected (422).
+        redact_pattern:
+          type: string
+          description: >
+            Extra patterns as `NAME=REGEX` entries, one per line; the match
+            (or capture group 1) is redacted as `[NAME]`. An invalid
+            expression is rejected (422).
+        redact_images:
+          type: string
+          enum: [drop, box_out, keep]
+          default: drop
+          description: >
+            Embedded images and page renders: `drop` removes them (nothing
+            unread leaves the document); `box_out` OCRs each one and paints
+            over the lines that carry a value (needs the OCR models; the
+            streaming endpoint drops instead); `keep` leaves them.
+        redact_allow_terms:
+          type: string
+          description: >-
+            With `redact_pii` (#694): comma-separated terms never redacted
+            even when a detector flags them — `support@example.com`, the
+            company's own name.
+        redact_deny_terms:
+          type: string
+          description: >-
+            With `redact_pii`: comma-separated terms always redacted, as
+            `[REDACTED]`.
+        redact_allow_patterns:
+          type: string
+          description: >-
+            With `redact_pii` (#694): regular expressions, one per line, a
+            flagged span must not match in full to be redacted — the
+            document's own part numbers, record IDs, ticket formats.
+        redact_ner_min_score:
+          type: number
+          minimum: 0
+          maximum: 1
+          default: 0.85
+          description: With `redact_pii`: the NER detector's minimum confidence.
         ebcdic_layout:
           type: string
           description: >
@@ -542,7 +1011,44 @@ components:
           default: false
           description: >
             HTML/EPUB — resolve external `<img src>` and embed the bytes.
-            Outbound fetch; honored only with `--allow-url-fetch`.
+            Outbound fetch; honored only with `--allow-url-fetch`. The alias
+            of `image_sources: remote` (#646).
+        image_sources:
+          allOf: [{ $ref: "#/components/schemas/ImageSources" }]
+          description: >
+            Which image references resolve (#646): `none` (default — every
+            picture a placeholder), `embedded` (`data:` URIs and parts of the
+            same container: EPUB/MHTML entries, email `cid:` attachments — no
+            filesystem, no network), `local` (plus files next to a
+            server-side source; needs `--allow-local-images`, 400 otherwise),
+            `remote` (plus `http(s)` fetches; without `--allow-url-fetch` the
+            request is held to `embedded`). HTML, EPUB, MHTML, JATS, AsciiDoc,
+            ODF, Markdown and email bodies.
+        image_hosts:
+          oneOf:
+            - { type: array, items: { type: string } }
+            - { type: string }
+          description: >
+            Hosts a `remote` image fetch may reach (#646): exact names or
+            `*.suffix` wildcards, as a list or a comma-separated string;
+            unset = any host. Redirects are held to the same list; the
+            private/loopback address block applies regardless.
+        max_images:
+          type: integer
+          minimum: 0
+          description: Images resolved per document; the rest stay placeholders (#646; default unlimited, `DOCLING_RS_MAX_IMAGES`).
+        max_image_bytes:
+          type: integer
+          minimum: 1
+          description: Largest image that resolves, in bytes (#646; default 32 MiB, `DOCLING_RS_MAX_IMAGE_BYTES`).
+        max_image_total_mb:
+          type: integer
+          minimum: 0
+          description: Total resolved image bytes per document, in MiB (#646; default unlimited, `DOCLING_RS_MAX_IMAGE_TOTAL_MB`).
+        min_image_bytes:
+          type: integer
+          minimum: 0
+          description: Smallest image that resolves, in bytes — skips spacer / tracking pixels (#646; default 0, `DOCLING_RS_MIN_IMAGE_BYTES`).
         skip_empty_cells:
           type: boolean
           default: false
@@ -556,16 +1062,26 @@ components:
           description: >
             Render Markdown tables in the compact `| a | b |` form instead of
             the width-padded GitHub style (docling.rs extension, all formats).
-        md_page_break_placeholder:
+        pandoc_api_version:
+          type: string
+          examples: ["1.23"]
+          description: >
+            `to=pandoc` (#515): the Pandoc API version the client's `pandoc`
+            reads. Only 1.23 (pandoc-types 1.23.1.1, Pandoc 3.x) is written;
+            any other version is a 400 rather than a document Pandoc would
+            reject.
+        page_break_placeholder:
           type: string
           examples: ["<!-- page break -->"]
           description: >
-            Text inserted between pages in Markdown output (docling-serve's
-            option of the same name; docling-core's
-            `MarkdownParams.page_break_placeholder`). A break lands only
-            between two rendered blocks on different pages — never first or
-            last, empty pages collapse. Unset: no page breaks (docling's
-            default). Markdown only.
+            Text inserted between pages in Markdown output (docling-core's
+            `MarkdownParams.page_break_placeholder`; the shared option name,
+            #577). A break lands only between two rendered blocks on
+            different pages — never first or last, empty pages collapse.
+            Unset: no page breaks (docling's default). Markdown only.
+        md_page_break_placeholder:
+          type: string
+          description: Alias of `page_break_placeholder` (this server's historical spelling).
         pages:
           type: string
           pattern: '^\d+(-\d+)?$'
@@ -574,6 +1090,41 @@ components:
         ocr_lang: { $ref: "#/components/schemas/OcrLang" }
         ocr_mode: { $ref: "#/components/schemas/OcrMode" }
         ocr_scale: { $ref: "#/components/schemas/OcrScale" }
+        ocr_textline_orientation:
+          type: boolean
+          default: false
+          description: >
+            RapidOCR's text-line orientation handling (#666): each detected
+            line cropped along its rotated rectangle, crops 1.5× taller than
+            wide turned 90°, upside-down lines turned by the 0/180 classifier
+            (`.models/ocr_textline_ori.onnx`; missing, that step is skipped
+            with a warning). Vertical, skewed and upside-down lines read;
+            PP-OCR only, scanned pages and pictures alike. The server's
+            `DOCLING_RS_OCR_TEXTLINE_ORIENTATION` sets the default.
+        ocr_engine: { $ref: "#/components/schemas/OcrEngine" }
+        images_scale: { $ref: "#/components/schemas/ImagesScale" }
+        page_images:
+          type: boolean
+          default: false
+          description: >-
+            Keep each page's render as the JSON `pages[n].image` (docling's
+            `generate_page_images`, #520).
+        document_timeout:
+          type: number
+          exclusiveMinimum: 0
+          examples: [90]
+          description: >-
+            Per-document budget in seconds for the PDF pipeline (docling's
+            `document_timeout`, #497), checked between pages: once spent, the
+            pages done so far are the (partial) document and the response
+            carries `x-docling-status: partial_success`. Unset = unlimited.
+        use_web_browser:
+          type: boolean
+          default: false
+          description: >-
+            Pre-render HTML with a headless browser before parsing; needs a
+            server built with the `web-browser` feature (a request on one
+            without it fails with a clear error).
         scale: { $ref: "#/components/schemas/Scale" }
         asr_model:
           type: string
@@ -594,10 +1145,46 @@ components:
             mark, then UTF-8, then windows-1252. Bytes the named encoding
             cannot decode fail the request instead of being guessed.
           examples: ["auto", "en", "de"]
+        ipynb_outputs: { $ref: "#/components/schemas/IpynbOutputs" }
         video_frames:
+          oneOf:
+            - { type: integer, minimum: 0 }
+            - { type: string, enum: ["all"] }
+          description: >
+            Video — max frames sampled as pictures (0 = transcript only;
+            needs ffmpeg on the server). `all` (or any count at or above
+            4294967295) keeps every distinct cut (#647).
+        video_scene_threshold:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: >
+            Video — ffmpeg's scene score a frame must exceed to count as a
+            cut (#647). Default 0.27; 0.6 keeps hard cuts only.
+        video_frame_max_side:
           type: integer
           minimum: 0
-          description: Video — max frames sampled as pictures (0 = transcript only; needs ffmpeg on the server).
+          description: >
+            Video — downscale each sampled frame inside ffmpeg so its longer
+            side is at most this many px (#647); 0 = the source resolution.
+        video_frame_dedupe:
+          type: integer
+          minimum: 0
+          maximum: 64
+          description: >
+            Video — drop a sampled frame whose 64-bit difference hash is
+            within this Hamming distance of a frame already kept (#647): the
+            same slide after a fade becomes one picture. Unset = keep every
+            frame; 4–6 is a good distance.
+        xbrl_taxonomy:
+          type: string
+          description: >
+            XBRL — server-local directory holding the instance's taxonomy (its
+            extension schema and linkbases at the paths the instance's schemaRef
+            names, plus taxonomy packages mapping the base taxonomies' URLs),
+            docling's XBRLBackendOptions.taxonomy. A relative path without
+            '..' components. Without it the fact graph carries no
+            presentation/calculation hierarchy (#466).
         chunker: { $ref: "#/components/schemas/Chunker" }
         chunk_tokenizer:
           type: string
@@ -713,6 +1300,11 @@ components:
         request-supplied `vlm_endpoint` needs `--allow-url-fetch` (SSRF
         surface) and must not resolve to a private address. With `standard`
         the `vlm_*` options are ignored.
+    ImageSources:
+      type: string
+      enum: [none, embedded, local, remote]
+      default: none
+      description: The image-source tier (#646); see `image_sources`.
     Chunker:
       type: string
       enum: [hierarchical, hybrid]
@@ -721,6 +1313,19 @@ components:
         `ChunkerType`, #256). Unset returns both: `hierarchical` always,
         `hybrid` when a tokenizer is available. An explicit `hybrid` without a
         usable tokenizer is a 400.
+    PandocAst:
+      type: object
+      description: >
+        Pandoc's AST (`to=pandoc`, #515) — the JSON `pandoc -f json` reads
+        (`Text.Pandoc.Definition`, pandoc-types 1.23.1.1).
+      required: [pandoc-api-version, meta, blocks]
+      properties:
+        pandoc-api-version:
+          type: array
+          items: { type: integer }
+          examples: [[1, 23, 1, 1]]
+        meta: { type: object }
+        blocks: { type: array, items: { type: object } }
     Chunks:
       type: object
       description: Chunker output for `to=chunks`.
@@ -743,6 +1348,9 @@ components:
         error:
           type: string
           description: Present when `task_status` is `failure`.
+        code:
+          type: string
+          description: With `error`, when the failure has a machine-readable case — see `Error.code`.
       required: [task_id, task_status]
     ConfidenceReport:
       type: object
@@ -766,7 +1374,80 @@ components:
       type: object
       properties:
         error: { type: string }
+        code:
+          type: string
+          enum: [password_required, wrong_password, not_decryptable, malformed_encryption]
+          description: >
+            Set when the document is encrypted (#636): `password_required` (none
+            was given), `wrong_password` (the request's `password` does not open
+            it) — the two a client prompts for a password on — `not_decryptable`
+            (a scheme the server does not read: ODF, iWork, WordPerfect, XOR
+            obfuscation) or `malformed_encryption` (a damaged encryption header).
+            Absent for every other error.
       required: [error]
+
+    ConvertDocumentResponse:
+      type: object
+      description: Upstream docling-serve's answer for one document (#615).
+      properties:
+        document:
+          type: object
+          properties:
+            filename: { type: string }
+            md_content: { type: [string, "null"] }
+            json_content: { type: [object, "null"], description: docling `DoclingDocument` JSON }
+            html_content: { type: [string, "null"] }
+            text_content: { type: [string, "null"] }
+            doctags_content: { type: "null", description: always null — no DocTags writer }
+            doclang_content: { type: [string, "null"] }
+        status: { type: string, enum: [success, partial_success, failure] }
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              component_type: { type: string }
+              module_name: { type: string }
+              error_message: { type: string }
+        processing_time: { type: number }
+        timings: { type: object }
+        confidence: { type: object, description: PDF/image conversions only }
+    TaskStatusResponse:
+      type: object
+      properties:
+        task_id: { type: string }
+        task_type: { type: string, enum: [convert] }
+        task_status: { type: string, enum: [pending, started, success, failure] }
+        task_position: { type: ["null", integer] }
+        task_meta: { type: ["null", object] }
+        error_message: { type: string }
+    UpstreamOptions:
+      type: object
+      description: |
+        Python docling-serve's option names (#615). Read: `to_formats`
+        (md, json, html, text, doclang; doctags is always null),
+        `image_export_mode` (embedded default | placeholder; referenced is
+        answered as placeholder), `md_page_break_placeholder`, `do_ocr`,
+        `force_ocr`, `do_table_structure`, `page_range`,
+        `do_pdf_heading_hierarchy`, `md_compact_tables`,
+        `do_code_enrichment`, `do_formula_enrichment`,
+        `do_picture_classification`, `document_timeout`, `images_scale`,
+        `pipeline` (vlm; others select by input format), `ocr_engine`
+        (tesseract / tesserocr / tesseract_cli → Tesseract, the rest → the
+        built-in PP-OCR), `ocr_lang`, `target_type` (zip). This server's own
+        option names (`strict`, `password`, …) are read too; everything
+        else is ignored.
+      properties:
+        to_formats: { type: array, items: { type: string } }
+        image_export_mode: { type: string, enum: [embedded, placeholder, referenced] }
+        md_page_break_placeholder: { type: string }
+        do_ocr: { type: boolean }
+        force_ocr: { type: boolean }
+        do_table_structure: { type: boolean }
+        page_range: { type: array, items: { type: integer }, minItems: 2, maxItems: 2 }
+        ocr_engine: { type: string }
+        ocr_lang: { type: array, items: { type: string } }
+        target_type: { type: string, enum: [inbody, zip] }
 
   parameters:
     to:
@@ -778,7 +1459,13 @@ components:
     no_ocr:
       { name: no_ocr, in: query, schema: { type: boolean } }
     skip_ocr:
-      { name: skip_ocr, in: query, schema: { type: boolean } }
+      { name: skip_ocr, in: query, deprecated: true, schema: { type: boolean } }
+    text_layer_only:
+      { name: text_layer_only, in: query, schema: { type: boolean } }
+    password:
+      { name: password, in: query, schema: { type: string, format: password } }
+    pdf_password:
+      { name: pdf_password, in: query, schema: { type: string, format: password }, description: "Alias of password." }
     force_full_page_ocr:
       { name: force_full_page_ocr, in: query, schema: { type: boolean } }
     no_table_former:
@@ -793,14 +1480,72 @@ components:
       { name: do_code_enrichment, in: query, schema: { type: boolean } }
     do_formula_enrichment:
       { name: do_formula_enrichment, in: query, schema: { type: boolean } }
+    do_picture_ocr:
+      { name: do_picture_ocr, in: query, schema: { type: boolean } }
+    picture_ocr_classes:
+      { name: picture_ocr_classes, in: query, schema: { type: string } }
+    picture_ocr_min_side:
+      { name: picture_ocr_min_side, in: query, schema: { type: integer } }
+    picture_ocr_scale:
+      { name: picture_ocr_scale, in: query, schema: { $ref: "#/components/schemas/PictureOcrScale" } }
+    keep_picture_images:
+      { name: keep_picture_images, in: query, schema: { type: boolean } }
+    do_picture_description:
+      { name: do_picture_description, in: query, schema: { type: boolean } }
+    picture_description_endpoint:
+      { name: picture_description_endpoint, in: query, schema: { type: string } }
+    picture_description_model:
+      { name: picture_description_model, in: query, schema: { type: string } }
+    picture_description_api_key:
+      { name: picture_description_api_key, in: query, schema: { type: string } }
+    picture_description_prompt:
+      { name: picture_description_prompt, in: query, schema: { type: string } }
+    picture_description_mode:
+      { name: picture_description_mode, in: query, schema: { $ref: "#/components/schemas/PictureDescriptionMode" } }
+    picture_description_concurrency:
+      { name: picture_description_concurrency, in: query, schema: { type: integer, minimum: 1 } }
+    redact_pii:
+      { name: redact_pii, in: query, schema: { type: boolean } }
+    redact_mode:
+      { name: redact_mode, in: query, schema: { type: string } }
+    redact_kinds:
+      { name: redact_kinds, in: query, schema: { type: string } }
+    redact_pattern:
+      { name: redact_pattern, in: query, schema: { type: string } }
+    redact_images:
+      { name: redact_images, in: query, schema: { type: string } }
+    redact_allow_terms:
+      { name: redact_allow_terms, in: query, schema: { type: string } }
+    redact_deny_terms:
+      { name: redact_deny_terms, in: query, schema: { type: string } }
+    redact_allow_patterns:
+      { name: redact_allow_patterns, in: query, schema: { type: string } }
+    redact_ner_min_score:
+      { name: redact_ner_min_score, in: query, schema: { type: number, minimum: 0, maximum: 1 } }
     fetch_images:
       { name: fetch_images, in: query, schema: { type: boolean } }
+    image_sources:
+      { name: image_sources, in: query, schema: { $ref: "#/components/schemas/ImageSources" } }
+    image_hosts:
+      { name: image_hosts, in: query, schema: { type: string }, description: "Comma-separated host allow-list (#646)." }
+    max_images:
+      { name: max_images, in: query, schema: { type: integer, minimum: 0 } }
+    max_image_bytes:
+      { name: max_image_bytes, in: query, schema: { type: integer, minimum: 1 } }
+    max_image_total_mb:
+      { name: max_image_total_mb, in: query, schema: { type: integer, minimum: 0 } }
+    min_image_bytes:
+      { name: min_image_bytes, in: query, schema: { type: integer, minimum: 0 } }
     skip_empty_cells:
       { name: skip_empty_cells, in: query, schema: { type: boolean } }
     compact_tables:
       { name: compact_tables, in: query, schema: { type: boolean } }
+    page_break_placeholder:
+      { name: page_break_placeholder, in: query, schema: { type: string } }
     md_page_break_placeholder:
-      { name: md_page_break_placeholder, in: query, schema: { type: string } }
+      { name: md_page_break_placeholder, in: query, schema: { type: string }, description: "Alias of page_break_placeholder." }
+    pandoc_api_version:
+      { name: pandoc_api_version, in: query, schema: { type: string } }
     list_attachments:
       { name: list_attachments, in: query, schema: { type: boolean } }
     ebcdic_layout:
@@ -815,14 +1560,36 @@ components:
       { name: ocr_mode, in: query, schema: { $ref: "#/components/schemas/OcrMode" } }
     ocr_scale:
       { name: ocr_scale, in: query, schema: { $ref: "#/components/schemas/OcrScale" } }
+    ocr_textline_orientation:
+      { name: ocr_textline_orientation, in: query, schema: { type: boolean } }
+    ocr_engine:
+      { name: ocr_engine, in: query, schema: { $ref: "#/components/schemas/OcrEngine" } }
+    images_scale:
+      { name: images_scale, in: query, schema: { $ref: "#/components/schemas/ImagesScale" } }
+    page_images:
+      { name: page_images, in: query, schema: { type: boolean } }
+    document_timeout:
+      { name: document_timeout, in: query, schema: { type: number, exclusiveMinimum: 0 } }
+    use_web_browser:
+      { name: use_web_browser, in: query, schema: { type: boolean } }
     asr_model:
       { name: asr_model, in: query, schema: { type: string } }
     asr_lang:
       { name: asr_lang, in: query, schema: { type: string } }
     encoding:
       { name: encoding, in: query, schema: { type: string } }
+    ipynb_outputs:
+      { name: ipynb_outputs, in: query, schema: { $ref: "#/components/schemas/IpynbOutputs" } }
     video_frames:
-      { name: video_frames, in: query, schema: { type: integer, minimum: 0 } }
+      { name: video_frames, in: query, schema: { oneOf: [{ type: integer, minimum: 0 }, { type: string, enum: ["all"] }] } }
+    video_scene_threshold:
+      { name: video_scene_threshold, in: query, schema: { type: number, minimum: 0, maximum: 1 } }
+    video_frame_max_side:
+      { name: video_frame_max_side, in: query, schema: { type: integer, minimum: 0 } }
+    video_frame_dedupe:
+      { name: video_frame_dedupe, in: query, schema: { type: integer, minimum: 0, maximum: 64 } }
+    xbrl_taxonomy:
+      { name: xbrl_taxonomy, in: query, schema: { type: string } }
     chunker:
       { name: chunker, in: query, schema: { $ref: "#/components/schemas/Chunker" } }
     chunk_tokenizer:

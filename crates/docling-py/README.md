@@ -14,6 +14,21 @@ print(result.document.export_to_markdown())
 data = result.document.export_to_dict()     # docling-core JSON wire format (schema 1.10.0)
 ```
 
+**Coming from [MarkItDown](https://github.com/microsoft/markitdown)?** The same
+package speaks its API — change the import, keep the code:
+
+```python
+# was:  from markitdown import MarkItDown
+from docling_rs.markitdown import MarkItDown
+
+print(MarkItDown().convert("report.pdf").markdown)
+```
+
+Layout analysis, TableFormer tables and local OCR replace pdfminer and LLM
+calls: PDF table-cell recall 0.31 → 0.94, Office/HTML 5–10× faster
+([measured](https://github.com/docling-project/docling.rs/blob/master/docs/MARKITDOWN.md);
+[migration notes](#migrating-from-markitdown)).
+
 **Only the document processor is Rust.** The engine parses the input and returns
 docling-core's JSON wire format; this package validates it into a genuine
 [`docling_core.types.doc.DoclingDocument`](https://github.com/docling-project/docling-core).
@@ -24,9 +39,9 @@ Python code, unchanged. `docling-core` is a runtime dependency; nothing else fro
 docling is required for the declarative path.
 
 > **Status: experimental.** The PyPI distribution name is `docling-rs`.
-> Releases are published automatically (like the npm package) by the
-> [`pypi-publish`](../../.github/workflows/pypi-publish.yml) workflow whenever
-> CI cuts a GitHub Release — see [Publishing](#publishing) below. The crate is intentionally outside the repo's
+> Releases reach PyPI when the maintainer runs the
+> [`pypi-publish`](../../.github/workflows/pypi-publish.yml) workflow for them —
+> not every GitHub Release is published there; see [Publishing](#publishing) below. The crate is intentionally outside the repo's
 > Cargo workspace and its crates.io publish flow. For development, build and
 > install locally as shown next.
 
@@ -44,8 +59,8 @@ transition; drop `docling` once nothing imports it. For the GPU build install
 never both):
 
 ```bash
-pip install docling-rs            # CPU wheels: Linux x86-64/arm64, Windows; sdist elsewhere
-# or, with an NVIDIA GPU (Linux x86_64, CUDA 12 + cuDNN 9, glibc ≥ 2.38):
+pip install docling-rs            # CPU wheels: Linux x86-64/arm64/s390x, Windows; sdist elsewhere
+# or, with an NVIDIA GPU (Linux x86_64, CUDA 13 + cuDNN 9, glibc ≥ 2.38):
 pip install docling-rs-cuda       # converts on the GPU automatically, CPU fallback
 pip uninstall docling             # optional — only when you no longer import it
 ```
@@ -94,7 +109,7 @@ the engine bundles ONNX Runtime.
 **4. Check the divergences** if your code goes beyond the common path:
 the full-VLM pipeline (SmolDocling) and per-format backend selection are not
 ported; some `PdfPipelineOptions` fields are accepted for compatibility but
-inert (`images_scale`, `generate_page_images`, …); inline formatting is
+inert (`table_structure_options.mode`, …); inline formatting is
 rendered into the text rather than structured `formatting` fields. The
 [API surface](#api-surface-docling-shaped) table below lists what acts, and
 [`docs/MIGRATION.md`](../../docs/MIGRATION.md) §4 the documented output
@@ -106,6 +121,55 @@ divergences. `HybridChunker(tokenizer=…)` takes a `tokenizer.json` **path**
 `AcceleratorOptions(device="cpu")` forces CPU; `DOCLING_RS_EP=cuda` /
 `device="cuda"` pins the GPU and fails loudly instead of falling back. See
 [GPU wheel](#gpu-wheel-docling-rs-cuda) for the runtime requirements.
+
+## Migrating from MarkItDown
+
+[Microsoft MarkItDown](https://github.com/microsoft/markitdown) code moves over
+by changing the import (#674):
+
+```python
+# was:  from markitdown import MarkItDown, StreamInfo
+from docling_rs.markitdown import MarkItDown, StreamInfo
+
+md = MarkItDown()
+result = md.convert("report.docx")      # path, Path, http(s)/file/data URI,
+print(result.markdown)                  # binary stream or requests.Response
+print(result.title)
+
+with open("scan.bin", "rb") as fh:      # no extension? hint it — or let the
+    md.convert_stream(fh, stream_info=StreamInfo(extension=".pdf"))  # magic bytes decide
+```
+
+`convert` / `convert_local` / `convert_stream` / `convert_uri` /
+`convert_url` / `convert_response`, `StreamInfo`, `DocumentConverterResult`
+(`.markdown`, `.text_content`, `.title`, `str(result)`) and the exceptions
+(`UnsupportedFormatException`, `FileConversionException`, …) behave as
+MarkItDown's do. `python -m docling_rs.markitdown FILE [-o OUT] [-x EXT]
+[-m MIME] [-c CHARSET] [--keep-data-uris]` stands in for the `markitdown`
+CLI (stdin when no file is given).
+
+What you get instead of MarkItDown's converters is docling.rs's: layout
+analysis, TableFormer tables and OCR for PDFs and scans, the declarative
+Office/HTML/EPUB/email backends — measured side by side in the main README's
+[MarkItDown comparison](../../README.md#conformance-with-microsoft-markitdown)
+(5–10× faster on Office/HTML, higher word/table/heading recall). What differs:
+
+| MarkItDown | docling.rs facade |
+|---|---|
+| its own Markdown dialect | docling's Markdown (`<!-- image -->` placeholders, `- ` bullets, compact tables); byte-identical output is a non-goal |
+| `keep_data_uris=True` | same: pictures as `data:` URIs |
+| `llm_client` / `llm_model` / `llm_prompt` | same request (one `chat.completions.create` per picture); every embedded picture is described, the text lands in the Markdown and in `picture.meta.description`; an image input gets MarkItDown's `# Description:` section |
+| XLSX `## <sheet>` headings | same (XLS not yet: its document carries no sheet groups) |
+| PDFs via pdfminer (text layer) | the full pipeline once `docling_rs.download_models()` ran; until then the text layer, with a one-time warning |
+| `magika` / `charset_normalizer` guesses | magic bytes + container structure; `charset_normalizer` when installed (it comes with `requests`), else BOM/UTF-8/windows-1252 (#675) |
+| `exiftool_path`, `style_map`, `docintel_*`, `cu_*` | accepted, ignored with a warning (EXIF/metadata: #679) |
+| plugins, `register_converter` | not supported (#680); `enable_plugins` warns |
+| picture alt text (`![alt](…)`) | not yet (#676) |
+
+`MarkItDown(docling_options={...})` passes options through to
+`DocumentConverter` — `{"text_layer_only": True}` for pdfminer-speed PDFs,
+`{"ocr_lang": "ch"}`, `{"do_picture_ocr": True}` — and `result.document` is
+the converted `DoclingDocument` for anything Markdown cannot carry.
 
 ## Try it locally
 
@@ -139,24 +203,26 @@ PY
 
 | docling.rs | docling counterpart | notes |
 |---|---|---|
-| `DocumentConverter(format_options=None, *, allowed_formats=None, do_ocr=True, do_table_structure=True, force_full_page_ocr=False, no_text_panels=False, heading_hierarchy=False, do_picture_classification=False, do_code_enrichment=False, do_formula_enrichment=False, fetch_images=False, use_web_browser=False, artifacts_path=None, ocr_lang=None, asr_lang=None, pipeline=None, vlm_endpoint=None, vlm_model=None, vlm_api_key=None, vlm_prompt=None, vlm_max_tokens=None)` | `DocumentConverter(allowed_formats=…, format_options=…)` | Pass `{InputFormat.PDF: PdfFormatOption(pipeline_options=PdfPipelineOptions(…))}` or the shorthand kwargs; `allowed_formats` restricts conversion; `artifacts_path` overrides the model cache dir. |
-| `.convert(path \| DocumentStream) -> ConversionResult` | `.convert(source)` | str / `pathlib.Path` / `DocumentStream`. Releases the GIL during conversion. |
+| `DocumentConverter(format_options=None, *, allowed_formats=None, do_ocr=True, do_table_structure=True, force_full_page_ocr=False, no_text_panels=False, heading_hierarchy=False, do_picture_classification=False, do_code_enrichment=False, do_formula_enrichment=False, do_picture_ocr=False, picture_ocr_classes=None, picture_ocr_min_side=None, picture_ocr_scale=None, keep_picture_images=True, redact_pii=False, redact_mode=None, redact_kinds=None, redact_pattern=None, redact_images=None, fetch_images=False, use_web_browser=False, artifacts_path=None, ocr_lang=None, ocr_textline_orientation=None, asr_model=None, asr_lang=None, pipeline=None, vlm_endpoint=None, vlm_model=None, vlm_api_key=None, vlm_prompt=None, vlm_max_tokens=None)` | `DocumentConverter(allowed_formats=…, format_options=…)` | Pass `{InputFormat.PDF: PdfFormatOption(pipeline_options=PdfPipelineOptions(…))}` or the shorthand kwargs; `allowed_formats` restricts conversion; `artifacts_path` overrides the model cache dir. |
+| `.convert(path \| url \| DocumentStream) -> ConversionResult` | `.convert(source)` | str / `pathlib.Path` / `http(s)://` URL (downloaded first; the format comes from the file name, else the response's `Content-Type`) / `DocumentStream`. Releases the GIL during conversion. |
 | `.convert_all(sources, raises_on_error=True) -> Iterator[ConversionResult]` | same | lazily converts many sources; `raises_on_error=False` yields a `failure` result instead of raising |
 | `.initialize_pipeline(format=None)` | same | pre-loads the PDF/image ML models so the first conversion isn't slow and later PDFs reuse the warm pipeline (no-op for non-ML formats; needs the models available) |
 | `.convert_bytes(name, data)` | `DocumentStream` | extension of `name` drives format detection |
+| `.convert_archive(source) -> Iterator[ArchiveItem]` | — (docling takes no archives) | every document inside a ZIP — a path, `bytes` or a `DocumentStream` — one `ArchiveItem` per entry: `outcome` `converted` (`result`) / `skipped` (`error` = the reason: unsupported type, nested archive, unsafe path, over a `DOCLING_RS_ZIP_MAX_*` limit) / `failed` (`error`); a broken document fails only itself (#557) |
 | `InputFormat`, `PdfPipelineOptions`, `PdfFormatOption`, `AcceleratorOptions`, `TableFormerMode`, `DocumentStream`, `ImageRefMode` | same modules | docling-shaped config re-exported from `docling_rs` (see below) |
 | `ConversionError` | `docling.exceptions.ConversionError` | raised on a failed conversion; caught by `convert_all(..., raises_on_error=False)` |
+| `EncryptionError`, `PasswordRequiredError`, `WrongPasswordError` | — (docling.rs extension, #636) | subclasses of `ConversionError` an encrypted document raises: no password given / the given one is wrong (prompt for one) / a scheme docling.rs cannot decrypt (`EncryptionError` itself); `from docling_rs.exceptions import …` |
 | `result.status` / `result.document` / `result.input.file` | same | `.status` is a `ConversionStatus` str-enum (`"success" / "partial_success" / "failure"`); `.document` is a genuine `docling_core` `DoclingDocument` |
 | `document.export_to_markdown(...)` | same | docling-core's own method — all of docling's params (`image_placeholder`, `page_break_placeholder`, …) apply |
 | `document.export_to_dict()` / `export_to_json()` / `export_to_doctags()` | same | docling-core's own serializers over the wire format |
 | `document.save_as_markdown(p)` / `save_as_json(p)` / chunkers | same | anything `docling_core` offers on a `DoclingDocument` works, since it *is* one |
-| `docling_rs.download_models()` | `docling-tools models download` | idempotent; `~/.cache/docling.rs` or `$DOCLING_RS_CACHE_DIR`; INT8 models fetched when hosted and preferred automatically (`DOCLING_RS_FP32=1` opts out); `force=True` re-downloads a stale cache after a model re-publish |
+| `docling_rs.email_attachments(source, *, max_entries=None, max_entry_size=None, max_total_size=None) -> list[EmailAttachment]` | — (docling lists attachment names only) | the attachments of an `.eml` / `.msg` (#561) — a path, the message bytes or a `DocumentStream` — as `EmailAttachment(index, name, content_type, format, size, inline, skipped, data)`: `data` the payload when kept (`None` over a limit or without a payload — a reference, an OLE object), `format` the `InputFormat` it converts as (`None` with `skipped` saying why: unsupported type, nested archive, …; the bytes stay available), `name` a safe base name, a forwarded message an `.eml` entry carrying the nested message. `converter.convert(att.as_stream())` converts one. Limits are byte counts (defaults 10 000 attachments, 256 MiB each, 1 GiB in all). |
+| `docling_rs.download_models()` | `docling-tools models download` | idempotent; `~/.cache/docling.rs` or `$DOCLING_RS_CACHE_DIR`; INT8 models fetched when hosted and preferred automatically (`DOCLING_RS_FP32=1` opts out); `force=True` re-downloads a stale cache after a model re-publish; `asr_model="parakeet_tdt_0.6b_v3"` (or a list, or `"whisper_tiny"` / the Whisper presets — `docling_rs.models.ASR_MODELS`) adds speech-recognition models for audio/video, none by default; `pdf_models=False` skips the PDF/image models |
 
 Model/env resolution order: explicit `DOCLING_*` env vars → the process CWD
-(`models/`, `.pdfium/`, matching the CLI — so a repo checkout uses its own
-exports) → the cache dir set by `ensure_env()` (called by the constructor).
-pdfium is Linux x64 from the release; on other platforms set
-`PDFIUM_DYNAMIC_LIB_PATH` to a local build.
+(`models/`, matching the CLI — so a repo checkout uses its own exports) →
+the cache dir set by `ensure_env()` (called by the constructor). PDF pages
+are parsed and rendered in pure Rust — no native PDF library is fetched.
 
 ## Configuration (docling-shaped)
 
@@ -175,6 +241,12 @@ conv = DocumentConverter(format_options={InputFormat.PDF: PdfFormatOption(pipeli
 # shorthand: DocumentConverter(do_ocr=False, do_table_structure=True)
 ```
 
+`document_timeout=90.0` (docling's `PipelineOptions.document_timeout`, #497;
+also accepted as `pipeline_options.document_timeout`) is a per-document
+budget in seconds for the PDF pipeline, checked between pages: once spent, the
+pages done so far are the document, `result.status` is `PARTIAL_SUCCESS` and
+`result.errors` holds the reason as docling's `ErrorItem`.
+
 For scanned pages, `ocr_lang="en"|"ch"` picks the OCR recognition model (`en`
 is the default — proper Latin word spacing; `ch` is the multilingual
 docling-conformance model). BCP-47 tags for either language resolve to the
@@ -188,19 +260,55 @@ The Rust engine acts on `do_ocr`, `do_table_structure`, the opt-in enrichment
 flags `do_picture_classification` / `do_code_enrichment` /
 `do_formula_enrichment` (the picture classifier is fetched by the default
 `scripts/install/download_dependencies.sh` run; the code/formula models need
-its `--enrich` flag), and
+its `--enrich` flag), `do_picture_ocr` (#645: OCR the pictures embedded in
+DOCX/PPTX/HTML/… and video frames with the engine's OCR models — the text
+lands in `picture.meta.description` + the `description` annotation, exactly
+where `do_picture_description` puts a VLM's; `picture_ocr_classes` (a list
+or comma-separated string of DocumentFigureClassifier labels) and
+`picture_ocr_min_side` filter the pictures, `picture_ocr_scale` sets their
+OCR resolution in px per picture pixel under RapidOCR's 2000 px cap (#666;
+`1.0` = native pixels), `ocr_textline_orientation=True` adds RapidOCR's
+text-line orientation handling (oriented crops, tall lines turned 90°, the
+0/180 classifier — pages too; docling's `RapidOcrOptions.use_cls` maps onto
+it), `keep_picture_images=False` drops the image bytes afterwards; video frame sampling is tunable too, #647:
+`video_frames="all"` / `docling_rs.VIDEO_FRAMES_ALL` keeps every distinct
+cut, `video_scene_threshold` (0.27) sets the cut score, `video_frame_max_side`
+downscales frames inside ffmpeg and `video_frame_dedupe` (4–6) collapses a
+re-lit slide — frames stream one at a time through the OCR hook), and
+its `--enrich` flag), `redact_pii` (#621, a docling.rs extension: personal
+data — e-mail, phone, card numbers, IBANs, IPs, URL credentials, national
+IDs, and names / organizations / locations with the NER model under
+`.models/ner/` — is replaced in the document model before export, so
+`export_to_markdown()`, `export_to_dict()` and the chunkers all see the
+redacted text; `redact_mode` is `label` | `pseudonym` | `fixed:<text>`,
+`redact_kinds` a list or comma-separated string, `redact_pattern` a list or
+newline-joined string of `NAME=REGEX`, `redact_images` `drop` | `box_out` |
+`keep`; `result.redaction` is the counts per label), and
 `accelerator_options.num_threads` (→ ONNX Runtime intra-op threads via
-`DOCLING_RS_PDF_THREADS`). The remaining `PdfPipelineOptions` fields
-(`images_scale`, `generate_page_images`, `table_structure_options.mode`, …) are
+`DOCLING_RS_PDF_THREADS`), and the image outputs (#520):
+`generate_page_images` keeps each page's render as `document.pages[n].image`
+(so docling-core's `TableItem.get_image(doc)` works), and `images_scale` sets
+the picture-crop / page-image resolution once `generate_picture_images` or
+`generate_page_images` is on — docling renders images only then; picture
+crops are always extracted here, at the engine's 2.0 px/pt otherwise. Every
+picture's `image.dpi` is 72·scale (#519). `convert(source, page_range=(a, b))`
+narrows a PDF to that page window per call, as in docling (#518). The
+remaining `PdfPipelineOptions` fields (`table_structure_options.mode`, …) are
 accepted for API compatibility but do not change the pipeline. `InputFormat`,
 `DocumentStream` and `ImageRefMode` are re-exported too (the last straight from
 `docling_core`, for `export_to_markdown(image_mode=…)`). A GPU
-`accelerator_options.device` (`CUDA`/`MPS`) is accepted but warns and falls back
-to CPU: the prebuilt PyPI wheels ship ONNX Runtime with the CPU execution
-provider only. The engine itself supports CUDA / TensorRT / DirectML / CoreML
-behind cargo features (issue #74) — build the wheel from source with e.g.
-`maturin build --features cuda` and select the provider per process with
-`DOCLING_RS_EP=cuda` (see the workspace README).
+`accelerator_options.device` (`CUDA`/`MPS`) on a wheel without that provider
+warns and falls back to CPU: the prebuilt PyPI wheels ship ONNX Runtime with
+the CPU execution provider only (`docling-rs-cuda` adds CUDA). The engine
+itself supports CUDA / TensorRT / DirectML / CoreML behind cargo features
+(issue #74) — build the wheel from source with e.g. `maturin build --features
+cuda` (or `--features coreml` on macOS) and select the provider per process
+with `DOCLING_RS_EP=cuda` (see the workspace README). CoreML is opt-in (#602):
+a CoreML wheel converts on CPU until `DOCLING_RS_EP=coreml` is set or
+`accelerator_options.device` is `MPS`, which maps to it (an explicit
+`DOCLING_RS_EP` still wins). Under a GPU provider the engine picks the fp32 models over the int8
+ones on its own: `ensure_env()` hands the model cache over as
+`DOCLING_RS_MODELS_DIR` and pins no file (#602).
 
 ## Chunking
 
@@ -238,7 +346,12 @@ document tree).
 
 Two deltas from docling: `HybridChunker(tokenizer=...)` takes a **path to a
 HuggingFace `tokenizer.json`** (loaded natively — no `transformers` install),
-and `chunk.meta.doc_items` holds the items' JSON-pointer refs. With no
+and `chunk.meta.doc_items` holds the items' JSON-pointer refs (`"#/texts/12"`)
+rather than the item objects — refs into *your* document: the engine chunks a
+re-imported copy whose numbering drifts (empty items dropped, HTML/DOCX item
+trees, inline runs), so each chunk item is mapped back by kind, reading order
+and text; an item that cannot be placed is left out rather than mis-pointed.
+`chunk.meta.export_json_dict()` gives docling's `DocMeta` JSON shape. With no
 `tokenizer` argument it falls back to MiniLM's tokenizer at
 `models/chunk/tokenizer.json` (the download script's location) or the package
 cache — `docling_rs.download_models()` fetches it with the other assets. Since
@@ -277,6 +390,122 @@ cancels the background chunking, and Ctrl-C interrupts a pending `next()`.
 Errors (a bad tokenizer path, malformed document JSON) surface on the first
 `next()`, not at `chunk()` call time.
 
+## LangChain
+
+`docling_rs.langchain` is the port of docling's
+[langchain-docling](https://github.com/docling-project/docling-langchain)
+integration — same classes, same parameters, same output — running on the
+Rust engine (no PyTorch):
+
+```bash
+pip install "docling-rs[langchain]"
+```
+
+```python
+# was:  from langchain_docling import DoclingLoader
+from docling_rs.langchain import DoclingLoader, ExportType
+
+docs = DoclingLoader(file_path=["https://arxiv.org/pdf/2408.09869", "notes.docx"]).load()
+docs[0].page_content                      # heading path + chunk text, ready to embed
+docs[0].metadata["source"]                # the input
+docs[0].metadata["dl_meta"]               # docling's chunk meta: items + page/bbox provenance, headings, origin
+
+DoclingLoader(file_path="report.pdf", export_type=ExportType.MARKDOWN).load()  # one Document per input
+```
+
+| Parameter | Default | |
+|---|---|---|
+| `file_path` | — | path or URL, or an iterable of them |
+| `export_type` | `ExportType.DOC_CHUNKS` | one LangChain `Document` per chunk; `ExportType.MARKDOWN` = one per input |
+| `chunker` | `docling_rs.chunking.HybridChunker()` | any chunker with `chunk()` / `contextualize()` — the native ones or docling's own |
+| `converter` | `docling_rs.DocumentConverter()` | configure it as usual (`do_ocr=False`, `ocr_lang=…`, …); docling's `DocumentConverter` / `DoclingServiceClient` work too |
+| `convert_kwargs` | `{}` | extra kwargs for `converter.convert(source=…)` |
+| `md_export_kwargs` | `{"image_placeholder": ""}` | kwargs for `export_to_markdown()` (Markdown mode) |
+| `meta_extractor` | `MetaExtractor()` | subclass `BaseMetaExtractor` to shape `metadata` |
+
+It reproduces langchain-docling's own test expectations exactly (its
+fixtures run in `tests/test_langchain.py`). The default chunker is the native
+hybrid chunker with docling's defaults (all-MiniLM-L6-v2 tokenizer, 256
+tokens); its `tokenizer.json` (~0.5 MB) is fetched into the model cache on
+the first load when not already there — docling likewise pulls it from the
+Hugging Face Hub. `lazy_load()` converts and chunks one input at a time.
+
+**Picture descriptions with any LangChain chat model** — langchain-docling's
+`PictureDescriptionLangChainOptions`, set on the pipeline options as in
+docling (`do_picture_description`; `allow_external_plugins` is accepted but
+not needed):
+
+```python
+from langchain_openai import ChatOpenAI
+from docling_rs import DocumentConverter, InputFormat, PdfFormatOption, PdfPipelineOptions
+from docling_rs.langchain import PictureDescriptionLangChainOptions
+
+opts = PdfPipelineOptions(do_picture_description=True)
+opts.picture_description_options = PictureDescriptionLangChainOptions(
+    llm=ChatOpenAI(model="gpt-4o-mini"), prompt="Describe the image in three sentences.", provenance="gpt-4o-mini"
+)
+doc = DocumentConverter(format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=opts)}).convert("paper.pdf").document
+[p.meta.description.text for p in doc.pictures if p.meta and p.meta.description]
+```
+
+The engine already embeds every picture's crop, so the description pass runs
+on the converted document (`docling_rs.picture_description`, docling's
+selection rules: pictures under 5% of their page skipped,
+`classification_allow` / `classification_deny` filters, batches of 8) and
+applies to every input format the converter handles, not only PDF.
+
+Runnable examples — loader basics, an agentic RAG with page citations, picture
+descriptions — are in [`examples/langchain/`](./examples/langchain/).
+
+## AutoGen
+
+`docling_rs.autogen` puts documents in front of
+[AutoGen](https://github.com/microsoft/autogen) agents — the indexing half
+of AutoGen's RAG recipe and a document-reading tool, both on the Rust
+engine:
+
+```bash
+pip install "docling-rs[autogen]"
+```
+
+```python
+from autogen_agentchat.agents import AssistantAgent
+from autogen_core.memory import ListMemory            # or autogen-ext's ChromaDBVectorMemory, …
+from docling_rs.autogen import DoclingIndexer, DoclingConvertTool
+
+memory = ListMemory()
+await DoclingIndexer(memory).index_documents(["report.pdf", "https://arxiv.org/pdf/2408.09869"])
+agent = AssistantAgent("assistant", model_client=client, memory=[memory], tools=[DoclingConvertTool()])
+```
+
+`DoclingIndexer(memory, converter=…, chunker=…, mime_type=…, metadata=…)`
+converts each source, chunks it (the native `HybridChunker` with docling's
+defaults, or any chunker with `chunk()` / `contextualize()`) and adds one
+`MemoryContent` per chunk: the heading path plus the chunk text, and flat
+metadata a vector store accepts — `source`, `headings` (`A > B`) and `pages`
+(`3,4`) — or whatever a `metadata(source, chunk)` function returns.
+`indexer.chunks(source)` yields them without adding, for batching into a
+store yourself.
+
+`DoclingConvertTool(converter=…, max_chars=40_000)` is a `FunctionTool`
+named `convert_document(source)` that returns the document as Markdown
+(cut with a `[… N more characters]` tail past `max_chars`, so a manual does
+not flood the context); the conversion runs on a worker thread, as
+`FunctionTool` runs every synchronous function. The example in
+[`examples/autogen/`](./examples/autogen/) indexes a paper into a Chroma
+memory and answers questions with page citations.
+
+## MCP server
+
+The wheel also carries docling.rs's Model Context Protocol server (#669) —
+the one `docling-rs mcp` runs, MarkItDown's `convert_to_markdown(uri)` tool
+included — as `python -m docling_rs.mcp --root ~/Documents`. The PyPI
+launcher [`docling-rs-mcp`](./mcp/README.md) pins this package and names the
+command, so agents start it with `uvx docling-rs-mcp --root ~/Documents`;
+`--download-models` fetches the layout, OCR and table models into this
+package's cache once. Configuration, tools and the security model: the
+[CLI README](../docling-cli/README.md#mcp-server--docling-rs-mcp).
+
 ## Not covered (yet)
 
 The *local in-process* full-VLM conversion pipeline (SmolDocling) and
@@ -294,20 +523,32 @@ inline formatting rather than structured `formatting` fields — see
 
 ## Publishing
 
-Releases are **automatic**, mirroring the npm package: every GitHub Release
-CI cuts (`v<version>`, see the repo's release flow) triggers the
+A release reaches PyPI when the maintainer publishes it — the
+[`release`](../../.github/workflows/release.yml) workflow (`gh workflow run
+release.yml -f tag=v<version>`) runs every channel: PyPI, npm, the images and
+the CLI binaries. Its PyPI channel is the
 [`pypi-publish`](../../.github/workflows/pypi-publish.yml) GitHub Actions
 workflow, which builds an `abi3` wheel per platform (Linux x86-64/arm64 as
-`manylinux_2_28`, Windows x86-64 — one wheel covers every Python ≥ 3.9) plus an
+`manylinux_2_28`, Linux s390x cross-compiled with maturin — it loads ONNX
+Runtime at run time, see the repo README's IBM Z section — and Windows x86-64;
+one wheel covers every Python ≥ 3.9) plus an
 sdist and the `docling-rs-cuda` wheel, and uploads them to PyPI at the release's
-version. It can also be run by hand (`workflow_dispatch`) — to re-publish a
-version an automatic run skipped or failed on, or to publish a branch build;
-files already on PyPI are skipped, so re-runs are safe:
+version — then the pure-Python [`docling-rs-mcp`](./mcp/) launcher, pinned to
+that version, as its own PyPI project, and the MCP registry entry
+(`docs/MCP_REGISTRIES.md`). It runs **only by hand** (`workflow_dispatch`):
+a GitHub Release is cut on every merge, which would outgrow PyPI's per-project
+size limit (below) within weeks, so the maintainer publishes the releases
+worth it. Run alone, it publishes PyPI only — e.g. to repair a failed PyPI
+channel. Files already on PyPI are skipped, so re-runs are safe — within 14
+days of a release's first upload, after which PyPI accepts no new files for it:
 
 ```bash
 # From the Actions tab, or:
-gh workflow run pypi-publish.yml                 # version from the workspace Cargo.toml
-gh workflow run pypi-publish.yml -f tag=v0.16.0 -f cuda_wheel=true
+gh workflow run release.yml                                         # every channel, the newest release
+gh workflow run release.yml -f tag=v2.23.0                          # every channel, a given release
+gh workflow run pypi-publish.yml -f tag=v2.23.0                     # PyPI only, with docling-rs-cuda
+gh workflow run pypi-publish.yml -f tag=v2.23.0 -f cuda_wheel=false # without it
+gh workflow run pypi-publish.yml                                    # the dispatched ref at the workspace version
 ```
 
 No secrets: it publishes via PyPI **Trusted Publishing** (OIDC), like
@@ -315,7 +556,26 @@ docling-core — no API token is stored or rotated (the trusted publisher is
 registered on PyPI; manage it at *Project → Manage → Publishing*). Re-runs are
 idempotent (`skip-existing`). macOS wheels are omitted (no hosted runners here);
 macOS users install the sdist, which compiles from source. The ONNX runtime is
-bundled in the wheel; pdfium is fetched at runtime by `download_models()`.
+bundled in the wheel; the ONNX models are fetched at runtime by `download_models()`.
+
+**PyPI's size limit.** PyPI caps the total of all files a project keeps at
+10 GiB unless it [raises it on request](https://docs.pypi.org/project-management/storage-limits#requesting-a-project-size-limit-increase);
+a release adds ~100 MB to `docling-rs` and ~63 MB to `docling-rs-cuda`. An
+upload past the cap is refused file by file after the earlier ones went
+through (v2.22.0 got its aarch64 wheel only), so the publish job first runs
+`scripts/ci/pypi_room.py`: it fails before uploading anything when a project
+would overflow and warns past 90 %. To make room, a project owner deletes
+superseded releases — permanently; pins to them stop resolving — e.g. all of
+0.x and 1.x but their last versions, with
+[`pypi-cleanup`](https://github.com/arcivanov/pypi-cleanup) (a dry run
+without `--do-it`; `--query-only` lists the versions without logging in):
+
+```bash
+uvx pypi-cleanup -u <pypi-user> -p docling-rs -r '^0\.(?!53\.3$)' -r '^1\.(?!104\.3$)' --do-it
+```
+
+then re-run the failed publish job. When PyPI raises a limit, record it in the
+repository variable `PYPI_SIZE_LIMIT_GIB` (`docling-rs=20,docling-rs-cuda=15`).
 
 ### GPU wheel: `docling-rs-cuda`
 
@@ -336,7 +596,7 @@ and falls back to CPU when not — no environment setup needed.
 `DOCLING_RS_EP=cpu` (or `AcceleratorOptions(device="cpu")`) forces CPU;
 `DOCLING_RS_EP=cuda` / `device="cuda"` pins the GPU and fails loudly if it
 can't initialize. The fp32 models are preferred automatically on GPU, and
-**CUDA 12 + cuDNN 9 must be installed on the system** — the wheel ships the
+**CUDA 13 + cuDNN 9 must be installed on the system** — the wheel ships the
 ONNX Runtime provider, not the CUDA toolkit. The wheel is tagged **`manylinux_2_38`**
 (glibc ≥ 2.38 at runtime, i.e. Ubuntu 24.04+ / Debian 13+): the CUDA ONNX
 Runtime static binaries carry glibc-2.38 symbols, so this floor is inherent —

@@ -114,8 +114,20 @@ fn declared_encoding(bytes: &[u8]) -> Option<String> {
 }
 
 pub(crate) fn convert_html(name: &str, html: &str, images: &dyn ImageResolver) -> DoclingDocument {
+    convert_html_with(name, html, images, true)
+}
+
+/// [`convert_html`] with docling's `infer_furniture` option: `false` keeps
+/// everything on the body layer, however late the first heading comes — how
+/// the XBRL backend converts a filing's HTML text blocks.
+pub(crate) fn convert_html_with(
+    name: &str,
+    html: &str,
+    images: &dyn ImageResolver,
+    infer_furniture: bool,
+) -> DoclingDocument {
     let mut doc = DoclingDocument::new(name);
-    append_fragment(html, &mut doc.nodes, images);
+    append_fragment_with(html, &mut doc.nodes, images, infer_furniture);
     // The flat nodes above drive Markdown / DocLang / LaTeX; the JSON export
     // takes docling's item tree, built by a call-for-call port of upstream's
     // walk ([`super::html_tree`]) so the JSON structure — heading nesting,
@@ -124,7 +136,11 @@ pub(crate) fn convert_html(name: &str, html: &str, images: &dyn ImageResolver) -
     if nesting_estimate_within(html, max_dom_depth()) {
         let parsed = Html::parse_document(html);
         if within_depth_limit(parsed.root_element(), MAX_DOM_DEPTH) {
-            doc.tree = Some(super::html_tree::build_tree(&parsed, images));
+            doc.tree = Some(super::html_tree::build_tree(
+                &parsed,
+                images,
+                infer_furniture,
+            ));
         }
     }
     doc
@@ -134,6 +150,17 @@ pub(crate) fn convert_html(name: &str, html: &str, images: &dyn ImageResolver) -
 /// Markdown backend, which feeds embedded raw-HTML blocks through here (as
 /// docling does).
 pub(crate) fn append_fragment(html: &str, out: &mut Vec<Node>, images: &dyn ImageResolver) {
+    append_fragment_with(html, out, images, true);
+}
+
+/// [`append_fragment`] with docling's `infer_furniture` option (see
+/// [`convert_html_with`]).
+fn append_fragment_with(
+    html: &str,
+    out: &mut Vec<Node>,
+    images: &dyn ImageResolver,
+    infer_furniture: bool,
+) {
     // html5ever's tree builder walks its stack of open elements per tag, so
     // a page nested tens of thousands of elements deep parses in quadratic
     // time — 100 000 nested `<div>`s (1 MB) took 37 s before a single node
@@ -194,7 +221,9 @@ pub(crate) fn append_fragment(html: &str, out: &mut Vec<Node>, images: &dyn Imag
     }
     // docling's `infer_furniture`: content before the first body heading is site
     // chrome (navigation/menus/sidebars) → the `furniture` layer.
-    mark_leading_furniture(&mut out[start..]);
+    if infer_furniture {
+        mark_leading_furniture(&mut out[start..]);
+    }
 }
 
 /// The first hyperlink target inside `el` (its own `<a href>` or a descendant),
@@ -572,7 +601,9 @@ fn walk_block(
                         caption_href: None,
                         image: img_src(e).and_then(|s| images.resolve(&s)),
                         classification: None,
+                        description: None,
                         caption_parent: Default::default(),
+                        caption_location: None,
                     });
                 } else if name == "signature" || name == "stamp" {
                     // docling turns these into an image annotated with the kind.
@@ -582,7 +613,9 @@ fn walk_block(
                         caption_href: None,
                         image: None,
                         classification: None,
+                        description: None,
                         caption_parent: Default::default(),
+                        caption_location: None,
                     });
                     let mut label = name.to_string();
                     label[..1].make_ascii_uppercase();
@@ -609,7 +642,9 @@ fn walk_block(
                             caption_href,
                             image: src.as_deref().and_then(|s| images.resolve(s)),
                             classification: None,
+                            description: None,
                             caption_parent: Default::default(),
+                            caption_location: None,
                         });
                     } else if has_descendant(cref, "img") || contains_block(cref) {
                         // An anchor with an image among other content (docling
@@ -752,7 +787,15 @@ fn handle_block(
                 if !text.is_empty() {
                     nodes.push(Node::TextDump(text));
                 }
-            } else if let Some(table) = parse_table(elem) {
+            } else if let Some(mut table) = parse_table(elem) {
+                // The table's own `<caption>` — looked up non-recursively, so a
+                // nested table does not steal its ancestor's — is a caption
+                // item created ahead of the table under the same parent and
+                // linked from the table's `captions` (docling#4289).
+                if let Some(text) = table_caption_text(elem) {
+                    table.caption = Some(text);
+                    table.caption_parent = CaptionParent::Container;
+                }
                 nodes.push(Node::Table(table));
             }
         }
@@ -796,7 +839,9 @@ fn handle_block(
                                 caption_href: None,
                                 image: img_src(e).and_then(|s| images.resolve(&s)),
                                 classification: None,
+                                description: None,
                                 caption_parent: Default::default(),
+                                caption_location: None,
                             });
                         } else if is_block(name) {
                             flush_inline(&mut inline, nodes);
@@ -833,8 +878,9 @@ fn handle_block(
                     match produced.first_mut() {
                         // docling adds the table, then the figcaption under
                         // the same parent (#390: the caption follows the
-                        // table in the container's children).
-                        Some(Node::Table(table)) => {
+                        // table in the container's children). A table that
+                        // already carries its own `<caption>` keeps it.
+                        Some(Node::Table(table)) if table.caption.is_none() => {
                             table.caption = Some(text);
                             table.caption_parent = CaptionParent::ContainerAfter;
                         }
@@ -1084,6 +1130,21 @@ fn walk_list(list: ElementRef, ordered: bool, nodes: &mut Vec<Node>, level: u8, 
             continue;
         }
 
+        // GFM task-list form (docling#4401): the whole `<li>` is bare checkbox
+        // input(s) plus inline text — `<li><input type="checkbox" checked>
+        // done</li>`. The text is the checkbox's label, so the item is the
+        // checkbox alone; it used to be a list item followed by an empty
+        // checkbox on a bullet of its own.
+        if let Some(boxes) = task_list_checkboxes(li) {
+            nodes.extend(
+                boxes
+                    .into_iter()
+                    .map(|(checked, text)| Node::CheckboxItem { checked, text }),
+            );
+            number += 1;
+            continue;
+        }
+
         // The item's own inline text, then its block content. Images fold into
         // the item text (so the list stays tight); nested lists follow as
         // adjacent items in the same run.
@@ -1117,6 +1178,91 @@ fn walk_list(list: ElementRef, ordered: bool, nodes: &mut Vec<Node>, level: u8, 
             }
         }
     }
+}
+
+/// Block-level tags whose presence in a `<li>` rules out the GFM task-list
+/// form (upstream's `_BLOCK_TAGS`).
+const LI_BLOCK_TAGS: &[&str] = &[
+    "address",
+    "details",
+    "dl",
+    "figure",
+    "footer",
+    "img",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "ol",
+    "p",
+    "pre",
+    "signature",
+    "stamp",
+    "summary",
+    "table",
+    "ul",
+];
+
+/// docling's `_is_task_list_item` + `_emit_task_list_inputs`: when a `<li>`
+/// holds only checkbox/radio `<input>`s (its own — not a nested item's), no
+/// custom checkbox markup and no block content, each input is a checkbox item
+/// whose text is its bound `<label>` or, failing that, the item's own text.
+fn task_list_checkboxes(li: ElementRef) -> Option<Vec<(bool, String)>> {
+    let own_li = |el: ElementRef| {
+        el.ancestors()
+            .filter_map(ElementRef::wrap)
+            .find(|a| a.value().name() == "li")
+            .is_some_and(|a| a.id() == li.id())
+    };
+    let inputs: Vec<ElementRef> = li
+        .select(cached_selector!("input"))
+        .filter(|i| own_li(*i))
+        .collect();
+    if inputs.is_empty() {
+        return None;
+    }
+    let is_checkbox_or_radio = |i: &ElementRef| {
+        matches!(
+            i.value()
+                .attr("type")
+                .unwrap_or("")
+                .to_ascii_lowercase()
+                .as_str(),
+            "checkbox" | "radio"
+        )
+    };
+    if !inputs.iter().all(is_checkbox_or_radio) {
+        return None;
+    }
+    let has_custom_checkbox = li.descendants().filter_map(ElementRef::wrap).any(|d| {
+        d.value().attr("class").is_some_and(|c| {
+            c.split_whitespace()
+                .any(|k| matches!(k, "checkbox" | "checkbox-box" | "checkbox-input"))
+        })
+    });
+    if has_custom_checkbox
+        || li
+            .descendants()
+            .filter_map(ElementRef::wrap)
+            .any(|d| LI_BLOCK_TAGS.contains(&d.value().name()))
+    {
+        return None;
+    }
+    let li_text = normalize_ws(&li.text().collect::<String>());
+    Some(
+        inputs
+            .iter()
+            .map(|input| {
+                let mut text = checkbox_label_text(*input);
+                if text.is_empty() {
+                    text = li_text.clone();
+                }
+                (input.value().attr("checked").is_some(), text)
+            })
+            .collect(),
+    )
 }
 
 /// Collect a list item's own inline text. Images and nested lists are pulled out
@@ -1385,6 +1531,9 @@ impl RunBuf {
         } else {
             let before = self.rich.len();
             self.push_rich(fmt.to_inline_run(text));
+            if self.rich.len() == before {
+                self.fold_markdown_over_break(fmt);
+            }
             self.unmerged_runs += usize::from(self.rich.len() > before);
             // Folded into the previous run across a `<br>`: that run's text is
             // now two segments, so nothing later merges into it.
@@ -1397,6 +1546,24 @@ impl RunBuf {
                 )
             });
         }
+    }
+
+    /// The Markdown side of a `<br>` fold ([`Self::push_rich`] just joined the
+    /// segment onto the previous run as `a\nb`): docling wraps that one text
+    /// item as a whole, so `<b>a<br>b</b>` is `**a\nb**` — which a table cell
+    /// flattens to `**a b**` — and not `**a**` newline `**b**`. The md stream
+    /// holds `[…, "**a**", ␤, "**b**"]` here; a run of two or more sentinels
+    /// is a paragraph break and is left alone.
+    fn fold_markdown_over_break(&mut self, fmt: Fmt) {
+        let n = self.md.len();
+        if n < 3 || self.md[n - 2] != BR_SENTINEL || (n >= 4 && self.md[n - 4] == BR_SENTINEL) {
+            return;
+        }
+        let Some(folded) = self.rich.last().map(|r| r.text.clone()) else {
+            return;
+        };
+        self.md.truncate(n - 2);
+        self.md[n - 3] = serialize_run(&folded, fmt, None);
     }
 
     /// Append a text segment as a structured run, folding it into the previous
@@ -1823,8 +1990,12 @@ fn flatten_nested_table(table: ElementRef) -> String {
     parse_table_cells(table, |cell| {
         let mut out = String::new();
         subtree_text(cell, &mut out);
-        // Flattening feeds an enclosing cell's *text*; no block content.
-        (out.trim().to_string(), false, Vec::new())
+        // Flattening feeds an enclosing cell's *text*; no block content. Since
+        // docling#3973 every text node is collapsed to single spaces on
+        // extraction (`" ".join(text.split())`), so a still-deeper table's
+        // line breaks and indentation no longer survive as space runs.
+        let out = out.split_whitespace().collect::<Vec<_>>().join(" ");
+        (out, false, Vec::new())
     })
     .map(|t| {
         t.rows
@@ -2046,6 +2217,7 @@ fn parse_table_cells(
         cells: None,
         caption: None,
         caption_parent: Default::default(),
+        caption_location: None,
     })
 }
 
@@ -2072,14 +2244,37 @@ fn is_row_header(cells: &[ElementRef]) -> bool {
 /// HTML5's "rowspan=0 spans to the end of the row group" is not modelled,
 /// the cell simply keeps one slot).
 fn span_attr(cell: ElementRef, name: &str) -> usize {
-    let Some(v) = cell.value().attr(name) else {
+    let limit = if name == "colspan" {
+        MAX_COLSPAN
+    } else {
+        MAX_ROWSPAN
+    };
+    span_value(cell.value().attr(name), limit)
+}
+
+/// docling's `MAX_COLSPAN` / `MAX_ROWSPAN` (`backend/utils/table_spans.py`,
+/// HTML's own limits): a declared span past them is clamped, so a
+/// `colspan="999999999"` cannot make the grid builder allocate billions of
+/// slots.
+pub(super) const MAX_COLSPAN: usize = 1000;
+pub(super) const MAX_ROWSPAN: usize = 65_534;
+
+/// One span attribute as `_get_cell_spans` reads it — [`span_attr`]'s rule,
+/// clamped to `[1, limit]` (`clamp_span`); a digit run too long to parse is
+/// over every limit, so it is the limit. Shared with the JSON item tree
+/// (`html_tree`), which must see the same grid.
+pub(super) fn span_value(raw: Option<&str>, limit: usize) -> usize {
+    let Some(v) = raw else {
         return 1;
     };
     if !v.starts_with(|c: char| c.is_numeric()) {
         return 1;
     }
     let digits: String = v.chars().take_while(|c| c.is_ascii_digit()).collect();
-    digits.parse::<usize>().map_or(1, |n| n.max(1))
+    match digits.trim_start_matches('0') {
+        "" => 1,
+        d => d.parse::<usize>().map_or(limit, |n| n.clamp(1, limit)),
+    }
 }
 
 /// Render a table cell to Markdown. docling treats a cell as "rich" (and
@@ -2340,8 +2535,23 @@ fn cell_richness(cell: ElementRef) -> (usize, bool) {
 /// The plain text of a `<figure>`'s `<figcaption>` (docling's caption
 /// `to_single_text_element`); `None` without a figcaption or when it is blank.
 fn figcaption_text(fig: ElementRef) -> Option<String> {
-    let cap = fig.select(cached_selector!("figcaption")).next()?;
-    // A figure caption is plain text (formatting/links are stripped), but
+    caption_text(fig.select(cached_selector!("figcaption")).next()?)
+}
+
+/// A `<table>`'s own `<caption>` child (docling's `tag.find("caption",
+/// recursive=False)`), as caption text.
+fn table_caption_text(table: ElementRef) -> Option<String> {
+    let cap = table
+        .children()
+        .filter_map(ElementRef::wrap)
+        .find(|c| c.value().name() == "caption")?;
+    caption_text(cap)
+}
+
+/// The text of a `<figcaption>`/`<caption>` element (docling's
+/// `_emit_caption`).
+fn caption_text(cap: ElementRef) -> Option<String> {
+    // A caption is plain text (formatting/links are stripped), but
     // docling's `to_single_text_element` builds it per source text node:
     // each fragment is stripped and the fragments are joined with single
     // spaces — so tag boundaries always yield a space ("a b ." for
@@ -2893,11 +3103,10 @@ mod tests {
     #[test]
     fn nested_table_flattens_with_docling_spacing() {
         // A table nested in a cell flattens to its own grid joined with single
-        // spaces; a deeper table inside one of those cells contributes its raw
-        // subtree text, whose source line breaks survive as newlines (flattened
-        // to spaces by the table serializer). The `\n` here is the source line
-        // break between the innermost table's rows: docling renders `a  b`
-        // (td-trailing space + newline), not `a b`.
+        // spaces; a deeper table inside one of those cells contributes its
+        // subtree text with every whitespace run collapsed (docling#3973 —
+        // the source line break between the innermost table's rows used to
+        // survive as `a  b`, td-trailing space + newline).
         let doc = convert(
             "<table><tr><td><table><tr><td>P</td><td>Q</td></tr>\n\
              <tr><td>R</td><td><table><tr><td>a</td></tr>\n\
@@ -2911,12 +3120,11 @@ mod tests {
                 _ => None,
             })
             .expect("outer table parsed");
-        assert_eq!(table.rows[0][0], "P Q R a \nb");
+        assert_eq!(table.rows[0][0], "P Q R a b");
         assert_eq!(table.rows[0][1], "Z");
-        // The markdown serializer flattens the newline to a space.
         assert!(
-            doc.export_to_markdown().contains("P Q R a  b"),
-            "newline flattened to space in markdown: {}",
+            doc.export_to_markdown().contains("P Q R a b"),
+            "single-spaced in markdown: {}",
             doc.export_to_markdown()
         );
     }
@@ -3106,7 +3314,15 @@ mod tests {
         assert!(matches!(plain.nodes[0], Node::Picture { image: None, .. }));
 
         // With a resolver the data: URI is decoded and embedded.
-        let doc = convert_html("t", &html, &FsImageResolver::new(None, None));
+        let doc = convert_html(
+            "t",
+            &html,
+            &FsImageResolver::new(
+                None,
+                None,
+                crate::backend::images::ImagePolicy::new(crate::ImageSources::Embedded),
+            ),
+        );
         match &doc.nodes[0] {
             Node::Picture {
                 image: Some(img),

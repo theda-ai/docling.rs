@@ -338,6 +338,7 @@ fn render_page(
             cells: None,
             caption: None,
             caption_parent: Default::default(),
+            caption_location: None,
         }));
     }
     true
@@ -674,6 +675,7 @@ mod tests {
                     cells: None,
                     caption: None,
                     caption_parent: Default::default(),
+                    caption_location: None,
                 }),
             ]
         );

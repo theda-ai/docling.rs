@@ -1,0 +1,694 @@
+[ Header
+    1
+    ( "" , [] , [] )
+    [ Str "Rich"
+    , Space
+    , Str "Table"
+    , Space
+    , Str "Cells"
+    , Space
+    , Str "in"
+    , Space
+    , Str "HTML"
+    ]
+, Table
+    ( "" , [] , [] )
+    (Caption
+       Nothing
+       [ Plain
+           [ Str "Basic" , Space , Str "duck" , Space , Str "facts" ]
+       ])
+    [ ( AlignDefault , ColWidthDefault )
+    , ( AlignDefault , ColWidthDefault )
+    , ( AlignDefault , ColWidthDefault )
+    ]
+    (TableHead
+       ( "" , [] , [] )
+       [ Row
+           ( "" , [] , [] )
+           [ Cell
+               ( "" , [] , [] )
+               AlignDefault
+               (RowSpan 1)
+               (ColSpan 1)
+               [ Plain [ Str "Name" ] ]
+           , Cell
+               ( "" , [] , [] )
+               AlignDefault
+               (RowSpan 1)
+               (ColSpan 1)
+               [ Plain [ Str "Habitat" ] ]
+           , Cell
+               ( "" , [] , [] )
+               AlignDefault
+               (RowSpan 1)
+               (ColSpan 1)
+               [ Plain [ Str "Comment" ] ]
+           ]
+       ])
+    [ TableBody
+        ( "" , [] , [] )
+        (RowHeadColumns 0)
+        []
+        [ Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Wood" , Space , Str "Duck" ] ]
+            , Cell
+                ( "" , [] , [] ) AlignDefault (RowSpan 1) (ColSpan 1) []
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain
+                    [ Str "Often"
+                    , Space
+                    , Str "seen"
+                    , Space
+                    , Str "near"
+                    , Space
+                    , Str "ponds."
+                    ]
+                ]
+            ]
+        , Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Mallard" ] ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain
+                    [ Str "Ponds,"
+                    , Space
+                    , Str "lakes,"
+                    , Space
+                    , Str "rivers"
+                    ]
+                ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Quack" ] ]
+            ]
+        , Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain
+                    [ Str "Goose"
+                    , Space
+                    , Str "(not"
+                    , Space
+                    , Str "a"
+                    , Space
+                    , Str "duck!)"
+                    ]
+                ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain
+                    [ Str "Water"
+                    , Space
+                    , Str "&"
+                    , Space
+                    , Str "wetlands"
+                    ]
+                ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Para
+                    [ Strong [ Str "Large" ]
+                    , Str ","
+                    , Space
+                    , Emph [ Str "loud" ]
+                    , Str ","
+                    , Space
+                    , Underline [ Str "noisy" ]
+                    , Str ","
+                    , Space
+                    , Strikeout [ Str "small" ]
+                    ]
+                ]
+            ]
+        , Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Teal" ] ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ BulletList
+                    [ [ Plain [ Str "Pond" ] ]
+                    , [ Plain [ Str "Marsh" ] ]
+                    , [ Plain [ Str "Riverbank" ] ]
+                    ]
+                ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ OrderedList
+                    ( 1 , Decimal , Period )
+                    [ [ Plain
+                          [ Str "Fly"
+                          , Space
+                          , Str "south"
+                          , Space
+                          , Str "in"
+                          , Space
+                          , Str "winter"
+                          ]
+                      ]
+                    , [ Plain
+                          [ Str "Build"
+                          , Space
+                          , Str "nest"
+                          , Space
+                          , Str "on"
+                          , Space
+                          , Str "ground"
+                          ]
+                      ]
+                    ]
+                ]
+            ]
+        ]
+    ]
+    (TableFoot ( "" , [] , [] ) [])
+, Table
+    ( "" , [] , [] )
+    (Caption
+       Nothing
+       [ Plain
+           [ Str "Duck"
+           , Space
+           , Str "family"
+           , Space
+           , Str "tree"
+           , Space
+           , Str "(simplified)"
+           ]
+       ])
+    [ ( AlignDefault , ColWidthDefault )
+    , ( AlignDefault , ColWidthDefault )
+    ]
+    (TableHead
+       ( "" , [] , [] )
+       [ Row
+           ( "" , [] , [] )
+           [ Cell
+               ( "" , [] , [] )
+               AlignDefault
+               (RowSpan 1)
+               (ColSpan 1)
+               [ Plain [ Str "Genus" ] ]
+           , Cell
+               ( "" , [] , [] )
+               AlignDefault
+               (RowSpan 1)
+               (ColSpan 1)
+               [ Plain [ Str "Species" ] ]
+           ]
+       ])
+    [ TableBody
+        ( "" , [] , [] )
+        (RowHeadColumns 0)
+        []
+        [ Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Para
+                    [ Str "Aythya"
+                    , LineBreak
+                    , Str "(Diving"
+                    , Space
+                    , Str "ducks)"
+                    ]
+                ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain
+                    [ Str "Hawser,"
+                    , Space
+                    , Str "Common"
+                    , Space
+                    , Str "Pochard"
+                    ]
+                ]
+            ]
+        , Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Para
+                    [ Str "Lophonetta"
+                    , LineBreak
+                    , Str "(Pintail"
+                    , Space
+                    , Str "group)"
+                    ]
+                ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain
+                    [ Str "Fulvous"
+                    , Space
+                    , Str "Whistling"
+                    , Space
+                    , Str "Duck"
+                    ]
+                ]
+            ]
+        , Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Para
+                    [ Str "Oxyura"
+                    , LineBreak
+                    , Str "(Benthic"
+                    , Space
+                    , Str "ducks)"
+                    ]
+                ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain
+                    [ Str "Wigee,"
+                    , Space
+                    , Str "Banded"
+                    , Space
+                    , Str "Water-screw"
+                    ]
+                ]
+            ]
+        ]
+    ]
+    (TableFoot ( "" , [] , [] ) [])
+, Table
+    ( "" , [] , [] )
+    (Caption
+       Nothing
+       [ Plain [ Str "Duck-related" , Space , Str "actions" ] ])
+    [ ( AlignDefault , ColWidthDefault )
+    , ( AlignDefault , ColWidthDefault )
+    ]
+    (TableHead
+       ( "" , [] , [] )
+       [ Row
+           ( "" , [] , [] )
+           [ Cell
+               ( "" , [] , [] )
+               AlignDefault
+               (RowSpan 1)
+               (ColSpan 2)
+               [ Plain [ Str "Action" ] ]
+           ]
+       ])
+    [ TableBody
+        ( "" , [] , [] )
+        (RowHeadColumns 0)
+        []
+        [ Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Para [ Strong [ Str "Swim" ] ] ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Para
+                    [ Str "Gracefully"
+                    , Space
+                    , Str "glide"
+                    , Space
+                    , Str "on"
+                    , Space
+                    , Str "H"
+                    , Space
+                    , Subscript [ Str "2" ]
+                    , Space
+                    , Str "O"
+                    , Space
+                    , Str "surfaces."
+                    ]
+                ]
+            ]
+        , Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Para [ Emph [ Str "Fly" ] ] ]
+            , Cell
+                ( "" , [] , [] ) AlignDefault (RowSpan 1) (ColSpan 1) []
+            ]
+        , Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Para [ Underline [ Str "Quack" ] ] ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Table
+                    ( "" , [] , [] )
+                    (Caption Nothing [])
+                    [ ( AlignDefault , ColWidthDefault )
+                    , ( AlignDefault , ColWidthDefault )
+                    ]
+                    (TableHead
+                       ( "" , [] , [] )
+                       [ Row
+                           ( "" , [] , [] )
+                           [ Cell
+                               ( "" , [] , [] )
+                               AlignDefault
+                               (RowSpan 1)
+                               (ColSpan 1)
+                               [ Plain [ Str "Type" ] ]
+                           , Cell
+                               ( "" , [] , [] )
+                               AlignDefault
+                               (RowSpan 1)
+                               (ColSpan 1)
+                               [ Plain [ Str "Sound" ] ]
+                           ]
+                       ])
+                    [ TableBody
+                        ( "" , [] , [] )
+                        (RowHeadColumns 0)
+                        []
+                        [ Row
+                            ( "" , [] , [] )
+                            [ Cell
+                                ( "" , [] , [] )
+                                AlignDefault
+                                (RowSpan 1)
+                                (ColSpan 1)
+                                [ Plain [ Str "Short" ] ]
+                            , Cell
+                                ( "" , [] , [] )
+                                AlignDefault
+                                (RowSpan 1)
+                                (ColSpan 1)
+                                [ Plain [ Str "\"quak\"" ] ]
+                            ]
+                        , Row
+                            ( "" , [] , [] )
+                            [ Cell
+                                ( "" , [] , [] )
+                                AlignDefault
+                                (RowSpan 1)
+                                (ColSpan 1)
+                                [ Plain [ Str "Long" ] ]
+                            , Cell
+                                ( "" , [] , [] )
+                                AlignDefault
+                                (RowSpan 1)
+                                (ColSpan 1)
+                                [ Plain [ Str "\"quaaaaaack\"" ] ]
+                            ]
+                        ]
+                    ]
+                    (TableFoot ( "" , [] , [] ) [])
+                ]
+            ]
+        ]
+    ]
+    (TableFoot ( "" , [] , [] ) [])
+, Table
+    ( "" , [] , [] )
+    (Caption
+       Nothing
+       [ Plain
+           [ Str "Famous"
+           , Space
+           , Str "Ducks"
+           , Space
+           , Str "with"
+           , Space
+           , Str "Images"
+           ]
+       ])
+    [ ( AlignDefault , ColWidthDefault )
+    , ( AlignDefault , ColWidthDefault )
+    , ( AlignDefault , ColWidthDefault )
+    ]
+    (TableHead
+       ( "" , [] , [] )
+       [ Row
+           ( "" , [] , [] )
+           [ Cell
+               ( "" , [] , [] )
+               AlignDefault
+               (RowSpan 1)
+               (ColSpan 1)
+               [ Plain [ Str "Name" ] ]
+           , Cell
+               ( "" , [] , [] )
+               AlignDefault
+               (RowSpan 1)
+               (ColSpan 1)
+               [ Plain [ Str "Description" ] ]
+           , Cell
+               ( "" , [] , [] )
+               AlignDefault
+               (RowSpan 1)
+               (ColSpan 1)
+               [ Plain [ Str "Image" ] ]
+           ]
+       ])
+    [ TableBody
+        ( "" , [] , [] )
+        (RowHeadColumns 0)
+        []
+        [ Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Donald" , Space , Str "Duck" ] ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Cartoon" , Space , Str "character." ] ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Para
+                    [ Link
+                        ( "" , [] , [] )
+                        [ Str "View" , Space , Str "PNG" ]
+                        ( "https://en.wikipedia.org/wiki/Donald_Duck#/media/File:Donald_Duck_angry_transparent_background.png"
+                        , ""
+                        )
+                    ]
+                ]
+            ]
+        , Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "White-headed" , Space , Str "duck" ] ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain
+                    [ Str "A"
+                    , Space
+                    , Str "small"
+                    , Space
+                    , Str "diving"
+                    , Space
+                    , Str "duck"
+                    , Space
+                    , Str "some"
+                    , Space
+                    , Str "45"
+                    , Space
+                    , Str "cm"
+                    , Space
+                    , Str "(18"
+                    , Space
+                    , Str "in)"
+                    , Space
+                    , Str "long."
+                    ]
+                ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Figure
+                    ( "" , [] , [] )
+                    (Caption
+                       Nothing
+                       [ Plain
+                           [ Str "White-headed"
+                           , Space
+                           , Str "duck"
+                           , Space
+                           , Str "thumbnail"
+                           ]
+                       ])
+                    [ Plain
+                        [ Image
+                            ( "" , [ "docling-placeholder" ] , [] )
+                            [ Str "White-headed"
+                            , Space
+                            , Str "duck"
+                            , Space
+                            , Str "thumbnail"
+                            ]
+                            ( "" , "" )
+                        ]
+                    ]
+                ]
+            ]
+        , Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Mandarin" , Space , Str "Duck" ] ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain
+                    [ Str "Known"
+                    , Space
+                    , Str "for"
+                    , Space
+                    , Str "its"
+                    , Space
+                    , Str "striking"
+                    , Space
+                    , Str "plumage."
+                    ]
+                ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Para
+                    [ Link
+                        ( "" , [] , [] )
+                        [ Str "View"
+                        , Space
+                        , Str "Full-Size"
+                        , Space
+                        , Str "Image"
+                        ]
+                        ( "https://upload.wikimedia.org/wikipedia/commons/thumb/7/75/Mandarin_duck_%28Aix_galericulata%29.jpg/250px-Mandarin_duck_%28Aix_galericulata%29.jpg"
+                        , ""
+                        )
+                    ]
+                ]
+            ]
+        , Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Unknown" , Space , Str "Duck" ] ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain
+                    [ Str "No"
+                    , Space
+                    , Str "photo"
+                    , Space
+                    , Str "available."
+                    ]
+                ]
+            , Cell
+                ( "" , [] , [] ) AlignDefault (RowSpan 1) (ColSpan 1) []
+            ]
+        ]
+    ]
+    (TableFoot ( "" , [] , [] ) [])
+]

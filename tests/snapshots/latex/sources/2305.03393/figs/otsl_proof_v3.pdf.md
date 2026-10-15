@@ -1,76 +1,86 @@
 3
 
+2
+
 4
 
 2
 
-AB
+A
 
-C
-
-D
+B
 
 E
-
-12
-
-3
 
 1
 
 C
 
-CU
+1
+
+3
 
 4
+
+C
+
+U
 
 C L L
 
 L
 
-CU
-
-L
-
-L
-
-L
-
-X X X
-
-X X X
+U
 
 C
 
+D
+
 C
-
-L
-
-L
-
-L
-
-X
-
-C CC
 
 U
 
-NL
+U
 
-NL
+L
 
-NL
+L
+
+L
+
+X X X
+
+X X X
+
+C
+
+C
+
+L
+
+L
+
+L
+
+U
+
+X
+
+C C
+
+U
 
 C C C
 
 C C C
 
+C
+
 C C C
 
-NL
+U
 
-C C C C NL
+C C C C
 
 1 - simple cells: "C"
 
@@ -79,3 +89,13 @@ C C C C NL
 3 - vertical merges: "C", "U"
 
 4 - 2d merges: "C", "L", "U", "X"
+
+NL
+
+NL
+
+NL
+
+NL
+
+NL

@@ -6,7 +6,7 @@
 //!
 //! One test walks all four fixtures serially: each conversion runs the full ML
 //! stack (layout + OCR), and four concurrent model stacks would only fight for
-//! memory. It needs pdfium and the models (including the `ch` conformance OCR
+//! memory. It needs the models (including the `ch` conformance OCR
 //! pair the groundtruth was pinned against), so it skips cleanly on checkouts
 //! without `download_dependencies.sh` — CI without models must stay green.
 
@@ -19,19 +19,12 @@ fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// Whether pdfium and every model the scanned path loads are present (layout +
+/// Whether every model the scanned path loads is present (layout +
 /// the `ch` OCR recognition pair). Model resolution is CWD-relative with an
 /// exe-dir fallback and tests run from the crate dir, so this also moves the
 /// process to the repo root — the same view the CLI has when run from there.
 fn ml_stack_ready() -> bool {
     let root = repo_root();
-    if !(root.join(".pdfium/lib/libpdfium.so").exists()
-        || root.join(".pdfium/lib/libpdfium.dylib").exists()
-        || root.join(".pdfium/lib/pdfium.dll").exists()
-        || std::env::var("PDFIUM_DYNAMIC_LIB_PATH").is_ok())
-    {
-        return false;
-    }
     let models_ready = ["layout_heron.onnx", "ocr_rec.onnx", "ppocr_keys_v1.txt"]
         .iter()
         .all(|m| root.join(".models").join(m).exists());
@@ -41,7 +34,7 @@ fn ml_stack_ready() -> bool {
 #[test]
 fn scanned_fixtures_match_groundtruth() {
     if !ml_stack_ready() {
-        eprintln!("skipping: pdfium/models not found");
+        eprintln!("skipping: models not found");
         return;
     }
     let converter = DocumentConverter::new().ocr_lang("ch");
@@ -78,7 +71,7 @@ fn scanned_fixtures_match_groundtruth() {
 #[test]
 fn raster_rotated_fixtures_match_groundtruth() {
     if !ml_stack_ready() {
-        eprintln!("skipping: pdfium/models not found");
+        eprintln!("skipping: models not found");
         return;
     }
     let converter = DocumentConverter::new().ocr_lang("ch");

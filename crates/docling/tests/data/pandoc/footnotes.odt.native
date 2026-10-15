@@ -1,0 +1,36 @@
+[ Header 2 ( "" , [] , [] ) [ Str "Notes" ]
+, Para
+    [ Str "Body"
+    , Space
+    , Str "text"
+    , Space
+    , Str "with"
+    , Space
+    , Str "a"
+    , Space
+    , Str "footnote"
+    , Note
+        [ Para
+            [ Str "The" , Space , Str "footnote" , Space , Str "body." ]
+        ]
+    , Space
+    , Str "and"
+    , Space
+    , Str "an"
+    , Space
+    , Str "endnote"
+    , Note
+        [ Para
+            [ Str "The"
+            , Space
+            , Str "endnote"
+            , Space
+            , Str "body,two"
+            , Space
+            , Str "paragraphs."
+            ]
+        ]
+    , Str "."
+    ]
+, Para [ Str "Closing" , Space , Str "paragraph." ]
+]

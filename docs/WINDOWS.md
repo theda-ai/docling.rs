@@ -19,16 +19,15 @@ VM/filesystem overhead.
 git clone https://github.com/docling-project/docling.rs
 cd docling.rs
 
-scripts\install\download_dependencies.bat   :: models\ + .pdfium\lib\pdfium.dll
+scripts\install\download_dependencies.bat   :: .models\
 cargo build --release -p docling-cli
 ```
 
 The script mirrors `download_dependencies.sh`: layout / OCR / TableFormer /
 picture-classifier ONNX models (INT8 variants included — preferred
 automatically; set `DOCLING_RS_FP32=1` to opt out), Whisper-tiny for audio
-(`--no-asr` to skip), the chunker tokenizer, and `pdfium.dll` (fetched from
-[pdfium-binaries](https://github.com/bblanchon/pdfium-binaries), which the
-Linux-only asset in our models release doesn't cover).
+(`--no-asr` to skip) and the chunker tokenizer. PDF pages are parsed and
+rendered in pure Rust — no `pdfium.dll` is needed.
 
 ## Run
 
@@ -40,17 +39,16 @@ target\release\docling-rs paper.pdf
 target\release\docling-rs --to json report.docx
 ```
 
-From another directory, point the two roots at the checkout — `cmd`:
+From another directory, point the models at the checkout — `cmd`:
 
 ```bat
-set PDFIUM_DYNAMIC_LIB_PATH=C:\src\docling.rs\.pdfium\lib
 set DOCLING_LAYOUT_ONNX=C:\src\docling.rs\models\layout_heron_int8.onnx
 ```
 
 or PowerShell:
 
 ```powershell
-$env:PDFIUM_DYNAMIC_LIB_PATH = "C:\src\docling.rs\.pdfium\lib"
+$env:DOCLING_LAYOUT_ONNX = "C:\src\docling.rs\models\layout_heron_int8.onnx"
 ```
 
 Every `DOCLING_*` / `DOCLING_RS_*` variable from the main README works the

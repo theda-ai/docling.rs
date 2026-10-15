@@ -1,6 +1,6 @@
 //! HEIC/HEIF image input (#211), end to end. Compiled only with the opt-in
 //! `heif` feature (links the system libheif) and, like the other pipeline
-//! e2es, skips cleanly when the ONNX models / pdfium aren't installed —
+//! e2es, skips cleanly when the ONNX models aren't installed —
 //! model-free CI stays green.
 
 #![cfg(feature = "heif")]

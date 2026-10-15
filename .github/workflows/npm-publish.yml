@@ -5,20 +5,17 @@
 # package plus per-platform `optionalDependencies` (docling.rs-<triple>) via
 # napi-rs and publishes them all.
 #
-# Triggers:
-#   - Release published: runs automatically for every `v<version>` GitHub
-#     Release ci.yml cuts (the release is created with RELEASE_PAT, so the
-#     `release: published` event fires — same mechanism as cli-binaries.yml and
-#     docker-publish.yml). The release tag is checked out and its version
-#     published; `docling.rs-cuda` is published too (the `cuda` input is
-#     implied). Releases with any other tag (the `npm-cuda-v*` binary-asset
-#     releases this workflow itself creates) are ignored.
-#   - Manual dispatch: by default it builds the latest master (the version in
-#     the workspace Cargo.toml); optionally pass a release tag to build that
-#     instead, and `cuda` to add `docling.rs-cuda`. Run it from the Actions tab
-#     (or `gh workflow run npm-publish.yml`, optionally `-f tag=v0.7.0`) — e.g.
-#     to re-publish a version an automatic run skipped or failed on. Every
-#     publish job skips a version that is already on npm, so re-runs are safe.
+# Trigger: manual dispatch only. Like pypi-publish.yml, a GitHub Release
+# (cut on every merge) does NOT publish to npm; the maintainer picks the
+# releases worth publishing — release.yml runs this with PyPI, the images and
+# the CLI binaries; alone, it repairs a failed npm channel:
+#
+#     gh workflow run npm-publish.yml -f tag=v2.23.0
+#
+# `tag` checks the release out and publishes its version; blank builds the
+# latest master (the version in the workspace Cargo.toml), `version`
+# overrides either. `cuda` (on by default) adds `docling.rs-cuda`. Every
+# publish job skips a version that is already on npm, so re-runs are safe.
 #
 # Authentication is npm Trusted Publishing (OIDC): no NPM_TOKEN secret. Each
 # published package — `docling.rs`, every `docling.rs-<triple>` platform
@@ -27,6 +24,12 @@
 # publish jobs request `id-token: write` and upgrade to npm >= 11.5.1 (the
 # first release that performs the OIDC exchange; the runner's bundled npm 10
 # silently falls back to tokens, which npm now rejects as E404).
+# npm only offers the trusted-publisher setting on a package that already
+# exists, so a NEW platform package (a new napi target, e.g. s390x in #504)
+# fails its first CI publish with ENEEDAUTH: publish a placeholder version of
+# it once by hand (`npm publish` of a bare package.json, version 0.0.0),
+# configure the trusted publisher on it, then re-run this workflow with the
+# release tag — the platform packages that did go out are skipped below.
 #
 # The optional `cuda` input additionally publishes `docling.rs-cuda`
 # (issue #74, Linux x64): the CUDA addon + ONNX Runtime provider libraries are
@@ -38,8 +41,6 @@
 name: npm publish
 
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       tag:
@@ -51,10 +52,10 @@ on:
         required: false
         default: ""
       cuda:
-        description: "Also publish docling.rs-cuda (Linux x64: binaries to a GitHub release, npm shim downloads on install). Implied on a release event."
+        description: "Also publish docling.rs-cuda (Linux x64: binaries to a GitHub release, npm shim downloads on install)."
         required: false
         type: boolean
-        default: false
+        default: true
 
 # Least privilege for GITHUB_TOKEN: the workflow default is checkout-only.
 # The publish jobs add `id-token: write` (the npm OIDC exchange) on the job
@@ -63,7 +64,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: npm-publish-${{ inputs.tag || github.event.release.tag_name || github.ref }}
+  group: npm-publish-${{ inputs.tag || github.ref }}
   cancel-in-progress: false
 
 defaults:
@@ -73,10 +74,6 @@ defaults:
 jobs:
   build:
     name: build ${{ matrix.target }}
-    # On a release event only the `v<version>` releases ci.yml cuts are
-    # published; the `npm-cuda-v*` asset releases publish-cuda creates carry
-    # no package of their own.
-    if: github.event_name != 'release' || startsWith(github.event.release.tag_name, 'v')
     runs-on: ${{ matrix.host }}
     strategy:
       fail-fast: false
@@ -97,10 +94,25 @@ jobs:
           #   - { target: x86_64-apple-darwin,  host: macos-14 }  # cross via --target
           - target: x86_64-pc-windows-msvc
             host: windows-latest
+          # IBM Z (#504): cross-compiled with cargo-zigbuild against glibc
+          # 2.28 (the distro cross toolchain would pin the addon to its 2.39
+          # sysroot and shut out RHEL 8/9 mainframes; napi's own `--zig` has
+          # a target allowlist without s390x) and `ort-load-dynamic` — pyke
+          # ships no ONNX Runtime for s390x, the addon dlopens the one
+          # download_dependencies.sh fetches into .models/onnxruntime/ on an
+          # s390x host. The cdylib is renamed the way napi names it,
+          # docling-rs.linux-s390x-gnu.node, so `napi artifacts` files it into
+          # the docling.rs-linux-s390x-gnu platform package (the loader has
+          # the s390x branch). `cross` is the binutils prefix used to strip.
+          - target: s390x-unknown-linux-gnu
+            host: ubuntu-24.04
+            cross: s390x-linux-gnu
+            zig: true
+            features: ort-load-dynamic
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.tag || github.event.release.tag_name || github.ref }}
+          ref: ${{ inputs.tag || github.ref }}
 
       # rustup is preinstalled on GitHub-hosted runners (Linux + Windows); use it
       # directly — the docling-project org allowlists only GitHub-owned / vetted
@@ -111,6 +123,18 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
           rustup target add ${{ matrix.target }}
+
+      # cargo-zigbuild + zig (both as wheels) as the cross C compiler/linker;
+      # the target's binutils only for `strip`, which the host's cannot do on
+      # a foreign ELF.
+      - name: Install cargo-zigbuild and the target binutils
+        if: matrix.zig
+        shell: bash
+        run: |
+          python3 -m pip install --user --break-system-packages ziglang cargo-zigbuild
+          cargo zigbuild --help >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends binutils-${{ matrix.cross }}
 
       # One workspace, key the cache per target so the 5 jobs don't collide.
       - uses: actions/cache@v6
@@ -133,9 +157,21 @@ jobs:
       # Native addon + the JS loader / d.ts. `--strip` keeps the (ONNX-linked)
       # binary as small as possible; strip isn't available under MSVC, so the
       # Windows build omits it.
+      # `--strip` runs the host `strip` on the cross-built s390x addon, which
+      # cannot read it: the cross build strips with the target's binutils
+      # afterwards.
       - name: Build (unix)
         if: runner.os != 'Windows'
-        run: npx napi build --platform --release --strip --target ${{ matrix.target }} --js native.js --dts native.d.ts
+        shell: bash
+        run: |
+          features="${{ matrix.features }}"
+          if [ -n "${{ matrix.zig }}" ]; then
+            cargo zigbuild --release --locked -p docling-node --target ${{ matrix.target }}.2.28 ${features:+--features $features}
+            cp ../../target/${{ matrix.target }}/release/libdocling_node.so docling-rs.linux-s390x-gnu.node
+            ${{ matrix.cross }}-strip docling-rs.*.node
+          else
+            npx napi build --platform --release --strip --target ${{ matrix.target }} --js native.js --dts native.d.ts ${features:+--features $features}
+          fi
 
       - name: Build (windows)
         if: runner.os == 'Windows'
@@ -170,7 +206,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.tag || github.event.release.tag_name || github.ref }}
+          ref: ${{ inputs.tag || github.ref }}
 
       # No registry-url: setup-node would write an .npmrc that reads
       # $NODE_AUTH_TOKEN, and trusted publishing sends no token — npm errors
@@ -209,14 +245,14 @@ jobs:
         run: |
           v="${{ inputs.version }}"
           if [ -z "$v" ]; then
-            if [ -n "${{ inputs.tag || github.event.release.tag_name }}" ]; then
-              v="${{ inputs.tag || github.event.release.tag_name }}"; v="${v#v}"
+            if [ -n "${{ inputs.tag }}" ]; then
+              v="${{ inputs.tag }}"; v="${v#v}"
             else
               v="$(grep -m1 '^version = ' ../../Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
             fi
           fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
-          echo "Publishing docling.rs@$v (ref: ${{ inputs.tag || github.event.release.tag_name || github.ref }})"
+          echo "Publishing docling.rs@$v (ref: ${{ inputs.tag || github.ref }})"
 
       # Skip cleanly if this version is already on npm (idempotent re-runs).
       - name: Check if already published
@@ -244,6 +280,27 @@ jobs:
           npx napi create-npm-dir -t .
           npx napi artifacts --dir artifacts
 
+      # A re-run after a partial publish: `napi prepublish` publishes every
+      # platform package unconditionally, so one that made it to npm last
+      # time (`docling.rs-linux-x64-gnu@1.87.0` before the brand-new s390x
+      # package failed its first publish, ENEEDAUTH) aborts the run with
+      # "cannot publish over the previously published version" — and the
+      # main package never goes out. napi skips a platform dir whose `.node`
+      # is missing, so dropping the binary of each already-published package
+      # makes the re-run publish only what is left; the optionalDependencies
+      # wiring is unaffected.
+      - name: Skip platform packages already on npm
+        if: steps.check.outputs.published == 'false'
+        run: |
+          for dir in npm/*/; do
+            name=$(node -p "require('./${dir}package.json').name")
+            ver=$(node -p "require('./${dir}package.json').version")
+            if npm view "$name@$ver" version >/dev/null 2>&1; then
+              echo "$name@$ver is already on npm — skipping."
+              rm -f "$dir"*.node
+            fi
+          done
+
       - name: Publish
         if: steps.check.outputs.published == 'false'
         run: npm publish --access public
@@ -261,8 +318,8 @@ jobs:
   # Python wheel — see pypi-publish.yml's wheel-cuda job).
   publish-cuda:
     name: publish docling.rs-cuda
-    # Manual runs opt in with `cuda`; a release publishes it unconditionally.
-    if: inputs.cuda || (github.event_name == 'release' && startsWith(github.event.release.tag_name, 'v'))
+    # The `cuda` input, on by default; `-f cuda=false` skips it.
+    if: inputs.cuda
     runs-on: ubuntu-24.04
     permissions:
       contents: write # gh release create/upload
@@ -270,7 +327,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.tag || github.event.release.tag_name || github.ref }}
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Install Rust (stable)
         run: |
@@ -305,14 +362,14 @@ jobs:
         run: |
           v="${{ inputs.version }}"
           if [ -z "$v" ]; then
-            if [ -n "${{ inputs.tag || github.event.release.tag_name }}" ]; then
-              v="${{ inputs.tag || github.event.release.tag_name }}"; v="${v#v}"
+            if [ -n "${{ inputs.tag }}" ]; then
+              v="${{ inputs.tag }}"; v="${v#v}"
             else
               v="$(grep -m1 '^version = ' ../../Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
             fi
           fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
-          echo "Publishing docling.rs-cuda@$v (ref: ${{ inputs.tag || github.event.release.tag_name || github.ref }})"
+          echo "Publishing docling.rs-cuda@$v (ref: ${{ inputs.tag || github.ref }})"
 
       - name: Check if already published
         id: check
@@ -368,10 +425,13 @@ jobs:
           if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
             gh release upload "$TAG" cuda/release-assets/* --repo "${{ github.repository }}" --clobber
           else
+            # Never GitHub's "latest": that is the vX.Y.Z release whose CLI
+            # binaries install.sh downloads (release.yml marks it, #707).
             gh release create "$TAG" cuda/release-assets/* \
               --repo "${{ github.repository }}" \
               --title "docling.rs-cuda ${{ steps.ver.outputs.version }} (npm binaries)" \
-              --notes "CUDA addon binaries for the docling.rs-cuda npm package. Downloaded by its postinstall — not for direct use."
+              --notes "CUDA addon binaries for the docling.rs-cuda npm package. Downloaded by its postinstall — not for direct use." \
+              --latest=false
           fi
 
       - name: Assemble npm package
@@ -410,7 +470,6 @@ jobs:
   # workspace version, skips cleanly when that version is already on npm.
   publish-wasm:
     name: publish docling.rs-wasm
-    if: github.event_name != 'release' || startsWith(github.event.release.tag_name, 'v')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -421,7 +480,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.tag || github.event.release.tag_name || github.ref }}
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Install Rust (stable + wasm32 target)
         run: |

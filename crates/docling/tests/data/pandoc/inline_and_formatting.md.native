@@ -1,0 +1,237 @@
+[ Header
+    1
+    ( "" , [] , [] )
+    [ Str "Contribution"
+    , Space
+    , Str "guideline"
+    , Space
+    , Str "example"
+    ]
+, Para
+    [ Str "This" , Space , Str "is" , Space , Str "simple." ]
+, Para
+    [ Str "Foo"
+    , Space
+    , Emph [ Str "emphasis" ]
+    , Space
+    , Strong [ Str "strong" , Space , Str "emphasis" ]
+    , Space
+    , Emph [ Strong [ Str "both" ] ]
+    , Str "."
+    ]
+, Para
+    [ Str "Create"
+    , Space
+    , Str "your"
+    , Space
+    , Str "feature"
+    , Space
+    , Str "branch:"
+    , Space
+    , Code
+        ( "" , [] , [] ) "git checkout -b feature/AmazingFeature"
+    , Str "."
+    ]
+, OrderedList
+    ( 1 , Decimal , Period )
+    [ [ Plain
+          [ Str "Pull"
+          , Space
+          , Str "the"
+          , Space
+          , Link
+              ( "" , [] , [] )
+              [ Strong [ Str "repository" ] ]
+              ( "https://github.com/docling-project/docling" , "" )
+          , Str "."
+          ]
+      ]
+    , [ Plain
+          [ Str "Create"
+          , Space
+          , Str "your"
+          , Space
+          , Str "feature"
+          , Space
+          , Str "branch"
+          , Space
+          , Str "("
+          , Code
+              ( "" , [] , [] ) "git checkout -b feature/AmazingFeature"
+          , Str ")"
+          ]
+      ]
+    , [ Plain
+          [ Str "Commit"
+          , Space
+          , Str "your"
+          , Space
+          , Str "changes"
+          , Space
+          , Str "("
+          , Code
+              ( "" , [] , [] ) "git commit -m 'Add some AmazingFeature'"
+          , Str ")"
+          ]
+      ]
+    , [ Plain
+          [ Str "Push"
+          , Space
+          , Str "to"
+          , Space
+          , Str "the"
+          , Space
+          , Str "branch"
+          , Space
+          , Str "("
+          , Code
+              ( "" , [] , [] ) "git push origin feature/AmazingFeature"
+          , Str ")"
+          ]
+      ]
+    , [ Plain
+          [ Str "Open"
+          , Space
+          , Str "a"
+          , Space
+          , Str "Pull"
+          , Space
+          , Str "Request"
+          ]
+      ]
+    , [ Plain
+          [ Strong
+              [ Str "Whole"
+              , Space
+              , Str "list"
+              , Space
+              , Str "item"
+              , Space
+              , Str "has"
+              , Space
+              , Str "same"
+              , Space
+              , Str "formatting"
+              ]
+          ]
+      ]
+    , [ Plain
+          [ Str "List"
+          , Space
+          , Str "item"
+          , Space
+          , Str "has"
+          , Space
+          , Emph
+              [ Str "mixed" , Space , Str "or" , Space , Str "partial" ]
+          , Space
+          , Str "formatting"
+          ]
+      ]
+    ]
+, Header
+    1
+    ( "" , [] , [] )
+    [ Emph
+        [ Str "Whole"
+        , Space
+        , Str "heading"
+        , Space
+        , Str "is"
+        , Space
+        , Str "italic"
+        ]
+    ]
+, BulletList
+    [ [ Plain
+          [ Strong [ Str "First" ]
+          , Str ":"
+          , Space
+          , Str "Lorem"
+          , Space
+          , Str "ipsum."
+          ]
+      ]
+    , [ Plain
+          [ Strong [ Str "Second" ]
+          , Str ":"
+          , Space
+          , Str "Dolor"
+          , Space
+          , Code ( "" , [] , [] ) "sit"
+          , Space
+          , Str "amet."
+          ]
+      ]
+    ]
+, Para
+    [ Str "Some"
+    , Space
+    , Emph [ Code ( "" , [] , [] ) "formatted_code" ]
+    ]
+, Header
+    2
+    ( "" , [] , [] )
+    [ Emph [ Str "Partially" , Space , Str "formatted" ]
+    , Space
+    , Str "heading"
+    , Space
+    , Str "to_escape"
+    , Space
+    , Code ( "" , [] , [] ) "not_to_escape"
+    ]
+, Para
+    [ Link
+        ( "" , [] , [] )
+        [ Str "$$E=mc^2$$" ]
+        ( "https://en.wikipedia.org/wiki/Albert_Einstein" , "" )
+    ]
+, Header
+    2 ( "" , [] , [] ) [ Str "Table" , Space , Str "Heading" ]
+, Table
+    ( "" , [] , [] )
+    (Caption Nothing [])
+    [ ( AlignDefault , ColWidthDefault )
+    , ( AlignDefault , ColWidthDefault )
+    ]
+    (TableHead
+       ( "" , [] , [] )
+       [ Row
+           ( "" , [] , [] )
+           [ Cell
+               ( "" , [] , [] )
+               AlignDefault
+               (RowSpan 1)
+               (ColSpan 1)
+               [ Plain [ Str "Bold" , Space , Str "Heading" ] ]
+           , Cell
+               ( "" , [] , [] )
+               AlignDefault
+               (RowSpan 1)
+               (ColSpan 1)
+               [ Plain [ Str "Italic" , Space , Str "Heading" ] ]
+           ]
+       ])
+    [ TableBody
+        ( "" , [] , [] )
+        (RowHeadColumns 0)
+        []
+        [ Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "data" , Space , Str "a" ] ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "data" , Space , Str "b" ] ]
+            ]
+        ]
+    ]
+    (TableFoot ( "" , [] , [] ) [])
+]

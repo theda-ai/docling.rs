@@ -15,7 +15,7 @@
 use std::sync::mpsc::{sync_channel, Receiver};
 use std::thread::JoinHandle;
 
-use docling_core::{ImageMode, MarkdownStreamer};
+use docling_core::{ImageMode, MarkdownExportOptions, MarkdownStreamer};
 
 use crate::converter::DocumentConverter;
 use crate::error::ConversionError;
@@ -85,8 +85,9 @@ pub(crate) struct StreamSettings {
     pub strict: bool,
     pub no_table_former: bool,
     pub no_text_panels: bool,
+    pub text_layer_only: bool,
     pub no_ocr: bool,
-    pub skip_ocr: bool,
+    pub password: Option<String>,
     pub force_full_page_ocr: bool,
     pub enrich: docling_pdf::EnrichmentOptions,
     pub page_range: Option<(usize, usize)>,
@@ -95,21 +96,34 @@ pub(crate) struct StreamSettings {
     pub tesseract_lang: Option<String>,
     pub ocr_mode: Option<docling_pdf::OcrMode>,
     pub ocr_scale: Option<f32>,
-    pub artifacts_dir: String,
+    /// [`DocumentConverter::ocr_textline_orientation`] (#666); `None` keeps
+    /// the pipeline's environment default.
+    pub ocr_textline_orientation: Option<bool>,
+    /// Picture-crop scale (#520); page images have no place in a stream.
+    pub images_scale: Option<f32>,
     /// [`DocumentConverter::page_break_placeholder`] for the streamer — the
     /// PDF path never builds a `DoclingDocument` to carry it.
     pub page_break_placeholder: Option<String>,
+    /// [`DocumentConverter::compact_tables`] for the streamer, for the same
+    /// reason: the buffered PDF path sets it on the document it builds, the
+    /// streaming path has no document.
+    pub compact_tables: bool,
+    /// [`DocumentConverter::document_timeout`] (#497).
+    pub document_timeout: Option<std::time::Duration>,
+    /// The PII pass (#621), applied to each page batch before it is
+    /// serialized, so the stream matches the buffered redacted Markdown.
+    pub redact: Option<docling_core::RedactionOptions>,
 }
 
 /// Spawn the background conversion and return the chunk iterator.
 ///
 /// [`ImageMode::Referenced`] is memory-bounded (issue #80): each page's image
-/// files are written under the converter's artifacts dir as that page's chunk
-/// is emitted, then dropped, instead of accumulating until export.
+/// files are written under `options.artifacts_dir` as that page's chunk is
+/// emitted, then dropped, instead of accumulating until export.
 pub(crate) fn spawn(
     converter: DocumentConverter,
     source: SourceDocument,
-    image_mode: ImageMode,
+    options: MarkdownExportOptions,
 ) -> MarkdownStream {
     let (tx, rx) = sync_channel::<Result<String, ConversionError>>(CHANNEL_DEPTH);
     let handle = std::thread::spawn(move || match source.format {
@@ -118,18 +132,45 @@ pub(crate) fn spawn(
         // Exception: the heading-hierarchy stage (#302) rewrites levels across
         // the *whole* assembled document, so those conversions run buffered
         // (one chunk) — streamed output stays byte-identical to buffered.
-        InputFormat::Pdf if !converter.heading_hierarchy_enabled() => {
-            run_pdf(converter.stream_settings(), &source, image_mode, &tx)
+        // A `.pdf` without the PDF header is something else saved under that
+        // name: the buffered path converts it, retrying as its content's
+        // format (#556). The header check reads the first KiB the PDF parser
+        // reads anyway.
+        InputFormat::Pdf
+            if !converter.heading_hierarchy_enabled()
+                && crate::sniff::looks_like_pdf(&source.bytes) =>
+        {
+            run_pdf(converter.stream_settings(), &source, &options, &tx)
         }
         // Every other backend builds the whole `DoclingDocument` synchronously, so
         // there is no latency to stream away; serialize it through the same chunk
         // API for a uniform interface (one chunk plus the trailing newline).
-        _ => run_buffered(converter, source, image_mode, &tx),
+        _ => run_buffered(converter, source, &options, &tx),
     });
     MarkdownStream {
         rx: Some(rx),
         handle: Some(handle),
     }
+}
+
+/// The streamer for `options` (#599's layers, picture traversal, escaping,
+/// placeholder — byte-identical to the buffered
+/// `export_to_markdown_with_options`), with the converter's table style and
+/// page-break placeholder.
+fn streamer(
+    strict: bool,
+    compact_tables: bool,
+    page_break_placeholder: Option<String>,
+    options: &MarkdownExportOptions,
+) -> MarkdownStreamer {
+    MarkdownStreamer::with_artifacts(
+        strict,
+        ImageMode::Placeholder,
+        compact_tables,
+        &options.artifacts_dir,
+    )
+    .with_export_options(options)
+    .with_page_break_placeholder(page_break_placeholder)
 }
 
 /// Write one push's referenced-mode images (paths are relative to the process
@@ -151,32 +192,61 @@ fn write_artifacts(artifacts: Vec<(String, Vec<u8>)>) -> Result<(), ConversionEr
 fn run_pdf(
     settings: StreamSettings,
     source: &SourceDocument,
-    image_mode: ImageMode,
+    options: &MarkdownExportOptions,
     tx: &std::sync::mpsc::SyncSender<Result<String, ConversionError>>,
 ) {
-    // The PDF pipeline builds its document from `DoclingDocument::new` defaults, so
-    // tables use the padded GitHub serializer (compact_tables = false), matching the
-    // buffered PDF path.
-    let mut streamer = MarkdownStreamer::with_artifacts(
+    // Tables use the padded GitHub serializer unless the converter asked for
+    // compact ones — the same knob the buffered PDF path carries on its
+    // document (`--compact-tables` used to reach only `--no-stream`).
+    let mut streamer = streamer(
         settings.strict,
-        image_mode,
-        false,
-        &settings.artifacts_dir,
-    )
-    .with_page_break_placeholder(settings.page_break_placeholder.clone());
+        settings.compact_tables,
+        settings.page_break_placeholder.clone(),
+        options,
+    );
+    // The PII pass (#621) on the streaming path: one `Redactor` across the
+    // page batches, so pseudonym numbering follows document order exactly
+    // as the buffered pass numbers it. `BoxOut` needs the OCR pipeline,
+    // which is busy converting here — the images are dropped instead.
+    let redact_opts = settings.redact.clone().map(|mut o| {
+        if o.images == docling_core::ImageRedaction::BoxOut {
+            crate::redact::warn_box_out_unavailable("the streaming path drops them");
+            o.images = docling_core::ImageRedaction::Drop;
+        }
+        o
+    });
+    let detector = match redact_opts.as_ref().map(crate::redact::detector) {
+        Some(Ok(d)) => Some(d),
+        Some(Err(e)) => {
+            let _ = tx.send(Err(e));
+            return;
+        }
+        None => None,
+    };
+    let mut redactor = match (redact_opts.as_ref(), detector.as_ref()) {
+        (Some(o), Some(d)) => Some(docling_core::redact::Redactor::new(o, d)),
+        _ => None,
+    };
     let mut pipeline = match docling_pdf::Pipeline::new().map(|p| {
+        let p = match settings.ocr_textline_orientation {
+            Some(enable) => p.ocr_textline_orientation(enable),
+            None => p,
+        };
         p.no_table_former(settings.no_table_former)
             .no_text_panels(settings.no_text_panels)
-            .no_ocr(settings.no_ocr)
-            .skip_ocr(settings.skip_ocr)
+            // docling-pdf's pre-2.0 names (see `DocumentConverter::ml_pipeline`).
+            .no_ocr(settings.text_layer_only)
+            .skip_ocr(settings.no_ocr)
             .force_full_page_ocr(settings.force_full_page_ocr)
             .ocr_lang(settings.ocr_lang)
             .ocr_engine(settings.ocr_engine)
             .tesseract_lang(settings.tesseract_lang.clone())
             .ocr_mode(settings.ocr_mode)
             .ocr_scale(settings.ocr_scale)
+            .images_scale(settings.images_scale)
             .enrichments(settings.enrich)
             .pages(settings.page_range)
+            .document_timeout(settings.document_timeout)
     }) {
         Ok(p) => p,
         Err(e) => {
@@ -185,34 +255,52 @@ fn run_pdf(
         }
     };
 
-    let result = pipeline.convert_streaming(&source.bytes, None, &source.name, |nodes, links| {
-        let chunk = streamer.push(&nodes, &links);
-        // Referenced mode: this push's images hit the disk as its Markdown is
-        // emitted, keeping ~one page batch of image bytes resident. A write
-        // failure aborts the pipeline and surfaces through the outer error arm.
-        if let Err(e) = write_artifacts(streamer.take_artifacts()) {
-            return Err(docling_pdf::PdfError::Pdfium(e.to_string()));
-        }
-        if !chunk.is_empty() && tx.send(Ok(chunk)).is_err() {
-            // Consumer dropped the stream: abort the pipeline.
-            return Err(docling_pdf::PdfError::Pdfium(
-                "markdown stream consumer dropped".into(),
-            ));
-        }
-        Ok(())
-    });
+    let result = pipeline.convert_streaming_outcome(
+        &source.bytes,
+        settings.password.as_deref(),
+        &source.name,
+        |mut nodes, mut links| {
+            if let Some(r) = redactor.as_mut() {
+                r.redact_nodes(&mut nodes);
+                r.redact_links(&mut links);
+            }
+            let chunk = streamer.push(&nodes, &links);
+            // Referenced mode: this push's images hit the disk as its Markdown is
+            // emitted, keeping ~one page batch of image bytes resident. A write
+            // failure aborts the pipeline and surfaces through the outer error arm.
+            if let Err(e) = write_artifacts(streamer.take_artifacts()) {
+                return Err(docling_pdf::PdfError::Pdfium(e.to_string()));
+            }
+            if !chunk.is_empty() && tx.send(Ok(chunk)).is_err() {
+                // Consumer dropped the stream: abort the pipeline.
+                return Err(docling_pdf::PdfError::Pdfium(
+                    "markdown stream consumer dropped".into(),
+                ));
+            }
+            Ok(())
+        },
+    );
 
     match result {
-        Ok(()) => {
+        Ok(completion) => {
             let tail = streamer.finish();
             if !tail.is_empty() {
                 let _ = tx.send(Ok(tail));
             }
+            // A spent document budget (#497) is the stream's last item, after
+            // every chunk of the partial document: the consumer has the pages
+            // that fit and learns the document was cut — docling's
+            // PARTIAL_SUCCESS, which a chunk stream has no status field for.
+            if let Some(message) = completion.message() {
+                let _ = tx.send(Err(ConversionError::Timeout(message)));
+            }
         }
         // A consumer-drop abort and a real parse error both end here; the send below
         // is a no-op if the consumer is already gone, so only genuine errors surface.
+        // The `PdfError` stays on the chain (same text: it names `pdf:` itself), so
+        // an encrypted PDF is typed on the streaming path too (#636).
         Err(e) => {
-            let _ = tx.send(Err(ConversionError::Parse(e.to_string())));
+            let _ = tx.send(Err(ConversionError::with_source("pdf", e)));
         }
     }
 }
@@ -220,7 +308,7 @@ fn run_pdf(
 fn run_buffered(
     converter: DocumentConverter,
     source: SourceDocument,
-    image_mode: ImageMode,
+    options: &MarkdownExportOptions,
     tx: &std::sync::mpsc::SyncSender<Result<String, ConversionError>>,
 ) {
     let settings = converter.stream_settings();
@@ -231,13 +319,12 @@ fn run_buffered(
             return;
         }
     };
-    let mut streamer = MarkdownStreamer::with_artifacts(
+    let mut streamer = streamer(
         settings.strict,
-        image_mode,
         doc.compact_tables,
-        &settings.artifacts_dir,
-    )
-    .with_page_break_placeholder(doc.page_break_placeholder.clone());
+        doc.page_break_placeholder.clone(),
+        options,
+    );
     let chunk = streamer.push(&doc.nodes, &doc.links);
     if let Err(e) = write_artifacts(streamer.take_artifacts()) {
         let _ = tx.send(Err(e));

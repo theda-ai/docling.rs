@@ -63,18 +63,15 @@ impl TesseractOptions {
     /// `ocr_lang`), the rest from the environment. A `DOCLING_RS_TESSERACT_PSM`
     /// outside 0–13 warns and is ignored.
     pub fn from_env(lang: Option<String>) -> Self {
-        let psm = docling_core::env::nonempty("DOCLING_RS_TESSERACT_PSM").and_then(|raw| match raw
-            .trim()
-            .parse::<u8>()
-        {
-            Ok(n) if n <= 13 => Some(n),
-            _ => {
+        let psm = docling_core::env::nonempty("DOCLING_RS_TESSERACT_PSM").and_then(|raw| {
+            let psm = parse_psm(&raw);
+            if psm.is_none() {
                 eprintln!(
                     "docling-pdf: DOCLING_RS_TESSERACT_PSM={raw:?} is not a page \
                          segmentation mode 0-13; using Tesseract's default"
                 );
-                None
             }
+            psm
         });
         Self {
             cmd: docling_core::env::nonempty("DOCLING_TESSERACT")
@@ -84,6 +81,12 @@ impl TesseractOptions {
             tessdata_dir: docling_core::env::nonempty("DOCLING_RS_TESSDATA_DIR"),
         }
     }
+}
+
+/// A `DOCLING_RS_TESSERACT_PSM` value: a page segmentation mode 0–13, or
+/// `None` for anything else.
+fn parse_psm(raw: &str) -> Option<u8> {
+    raw.trim().parse::<u8>().ok().filter(|&n| n <= 13)
 }
 
 /// Tesseract's `-l` argument for an `ocr_lang` value under this engine.
@@ -425,23 +428,86 @@ fn word_units(words: &[Word]) -> Vec<Unit> {
         .collect()
 }
 
-/// Pixels of white paper added around a region crop: Tesseract's page
-/// segmentation wants text clear of the image border, and a layout box
+/// Minimum pixels of white paper added around a region crop: Tesseract's
+/// page segmentation wants text clear of the image border, and a layout box
 /// often sits on the ink.
 const CROP_PAD: u32 = 6;
+/// The pad also grows with the region ([`crop_pad`]): a layout box hugs the
+/// x-height/baseline band, and a diacritic — tilde, acute, cedilla — sits
+/// outside it by a fraction of the glyph size. At the PDF path's 2.0 px/pt
+/// render 6 px is a quarter of a 12 pt line and clears them; a 300 dpi PNG
+/// converts at scale 1.0 with 48 px glyphs, where the same 6 px clipped the
+/// tilde and the cedilla and Tesseract read "Acao" for "Ação" (found with
+/// #471's synthetic Portuguese scan). A quarter of the line (12 px) still
+/// landed on the cedilla's edge — its ink runs 12 px under that layout box —
+/// so 0.3 (14 px); the 12 pt PDF case goes from 6 to 7 px of white paper.
+const CROP_PAD_RATIO: f32 = 0.3;
+/// Cap on the grown pad, so a tall multi-line block does not drag whole
+/// neighbouring lines into its crop — and whatever partial neighbour the pad
+/// still admits is dropped by [`unit_in_region`], never a cell.
+const CROP_PAD_MAX: u32 = 48;
 
-/// A region's crop as PNG bytes, with the crop's origin in image pixels.
-fn crop_png(img: &RgbImage, region: &Region, scale: f32) -> Option<(u32, u32, Vec<u8>)> {
+/// The pad in image pixels for a region `h_px` tall: `CROP_PAD_RATIO` of the
+/// height, no less than [`CROP_PAD`], no more than [`CROP_PAD_MAX`].
+fn crop_pad(h_px: f32) -> u32 {
+    // `max` / `min` (not `clamp`) so a NaN height degrades to the minimum.
+    (h_px * CROP_PAD_RATIO)
+        .round()
+        .max(CROP_PAD as f32)
+        .min(CROP_PAD_MAX as f32) as u32
+}
+
+/// One region's crop for Tesseract.
+struct Crop {
+    /// The crop's origin in image pixels (its top-left corner on the page).
+    ox: u32,
+    oy: u32,
+    png: Vec<u8>,
+    /// The unpadded region box in image pixels, `(l, t, r, b)`: only units
+    /// centred inside it (plus [`CROP_PAD`] of slack for layout-box jitter)
+    /// count as this region's text — the pad exists to keep glyph extremities
+    /// whole, not to read the neighbours it lets in.
+    bounds: (f32, f32, f32, f32),
+}
+
+/// A region's padded crop as PNG bytes.
+fn crop_png(img: &RgbImage, region: &Region, scale: f32) -> Option<Crop> {
     let (iw, ih) = img.dimensions();
-    let l = ((region.l * scale).max(0.0) as u32).saturating_sub(CROP_PAD);
-    let t = ((region.t * scale).max(0.0) as u32).saturating_sub(CROP_PAD);
-    let r = (((region.r * scale).max(0.0) as u32).saturating_add(CROP_PAD)).min(iw);
-    let b = (((region.b * scale).max(0.0) as u32).saturating_add(CROP_PAD)).min(ih);
+    let bounds = (
+        region.l * scale,
+        region.t * scale,
+        region.r * scale,
+        region.b * scale,
+    );
+    let pad = crop_pad(bounds.3 - bounds.1);
+    let l = (bounds.0.max(0.0) as u32).saturating_sub(pad);
+    let t = (bounds.1.max(0.0) as u32).saturating_sub(pad);
+    let r = ((bounds.2.max(0.0) as u32).saturating_add(pad)).min(iw);
+    let b = ((bounds.3.max(0.0) as u32).saturating_add(pad)).min(ih);
     if r <= l || b <= t {
         return None;
     }
     let crop = imageops::crop_imm(img, l, t, r - l, b - t).to_image();
-    Some((l, t, encode_png(&crop)?))
+    Some(Crop {
+        ox: l,
+        oy: t,
+        png: encode_png(&crop)?,
+        bounds,
+    })
+}
+
+/// Whether a recognized unit (crop-relative px box) belongs to the crop's
+/// region: its centre lies inside the region box, with [`CROP_PAD`] of slack
+/// on every side. A neighbouring line the pad pulled into the crop has its
+/// centre outside and is discarded; a line the layout box merely sits a few
+/// pixels off from stays.
+fn unit_in_region(crop: &Crop, unit: &Unit) -> bool {
+    let (l, t, r, b, _, _) = unit;
+    let cx = crop.ox as f32 + (l + r) / 2.0;
+    let cy = crop.oy as f32 + (t + b) / 2.0;
+    let slack = CROP_PAD as f32;
+    let (bl, bt, br, bb) = crop.bounds;
+    cx >= bl - slack && cx <= br + slack && cy >= bt - slack && cy <= bb + slack
 }
 
 fn encode_png(img: &RgbImage) -> Option<Vec<u8>> {
@@ -597,14 +663,14 @@ impl TesseractOcr {
         Ok(parse_tsv(&self.run(cmd, png)?))
     }
 
-    /// Recognize every crop of `jobs` — `(origin l, origin t, png)` — across
-    /// the lanes, and return each crop's units mapped to page points
-    /// (`origin + px` / `scale`), in job order. A crop Tesseract fails on
-    /// contributes nothing (logged under `DOCLING_RS_DEBUG`), the rest of the
-    /// page still reads out.
+    /// Recognize every crop of `jobs` across the lanes, and return each
+    /// crop's units mapped to page points (`origin + px` / `scale`), in job
+    /// order; units centred outside the crop's region ([`unit_in_region`])
+    /// are dropped. A crop Tesseract fails on contributes nothing (logged
+    /// under `DOCLING_RS_DEBUG`), the rest of the page still reads out.
     fn recognize_all(
         &self,
-        jobs: &[(u32, u32, Vec<u8>)],
+        jobs: &[Crop],
         scale: f32,
         units: fn(&[Word]) -> Vec<Unit>,
     ) -> Vec<(TextCell, f32)> {
@@ -617,10 +683,10 @@ impl TesseractOcr {
             for _ in 0..lanes {
                 s.spawn(|| loop {
                     let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let Some((_, _, png)) = jobs.get(i) else {
+                    let Some(job) = jobs.get(i) else {
                         break;
                     };
-                    let words = match self.recognize(png, dpi) {
+                    let words = match self.recognize(&job.png, dpi) {
                         Ok(words) => words,
                         Err(e) => {
                             debug_log!("docling-pdf: tesseract: crop {i}: {e}; no text");
@@ -632,12 +698,17 @@ impl TesseractOcr {
             }
         });
         let mut cells = Vec::new();
-        for ((ox, oy, _), slot) in jobs.iter().zip(results) {
+        for (job, slot) in jobs.iter().zip(results) {
             let words = slot
                 .into_inner()
                 .expect("crop result slot")
                 .unwrap_or_default();
-            for (l, t, r, b, text, conf) in units(&words) {
+            let (ox, oy) = (job.ox as f32, job.oy as f32);
+            for unit in units(&words) {
+                if !unit_in_region(job, &unit) {
+                    continue;
+                }
+                let (l, t, r, b, text, conf) = unit;
                 let text = text.trim().to_string();
                 if text.is_empty() {
                     continue;
@@ -645,10 +716,10 @@ impl TesseractOcr {
                 cells.push((
                     TextCell {
                         text,
-                        l: (*ox as f32 + l) / scale,
-                        t: (*oy as f32 + t) / scale,
-                        r: (*ox as f32 + r) / scale,
-                        b: (*oy as f32 + b) / scale,
+                        l: (ox + l) / scale,
+                        t: (oy + t) / scale,
+                        r: (ox + r) / scale,
+                        b: (oy + b) / scale,
                     },
                     conf,
                 ));
@@ -658,12 +729,7 @@ impl TesseractOcr {
     }
 
     /// The crops of the regions `keep` selects.
-    fn crops(
-        img: &RgbImage,
-        regions: &[Region],
-        scale: f32,
-        keep: fn(&str) -> bool,
-    ) -> Vec<(u32, u32, Vec<u8>)> {
+    fn crops(img: &RgbImage, regions: &[Region], scale: f32, keep: fn(&str) -> bool) -> Vec<Crop> {
         regions
             .iter()
             .filter(|r| keep(r.label))
@@ -779,6 +845,54 @@ mod tests {
         }
     }
 
+    /// The crop pad follows the glyph size: the 6 px floor for a 10 pt line
+    /// at the PDF path's 2.0 px/pt render, 14 px for a 48 px line of a
+    /// 300 dpi image at scale 1.0 — where 6 px clipped the tilde and the
+    /// cedilla and 12 px still grazed the cedilla — and capped for a tall
+    /// block.
+    #[test]
+    fn crop_pad_grows_with_the_region_and_is_capped() {
+        assert_eq!(crop_pad(20.0), CROP_PAD);
+        assert_eq!(crop_pad(48.0), 14);
+        assert_eq!(crop_pad(1000.0), CROP_PAD_MAX);
+        assert_eq!(crop_pad(f32::NAN), CROP_PAD);
+        let region = Region {
+            label: "text",
+            score: 0.9,
+            l: 100.0,
+            t: 100.0,
+            r: 300.0,
+            b: 148.0,
+        };
+        let img = RgbImage::from_pixel(400, 400, image::Rgb([255, 255, 255]));
+        let crop = crop_png(&img, &region, 1.0).expect("crop");
+        assert_eq!((crop.ox, crop.oy), (86, 86), "14 px pad on a 48 px line");
+        assert_eq!(crop.bounds, (100.0, 100.0, 300.0, 148.0));
+        let crop = crop_png(&img, &region, 0.4).expect("crop");
+        assert_eq!((crop.ox, crop.oy), (34, 34), "6 px floor on a 19 px line");
+    }
+
+    /// A neighbouring line the grown pad admits into the crop is not this
+    /// region's cell; a line whose layout box sits a few pixels off still is.
+    #[test]
+    fn units_outside_the_region_are_dropped() {
+        let crop = Crop {
+            ox: 86,
+            oy: 86,
+            png: Vec::new(),
+            bounds: (100.0, 100.0, 300.0, 148.0),
+        };
+        // Crop-relative: the region's own line spans y 14..62 inside the crop.
+        let own: Unit = (14.0, 14.0, 214.0, 62.0, "Ação".into(), 0.9);
+        // Bleeding 4 px past the box top (layout jitter) — still inside.
+        let jittered: Unit = (14.0, 6.0, 214.0, 58.0, "Ação".into(), 0.9);
+        // The next line down, starting where the region ends: centre outside.
+        let neighbour: Unit = (14.0, 62.0, 214.0, 110.0, "próxima".into(), 0.9);
+        assert!(unit_in_region(&crop, &own));
+        assert!(unit_in_region(&crop, &jittered));
+        assert!(!unit_in_region(&crop, &neighbour));
+    }
+
     /// The `tsv` shape Tesseract 5 prints: only level-5 rows are words; a
     /// block's two lines become two cells, words joined by single spaces,
     /// boxes unioned, confidence averaged onto 0–1; table mode keeps words.
@@ -818,9 +932,12 @@ mod tests {
     }
 
     #[test]
-    fn psm_env_is_range_checked() {
-        let opts = TesseractOptions::from_env(Some("eng".into()));
-        assert_eq!(opts.lang.as_deref(), Some("eng"));
-        assert!(opts.psm.is_none() || opts.psm.is_some_and(|p| p <= 13));
+    fn psm_is_range_checked() {
+        assert_eq!(parse_psm("6"), Some(6));
+        assert_eq!(parse_psm(" 13 "), Some(13));
+        assert_eq!(parse_psm("0"), Some(0));
+        for bad in ["14", "-1", "300", "six", ""] {
+            assert_eq!(parse_psm(bad), None, "{bad:?}");
+        }
     }
 }

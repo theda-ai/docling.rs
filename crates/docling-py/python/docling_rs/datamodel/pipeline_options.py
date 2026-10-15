@@ -12,12 +12,16 @@ from ..options import (
     AcceleratorDevice,
     AcceleratorOptions,
     PdfPipelineOptions,
+    PictureDescriptionApiOptions,
     TableFormerMode,
     TableStructureOptions,
 )
+from ..picture_description import PictureDescriptionBaseOptions
 
 __all__ = [
     "PdfPipelineOptions",
+    "PictureDescriptionApiOptions",
+    "PictureDescriptionBaseOptions",
     "TableStructureOptions",
     "TableFormerMode",
     "AcceleratorDevice",

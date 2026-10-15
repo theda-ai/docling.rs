@@ -15,6 +15,7 @@
 //! Table cells are plain text in both modes; pipe/newline escaping is done by
 //! the serializer.
 
+use crate::backend::images::{FsImageResolver, ImagePolicy, ImageResolver, ImageSources, NoFetch};
 use docling_core::{DoclingDocument, Node, Table};
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
@@ -26,6 +27,11 @@ use crate::source::SourceDocument;
 pub struct MarkdownBackend {
     /// Emit cleaner, more conformant Markdown rather than docling-legacy output.
     pub strict: bool,
+    /// Which image destinations resolve to bytes (#646): `data:` URIs under
+    /// `Embedded`, paths under the file's directory under `Local`, URLs
+    /// under `Remote`; the default resolves none (upstream fetches none).
+    /// A raw-HTML block's `<img>` goes through the same policy.
+    pub images: ImagePolicy,
 }
 
 /// Is this trimmed line a GFM table delimiter row (`--- | :---:` …)? Every
@@ -160,16 +166,29 @@ impl DeclarativeBackend for MarkdownBackend {
         // escape leaves an offset gap (the backslash). marko keeps `[11]` as one
         // run yet treats the escaped `.` as a separate run — so merging the
         // contiguous pieces and leaving gapped ones split reproduces both.
+        // Inside a table the gap rule does not apply: docling rebuilds a cell
+        // from the raw source line (`_close_table` splits it on `|`), so a
+        // backslash-escaped `\|` — or any other escape — is cell content with
+        // nothing around it (docling#4313: `a\|b` is the cell `a|b`).
         let raw: Vec<(Event, std::ops::Range<usize>)> =
             Parser::new_ext(text, opts).into_offset_iter().collect();
         let mut events: Vec<Event> = Vec::with_capacity(raw.len());
         let mut k = 0;
+        let mut in_table = false;
         while k < raw.len() {
+            match &raw[k].0 {
+                Event::Start(Tag::Table(_)) => in_table = true,
+                Event::End(TagEnd::Table) => in_table = false,
+                _ => {}
+            }
             if matches!(raw[k].0, Event::Text(_)) {
                 let mut merged = String::new();
                 let mut end = raw[k].1.start;
                 while let Some((Event::Text(t), range)) = raw.get(k) {
-                    if range.start != end {
+                    let escape_gap = in_table
+                        && range.start == end + 1
+                        && text.as_bytes().get(end) == Some(&b'\\');
+                    if range.start != end && !escape_gap {
                         break;
                     }
                     merged.push_str(t);
@@ -183,14 +202,28 @@ impl DeclarativeBackend for MarkdownBackend {
             }
         }
 
+        // One resolver (and one per-document budget) for both walks; the
+        // `None` tier keeps the no-op resolver, so the default path is the
+        // pre-#646 one.
+        let fs_resolver;
+        let images: &dyn ImageResolver = if self.images.sources == ImageSources::None {
+            &NoFetch
+        } else {
+            fs_resolver = FsImageResolver::new(
+                source.base_dir().map(|p| p.to_path_buf()),
+                source.base_url.clone(),
+                self.images.clone(),
+            );
+            &fs_resolver
+        };
         let mut doc = DoclingDocument::new(&source.name);
         let mut i = 0;
-        self.parse_blocks(&events, &mut i, &mut doc.nodes, 0, Stop::Eof, 0);
+        self.parse_blocks(&events, &mut i, &mut doc.nodes, 0, Stop::Eof, 0, images);
         // The JSON serializes docling's item tree — marko's CommonMark view of
         // the document, walked as upstream does ([`super::md_tree`]); the flat
         // nodes above stay the source for every other serializer. A document
         // with a raw HTML block keeps the flat export (see the module docs).
-        doc.tree = super::md_tree::build_tree(text);
+        doc.tree = super::md_tree::build_tree(text, images);
         Ok(doc)
     }
 }
@@ -234,6 +267,7 @@ impl MarkdownBackend {
     // Block structure
     // -----------------------------------------------------------------------
 
+    #[allow(clippy::too_many_arguments)]
     fn parse_blocks(
         &self,
         events: &[Event],
@@ -242,6 +276,7 @@ impl MarkdownBackend {
         list_level: u8,
         stop: Stop,
         depth: u16,
+        images: &dyn ImageResolver,
     ) {
         while *i < events.len() {
             match &events[*i] {
@@ -268,13 +303,21 @@ impl MarkdownBackend {
                         *i += 1;
                     }
                     consume_end(events, i);
-                    // docling parses embedded raw-HTML blocks; reuse the HTML backend.
-                    // Embedded HTML never fetches images.
-                    super::html::append_fragment(&html, out, &super::images::NoFetch);
+                    // docling parses embedded raw-HTML blocks; reuse the HTML
+                    // backend, under the same image policy (#646).
+                    super::html::append_fragment(&html, out, images);
                 }
                 Event::Start(Tag::BlockQuote(_)) => {
                     *i += 1;
-                    self.parse_blocks(events, i, out, list_level, Stop::BlockQuote, depth + 1);
+                    self.parse_blocks(
+                        events,
+                        i,
+                        out,
+                        list_level,
+                        Stop::BlockQuote,
+                        depth + 1,
+                        images,
+                    );
                 }
                 Event::Start(Tag::Paragraph) => {
                     // Legacy: a lone inline code span becomes a code block.
@@ -297,6 +340,18 @@ impl MarkdownBackend {
                         continue;
                     }
                     *i += 1;
+                    // A paragraph that is one image whose destination the
+                    // policy resolves (#646) is a picture with its bytes —
+                    // the flat chain's counterpart of the tree's
+                    // `TreeKind::Picture`, so `--images embedded` Markdown
+                    // shows it. Anything else (the default tier included)
+                    // stays the `![alt](dest)` text it always was.
+                    if let Some(node) = self.lone_image_picture(events, *i, images) {
+                        skip_subtree(events, i); // the image
+                        consume_end(events, i); // the paragraph
+                        out.push(node);
+                        continue;
+                    }
                     let runs = self.collect_inline(events, i, false);
                     consume_end(events, i);
                     let text = self.join_runs(&runs, false);
@@ -397,6 +452,37 @@ impl MarkdownBackend {
         }
     }
 
+    /// The picture for a paragraph whose only content is an image at
+    /// `events[start]` and whose destination `images` resolves; `None`
+    /// otherwise (the paragraph is parsed as text).
+    fn lone_image_picture(
+        &self,
+        events: &[Event],
+        start: usize,
+        images: &dyn ImageResolver,
+    ) -> Option<Node> {
+        let Some(Event::Start(Tag::Image { dest_url, .. })) = events.get(start) else {
+            return None;
+        };
+        let mut end = start;
+        skip_subtree(events, &mut end);
+        if !matches!(events.get(end), Some(Event::End(TagEnd::Paragraph))) {
+            return None;
+        }
+        let image = images.resolve(dest_url)?;
+        let mut j = start + 1;
+        let alt = self.join_runs(&self.collect_inline(events, &mut j, false), false);
+        Some(Node::Picture {
+            caption: Some(alt).filter(|a| !a.is_empty()),
+            caption_href: None,
+            image: Some(image),
+            classification: None,
+            description: None,
+            caption_parent: Default::default(),
+            caption_location: None,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn parse_item(
         &self,
@@ -492,6 +578,7 @@ impl MarkdownBackend {
                 cells: None,
                 caption: None,
                 caption_parent: Default::default(),
+                caption_location: None,
             }));
         }
     }
@@ -528,17 +615,33 @@ impl MarkdownBackend {
     /// `2 .` while a contiguous `[11]` stays `[11]`.
     fn collect_inline(&self, events: &[Event], i: &mut usize, table: bool) -> Vec<String> {
         let mut runs: Vec<String> = Vec::new();
+        // docling#4019 (2.126): a line break inside a paragraph, heading or
+        // list item is kept. A hard break joins the runs around it with `\n`
+        // (GFM `  \n` once serialized), a soft one with a space; two runs of
+        // the same formatting merge into one item across the break
+        // (`**Bold A**` ⏎ `**Bold B**` → `**Bold A Bold B**`), differently
+        // formatted ones stay separate items, the second carrying the `\n`.
+        let mut pending: Option<Break> = None;
         while *i < events.len() {
             match &events[*i] {
                 Event::Text(t) => {
+                    let before = runs.len();
                     self.push_text(t, table, &mut runs);
+                    if runs.len() > before {
+                        self.apply_break(&mut runs, pending.take(), table);
+                    }
                     *i += 1;
                 }
                 Event::SoftBreak | Event::HardBreak => {
-                    // The legacy join already inserts a space; strict concatenates,
-                    // so it needs an explicit space here.
-                    if self.strict && !table {
-                        runs.push(" ".to_string());
+                    let hard = matches!(events[*i], Event::HardBreak);
+                    if table {
+                        // A cell is one line: docling reads the raw row, where
+                        // the break is whitespace (the legacy join's space).
+                    } else if self.strict {
+                        // Strict concatenates, so the separator is explicit.
+                        runs.push(if hard { "\n" } else { " " }.to_string());
+                    } else {
+                        pending = Some(if hard { Break::Hard } else { Break::Soft });
                     }
                     *i += 1;
                 }
@@ -561,10 +664,17 @@ impl MarkdownBackend {
                     });
                     *i += 1;
                 }
-                Event::Start(Tag::Emphasis) => runs.push(self.wrap_inline(events, i, table, "*")),
-                Event::Start(Tag::Strong) => runs.push(self.wrap_inline(events, i, table, "**")),
+                Event::Start(Tag::Emphasis) => {
+                    runs.push(self.wrap_inline(events, i, table, "*"));
+                    self.apply_break(&mut runs, pending.take(), table);
+                }
+                Event::Start(Tag::Strong) => {
+                    runs.push(self.wrap_inline(events, i, table, "**"));
+                    self.apply_break(&mut runs, pending.take(), table);
+                }
                 Event::Start(Tag::Strikethrough) => {
-                    runs.push(self.wrap_inline(events, i, table, "~~"))
+                    runs.push(self.wrap_inline(events, i, table, "~~"));
+                    self.apply_break(&mut runs, pending.take(), table);
                 }
                 Event::Start(Tag::Link { dest_url, .. }) => {
                     let url = dest_url.to_string();
@@ -592,6 +702,49 @@ impl MarkdownBackend {
             }
         }
         runs
+    }
+
+    /// Resolve a pending line break once the run after it has been pushed
+    /// (legacy, non-table): the last two runs merge when they share their
+    /// formatting — both plain, or both wrapped in the same marker — with
+    /// `\n` (hard) or a space (soft) between their texts; otherwise a hard
+    /// break prefixes the new run with `\n` and a soft one is the join's space.
+    fn apply_break(&self, runs: &mut Vec<String>, pending: Option<Break>, table: bool) {
+        let Some(brk) = pending else {
+            return;
+        };
+        if table || self.strict || runs.len() < 2 {
+            return;
+        }
+        let new = runs.pop().expect("two runs");
+        let prev = runs.pop().expect("two runs");
+        let sep = match brk {
+            Break::Hard => "\n",
+            Break::Soft => " ",
+        };
+        let marker_of = |r: &str| -> Option<&'static str> {
+            ["**", "~~", "*"]
+                .into_iter()
+                .find(|m| r.len() > 2 * m.len() && r.starts_with(m) && r.ends_with(m))
+        };
+        let plain = |r: &str| !r.starts_with(['*', '~', '`', '[', '!']);
+        match (marker_of(&prev), marker_of(&new)) {
+            (None, None) if plain(&prev) && plain(&new) => {
+                runs.push(format!("{prev}{sep}{new}"));
+            }
+            (Some(m), Some(n)) if m == n => {
+                let inner_prev = &prev[m.len()..prev.len() - m.len()];
+                let inner_new = &new[m.len()..new.len() - m.len()];
+                runs.push(format!("{m}{inner_prev}{sep}{inner_new}{m}"));
+            }
+            _ => {
+                runs.push(prev);
+                runs.push(match brk {
+                    Break::Hard => format!("\n{new}"),
+                    Break::Soft => new,
+                });
+            }
+        }
     }
 
     fn wrap_inline(&self, events: &[Event], i: &mut usize, table: bool, marker: &str) -> String {
@@ -674,6 +827,13 @@ fn consume_end(events: &[Event], i: &mut usize) {
     if matches!(events.get(*i), Some(Event::End(_))) {
         *i += 1;
     }
+}
+
+/// A line break waiting for the run that follows it (see `collect_inline`).
+#[derive(Clone, Copy)]
+enum Break {
+    Soft,
+    Hard,
 }
 
 fn is_inline_start(event: &Event) -> bool {
@@ -782,14 +942,55 @@ mod tests {
     use super::*;
     use crate::format::InputFormat;
 
+    /// docling#4318: the space around inline emphasis inside a table cell
+    /// belongs to the cell (`**C** Cadre` is `C Cadre`, not `CCadre`).
+    #[test]
+    fn table_cells_keep_the_space_around_inline_emphasis() {
+        let doc = convert(
+            "| H | I |\n|---|---|\n| **C** Cadre | x |\n| foo **bar** | y |\n| **A** **B** | z |\n| *italic* and **bold** | w |\n",
+        );
+        let json: serde_json::Value = serde_json::from_str(&doc.export_to_json()).unwrap();
+        let cells: Vec<String> = json["tables"][0]["data"]["table_cells"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["text"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            cells,
+            [
+                "H",
+                "I",
+                "C Cadre",
+                "x",
+                "foo bar",
+                "y",
+                "A B",
+                "z",
+                "italic and bold",
+                "w"
+            ]
+        );
+    }
+
     fn convert(md: &str) -> DoclingDocument {
         let src = SourceDocument::from_bytes("t", InputFormat::Md, md.as_bytes().to_vec());
-        MarkdownBackend { strict: false }.convert(&src).unwrap()
+        MarkdownBackend {
+            strict: false,
+            images: Default::default(),
+        }
+        .convert(&src)
+        .unwrap()
     }
 
     fn convert_strict(md: &str) -> DoclingDocument {
         let src = SourceDocument::from_bytes("t", InputFormat::Md, md.as_bytes().to_vec());
-        let mut doc = MarkdownBackend { strict: true }.convert(&src).unwrap();
+        let mut doc = MarkdownBackend {
+            strict: true,
+            images: Default::default(),
+        }
+        .convert(&src)
+        .unwrap();
         doc.strict_markdown = true;
         doc
     }

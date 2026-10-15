@@ -10,19 +10,19 @@
 #   scripts/install/install.sh
 #
 # What it does:
-#   0. Tries the prebuilt CLI binary from the latest GitHub Release first
-#      (Linux x64/arm64) — no toolchain, no build. Falls back to source on any
-#      mismatch; DOCLING_RS_FROM_SOURCE=1 skips the fast path.
+#   0. Tries the prebuilt CLI binary from the newest GitHub Release that carries
+#      one first (Linux x64/arm64/s390x) — no toolchain, no build. Falls back to
+#      source on any mismatch; DOCLING_RS_FROM_SOURCE=1 skips the fast path.
 #   1. Checks for a Rust toolchain (>= 1.82 for the PDF crate); installs one
 #      via rustup (non-interactive) if `cargo` is missing.
 #   2. Builds the CLI in release mode (`cargo build --release -p docling-cli`).
 #   3. Installs to $DOCLING_RS_PREFIX (default /usr/local/docling.rs):
 #        bin/docling-rs          the CLI (ONNX Runtime statically linked)
-#        .models/…, .pdfium/…      fetched by scripts/install/download_dependencies.sh
+#        .models/…                fetched by scripts/install/download_dependencies.sh
 #      and symlinks it as /usr/local/bin/docling-rs.
-#   4. Writes /etc/profile.d/docling-rs.sh exporting the DOCLING_*/PDFIUM_*
+#   4. Writes /etc/profile.d/docling-rs.sh exporting the DOCLING_*
 #      paths. This is belt-and-braces only: the binary also resolves models
-#      and pdfium relative to its own (symlink-resolved) location, so the
+#      relative to its own (symlink-resolved) location, so the
 #      symlink works in pipelines that never source profile.d.
 #
 # Options (env vars):
@@ -55,7 +55,7 @@ fi
 
 # --- 0. Prebuilt binary (fast path) -------------------------------------------
 # GitHub Releases carry prebuilt CLI binaries (.github/workflows/cli-binaries.yml)
-# for Linux x64/arm64 and Windows x64 — downloading one skips the Rust toolchain
+# for Linux x64/arm64/s390x and Windows x64 — downloading one skips the Rust toolchain
 # and the multi-minute source build entirely. Any failure (no matching asset,
 # old release, no network to the API) quietly falls back to building from
 # source. DOCLING_RS_FROM_SOURCE=1 forces the source build.
@@ -64,13 +64,23 @@ if [ "${DOCLING_RS_FROM_SOURCE:-0}" != "1" ] && [ "$(uname -s)" = "Linux" ]; the
   case "$(uname -m)" in
     x86_64) TARGET="x86_64-unknown-linux-gnu" ;;
     aarch64 | arm64) TARGET="aarch64-unknown-linux-gnu" ;;
+    # IBM Z (#504): the binary loads ONNX Runtime at run time (ORT_DYLIB_PATH
+    # or .models/onnxruntime/libonnxruntime.so); without it the ML stages are
+    # unavailable, every other format converts.
+    s390x) TARGET="s390x-unknown-linux-gnu" ;;
     *) TARGET="" ;;
   esac
   if [ -n "$TARGET" ]; then
-    TAG="$(curl -fsSL "https://api.github.com/repos/docling-project/docling.rs/releases/latest" 2>/dev/null \
-      | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1 || true)"
+    # The newest release whose assets include this target's binary — not
+    # GitHub's "latest": the per-merge releases ci.yml cuts carry no binaries
+    # until release.yml publishes one, and the asset-only releases
+    # (`npm-cuda-v*`, `models-v*`) never do (#707). The API lists releases
+    # newest first; the pattern skips pre-releases (`vX.Y.Z-rc.N`).
+    ASSET="$(curl -fsSL "https://api.github.com/repos/docling-project/docling.rs/releases?per_page=50" 2>/dev/null \
+      | grep -o "\"browser_download_url\": *\"[^\"]*/docling-rs-v[0-9]*\.[0-9]*\.[0-9]*-$TARGET\.tar\.gz\"" \
+      | head -n1 | sed 's/.*"\(https:[^"]*\)"$/\1/' || true)"
+    TAG="$(printf '%s' "${ASSET:-}" | sed -n 's#.*/releases/download/\([^/]*\)/.*#\1#p')"
     if [ -n "${TAG:-}" ]; then
-      ASSET="$REPO_URL/releases/download/$TAG/docling-rs-$TAG-$TARGET.tar.gz"
       PB_DIR="$(mktemp -d)"
       if curl -fsSL "$ASSET" 2>/dev/null | tar -xz -C "$PB_DIR" 2>/dev/null \
         && [ -x "$PB_DIR/docling-rs" ]; then
@@ -89,6 +99,8 @@ if [ "${DOCLING_RS_FROM_SOURCE:-0}" != "1" ] && [ "$(uname -s)" = "Linux" ]; the
       else
         say "no prebuilt binary for $TAG/$TARGET — building from source"
       fi
+    else
+      say "no release with a prebuilt $TARGET binary found — building from source"
     fi
   fi
 fi
@@ -114,7 +126,7 @@ if [ -z "$PREBUILT_BIN" ]; then
 fi
 
 # --- 2. Sources: use the checkout we're in, else clone ------------------------
-# Needed even with a prebuilt binary: download_dependencies.sh (models + pdfium)
+# Needed even with a prebuilt binary: download_dependencies.sh (the models)
 # runs from the source tree.
 if [ -f Cargo.toml ] && [ -d crates/docling-cli ]; then
   SRC_DIR="$(pwd)"
@@ -142,12 +154,12 @@ say "installing to $PREFIX"
 $SUDO mkdir -p "$PREFIX/bin"
 $SUDO cp "${PREBUILT_BIN:-target/release/docling-rs}" "$PREFIX/bin/docling-rs"
 
-# Models + pdfium land inside the prefix; download_dependencies.sh fetches into
+# The models land inside the prefix; download_dependencies.sh fetches into
 # the *current* directory, so run it from there. It is idempotent (skips files
 # already present), so re-running the installer only fetches what's missing.
 DL_ARGS=""
 [ "${DOCLING_RS_NO_ASR:-0}" = "1" ] && DL_ARGS="--no-asr"
-say "fetching models + pdfium into $PREFIX (idempotent)"
+say "fetching models into $PREFIX (idempotent)"
 # shellcheck disable=SC2086
 (cd "$PREFIX" && $SUDO sh "$SRC_DIR/scripts/install/download_dependencies.sh" $DL_ARGS)
 
@@ -161,7 +173,7 @@ if [ -L "$BIN_DIR/docling.rs" ] && [ "$(readlink "$BIN_DIR/docling.rs")" = "$PRE
 fi
 
 # --- 5. Environment (optional convenience) --------------------------------------
-# The binary resolves .models/.pdfium next to its own location through the
+# The binary resolves .models next to its own location through the
 # symlink, so these exports are not required for `docling-rs` itself — they
 # help other tools (scripts, the Node bindings) find the same assets.
 if [ -d /etc/profile.d ] && [ -n "$SUDO" -o -w /etc/profile.d ]; then
@@ -170,7 +182,6 @@ if [ -d /etc/profile.d ] && [ -n "$SUDO" -o -w /etc/profile.d ]; then
 # docling.rs (installed by scripts/install/install.sh) — not required by the CLI
 # itself (it resolves these relative to its own binary), provided for other
 # consumers of the same model tree.
-export PDFIUM_DYNAMIC_LIB_PATH="$PREFIX/.pdfium/lib"
 export DOCLING_OCR_REC_ONNX="$PREFIX/.models/ocr_rec.onnx"
 export DOCLING_OCR_DICT="$PREFIX/.models/ppocr_keys_v1.txt"
 export DOCLING_TABLEFORMER_ENCODER="$PREFIX/.models/tableformer/encoder.onnx"
@@ -186,4 +197,4 @@ printf '# docling.rs\n\ninstalled.\n' > "$TMP_MD"
 rm -f "$TMP_MD"
 
 say "done. Try:  docling-rs your.pdf > out.md"
-say "layout: $PREFIX  (binary, .models/, .pdfium/); uninstall: rm -rf $PREFIX $BIN_DIR/docling-rs /etc/profile.d/docling-rs.sh"
+say "layout: $PREFIX  (binary, .models/); uninstall: rm -rf $PREFIX $BIN_DIR/docling-rs /etc/profile.d/docling-rs.sh"

@@ -37,7 +37,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.69.1"
+version = "2.26.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/docling-project/docling.rs"
@@ -45,12 +45,13 @@ homepage = "https://github.com/docling-project/docling.rs"
 readme = "README.md"
 keywords = ["docling", "document", "pdf", "markdown", "converter"]
 categories = ["text-processing", "parser-implementations"]
-# Honest floor for the crates that carry the PDF/ASR pipeline: the ort
-# 2.0.0-rc.13 dependency requires rustc 1.88. docling-core
+# Honest floor for the crates that carry the PDF/ASR pipeline: the
+# hayro-jpeg2000 decoder (JPXDecode images in the page renderer, #598)
+# requires rustc 1.92; ort 2.0.0-rc.13 required 1.88 before it. docling-core
 # overrides this with its own lower floor. CI's `msrv` job validates both
 # against the committed Cargo.lock — bump here when a dependency update PR
 # turns that job red and the new floor is acceptable.
-rust-version = "1.88"
+rust-version = "1.92"
 
 [profile.release]
 lto = "thin"

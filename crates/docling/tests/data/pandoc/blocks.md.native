@@ -1,0 +1,98 @@
+[ Para [ Str "Unordered" , Space , Str "list:" ]
+, BulletList [ [ Plain [ Str "foo" ] ] ]
+, Para
+    [ Str "Empty"
+    , Space
+    , Str "unordered"
+    , Space
+    , Str "list:"
+    ]
+, Para [ Str "Ordered" , Space , Str "list:" ]
+, OrderedList
+    ( 1 , Decimal , Period ) [ [ Plain [ Str "bar" ] ] ]
+, Para
+    [ Str "Empty"
+    , Space
+    , Str "ordered"
+    , Space
+    , Str "list:"
+    ]
+, Para [ Str "Heading:" ]
+, Header
+    1 ( "" , [] , [] ) [ Str "my" , Space , Str "heading" ]
+, Para [ Str "Empty" , Space , Str "heading:" ]
+, Para
+    [ Str "Setext"
+    , Space
+    , Str "heading"
+    , Space
+    , Str "level"
+    , Space
+    , Str "1:"
+    ]
+, Header
+    1
+    ( "" , [] , [] )
+    [ Str "my"
+    , Space
+    , Str "setext"
+    , Space
+    , Str "heading"
+    , Space
+    , Str "level"
+    , Space
+    , Str "1"
+    ]
+, Para
+    [ Str "Setext"
+    , Space
+    , Str "heading"
+    , Space
+    , Str "level"
+    , Space
+    , Str "2:"
+    ]
+, Header
+    2
+    ( "" , [] , [] )
+    [ Str "my"
+    , Space
+    , Str "setext"
+    , Space
+    , Str "heading"
+    , Space
+    , Str "level"
+    , Space
+    , Str "2"
+    ]
+, Para
+    [ Str "Indented"
+    , Space
+    , Str "code"
+    , Space
+    , Str "block:"
+    ]
+, CodeBlock ( "" , [] , [] ) "print(\"Hi!\")"
+, Para
+    [ Str "Empty"
+    , Space
+    , Str "indented"
+    , Space
+    , Str "code"
+    , Space
+    , Str "block:"
+    ]
+, Para
+    [ Str "Fenced" , Space , Str "code" , Space , Str "block:" ]
+, CodeBlock
+    ( "" , [ "python" ] , [] ) "print(\"Hello world!\")"
+, Para
+    [ Str "Empty"
+    , Space
+    , Str "fenced"
+    , Space
+    , Str "code"
+    , Space
+    , Str "block:"
+    ]
+]

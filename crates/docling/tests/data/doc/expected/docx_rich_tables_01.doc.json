@@ -43,6 +43,9 @@
       },
       {
         "$ref": "#/tables/1"
+      },
+      {
+        "$ref": "#/texts/8"
       }
     ],
     "content_layer": "body",
@@ -168,6 +171,18 @@
       "prov": [],
       "orig": "**Phase 2**",
       "text": "**Phase 2**"
+    },
+    {
+      "self_ref": "#/texts/8",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "furniture",
+      "label": "page_header",
+      "prov": [],
+      "orig": "ISO/IEC JTC 1",
+      "text": "ISO/IEC JTC 1"
     }
   ],
   "pictures": [],
@@ -245,7 +260,7 @@
             "end_row_offset_idx": 2,
             "start_col_offset_idx": 1,
             "end_col_offset_idx": 2,
-            "text": "Reorganize into the mandatory sequence:\n\n• Foreword (Mandatory, unnumbered)\n\n• Introduction (Optional, unnumbered)\n\n• 1 Scope (Mandatory, Clause 1)\n\n• 2 Normative references (Mandatory, Clause 2)\n\n• 3 Terms and definitions (Mandatory, Clause 3)\n\n• 4 Symbols and abbreviated terms (Mandatory, Clause 4)\n\n• 5 Conformance (Mandatory, Clause 5)\n\n• 6 Technical Clauses...\n\n• Annex A (normative)\n\n• Annex B/C (informative)\n\n• Bibliography (Mandatory, absolute end)\n\n",
+            "text": "Reorganize into the mandatory sequence:\n\n• Foreword (Mandatory, unnumbered)\n\n• Introduction (Optional, unnumbered)\n\n• 1 Scope (Mandatory, Clause 1)\n\n• 2 Normative references (Mandatory, Clause 2)\n\n• 3 Terms and definitions (Mandatory, Clause 3)\n\n• 4 Symbols and abbreviated terms (Mandatory, Clause 4)\n\n• 5 Conformance (Mandatory, Clause 5)\n\n• 6 Technical Clauses...\n\n• Annex A (normative)\n\n• Annex B/C (informative)\n\n• Bibliography (Mandatory, absolute end)",
             "column_header": false,
             "row_header": false,
             "row_section": false,
@@ -1189,7 +1204,7 @@
               "end_row_offset_idx": 2,
               "start_col_offset_idx": 1,
               "end_col_offset_idx": 2,
-              "text": "Reorganize into the mandatory sequence:\n\n• Foreword (Mandatory, unnumbered)\n\n• Introduction (Optional, unnumbered)\n\n• 1 Scope (Mandatory, Clause 1)\n\n• 2 Normative references (Mandatory, Clause 2)\n\n• 3 Terms and definitions (Mandatory, Clause 3)\n\n• 4 Symbols and abbreviated terms (Mandatory, Clause 4)\n\n• 5 Conformance (Mandatory, Clause 5)\n\n• 6 Technical Clauses...\n\n• Annex A (normative)\n\n• Annex B/C (informative)\n\n• Bibliography (Mandatory, absolute end)\n\n",
+              "text": "Reorganize into the mandatory sequence:\n\n• Foreword (Mandatory, unnumbered)\n\n• Introduction (Optional, unnumbered)\n\n• 1 Scope (Mandatory, Clause 1)\n\n• 2 Normative references (Mandatory, Clause 2)\n\n• 3 Terms and definitions (Mandatory, Clause 3)\n\n• 4 Symbols and abbreviated terms (Mandatory, Clause 4)\n\n• 5 Conformance (Mandatory, Clause 5)\n\n• 6 Technical Clauses...\n\n• Annex A (normative)\n\n• Annex B/C (informative)\n\n• Bibliography (Mandatory, absolute end)",
               "column_header": false,
               "row_header": false,
               "row_section": false,

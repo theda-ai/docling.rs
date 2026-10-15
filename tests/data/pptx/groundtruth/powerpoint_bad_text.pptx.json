@@ -3,7 +3,7 @@
   "version": "1.10.0",
   "name": "powerpoint_bad_text",
   "origin": {
-    "mimetype": "application/vnd.ms-powerpoint",
+    "mimetype": "application/vnd.openxmlformats-officedocument.presentationml.template",
     "binary_hash": 1443005848482130016,
     "filename": "powerpoint_bad_text.pptx"
   },
@@ -55,10 +55,10 @@
           "page_no": 1,
           "bbox": {
             "l": 1041400.0,
-            "t": 4582390.0,
+            "t": 1689099.0,
             "r": 8083550.0,
-            "b": 1689099.0,
-            "coord_origin": "BOTTOMLEFT"
+            "b": 4582390.0,
+            "coord_origin": "TOPLEFT"
           },
           "charspan": [
             0,

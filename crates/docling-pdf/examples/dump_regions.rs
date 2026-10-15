@@ -32,9 +32,10 @@ fn main() {
                 .rev()
                 .collect();
             println!(
-                "p{} {:>14} t={:6.1} b={:6.1} | …{}",
+                "p{} {:>14} {:.2} t={:6.1} b={:6.1} | …{}",
                 pi + 1,
                 r.label,
+                r.score,
                 r.t,
                 r.b,
                 tail

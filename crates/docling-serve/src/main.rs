@@ -2,7 +2,7 @@
 //!
 //! Usage: docling-serve [--addr HOST:PORT] [--concurrency N] [--max-body-mb N]
 //!                      [--queue-size N] [--result-ttl SECS] [--max-memory-mb N]
-//!                      [--warmup] [--allow-url-fetch] [--strict]
+//!                      [--warmup] [--allow-url-fetch] [--allow-local-images] [--strict] [--api-key KEY]
 //!
 //!   --addr HOST:PORT  bind address (default: 127.0.0.1:5001). Bind 0.0.0.0
 //!                     only behind a trusted proxy.
@@ -14,19 +14,30 @@
 //!   --result-ttl SECS how long a finished async job's result stays fetchable
 //!                     (default: 600)
 //!   --warmup          load the PDF/image models at startup; /ready returns
-//!                     503 until they are loaded
+//!                     503 until they are loaded (and stays 503 if they fail)
 //!   --allow-url-fetch accept {"url": …} inputs (outbound fetch — SSRF surface;
 //!                     off by default). A private/loopback/link-local IP guard
 //!                     applies even when enabled.
+//!   --allow-local-images
+//!                      accept image_sources=local (#646): a request may then
+//!                      make the converter read image files next to a
+//!                      server-side source. Off by default (400).
 //!   --no-url-fetch    accepted for compatibility (URL fetch is now off by
 //!                     default; this is a no-op)
 //!   --strict          default to the cleaner strict Markdown dialect
+//!   --api-key KEY     require `X-Api-Key: KEY` on every /v1 request (#615,
+//!                     docling-serve's DOCLING_SERVE_API_KEY, which is read
+//!                     when the flag is absent — prefer it: a flag shows up in
+//!                     the process list)
 
 use std::process::ExitCode;
 
 use docling_serve::{serve, ServeConfig};
 
 fn main() -> ExitCode {
+    // #664: a CUDA build started by bare name re-executes under its absolute
+    // path, or ONNX Runtime looks for its providers in the working directory.
+    docling::reexec_for_provider_libraries();
     // #263: a long-lived server defaults the ONNX CPU arena OFF — measured
     // here, a warm server's retained RSS drops ~3x (2.0 GB -> 0.7 GB after
     // large-PDF requests) at no measurable latency cost, and stops ratcheting
@@ -69,10 +80,17 @@ fn main() -> ExitCode {
             },
             "--warmup" => cfg.warmup = true,
             "--allow-url-fetch" => cfg.allow_url_fetch = true,
+            // #646: `image_sources=local` reads files next to a server-side
+            // source; an operator opts in.
+            "--allow-local-images" => cfg.allow_local_images = true,
             // URL fetch is off by default now; keep the old flag as a no-op so
             // existing invocations don't break.
             "--no-url-fetch" => cfg.allow_url_fetch = false,
             "--strict" => cfg.strict = true,
+            "--api-key" => match args.next() {
+                Some(v) if !v.is_empty() => cfg.api_key = Some(v),
+                _ => return usage("--api-key needs a key"),
+            },
             "--help" | "-h" => return usage(""),
             other => return usage(&format!("unknown argument '{other}'")),
         }
@@ -99,7 +117,7 @@ fn usage(err: &str) -> ExitCode {
         eprintln!("error: {err}");
     }
     eprintln!(
-        "usage: docling-serve [--addr HOST:PORT] [--concurrency N] [--max-body-mb N] [--queue-size N] [--result-ttl SECS] [--max-memory-mb N] [--warmup] [--allow-url-fetch] [--strict]"
+        "usage: docling-serve [--addr HOST:PORT] [--concurrency N] [--max-body-mb N] [--queue-size N] [--result-ttl SECS] [--max-memory-mb N] [--warmup] [--allow-url-fetch] [--allow-local-images] [--strict] [--api-key KEY]"
     );
     if err.is_empty() {
         ExitCode::SUCCESS

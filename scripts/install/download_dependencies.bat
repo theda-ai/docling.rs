@@ -1,17 +1,20 @@
 @echo off
 rem Windows twin of download_dependencies.sh: fetch the ML models the PDF/image
-rem pipeline needs into .models\ and pdfium.dll into .pdfium\lib\, so a native
-rem (non-WSL) build runs out of the box:
+rem pipeline needs into .models\, so a native (non-WSL) build runs out of the
+rem box (the PDF pages themselves are parsed and rendered in pure Rust):
 rem
 rem     cargo build --release -p docling-cli
 rem     target\release\docling-rs paper.pdf
 rem
-rem Everything lands relative to the repo root (the binary resolves .models\ and
-rem .pdfium\lib next to the CWD or the executable, no env vars needed). The
-rem models come from the same GitHub release the Linux script uses; pdfium.dll
-rem comes straight from pdfium-binaries (the release only hosts the Linux .so).
+rem Everything lands relative to the repo root (the binary resolves .models\
+rem next to the CWD or the executable, no env vars needed). The models come
+rem from the same GitHub release the Linux script uses.
 rem
-rem Usage: scripts\install\download_dependencies.bat [--no-asr] [--no-int8] [--force]
+rem Usage: scripts\install\download_dependencies.bat [--cli] [--no-asr] [--no-int8] [--force]
+rem --cli installs into the cargo install root (%CARGO_INSTALL_ROOT%, else
+rem %CARGO_HOME%, else %USERPROFILE%\.cargo) instead of the repo root: its
+rem bin\ is where `cargo install docling-cli` puts docling-rs.exe, which looks
+rem for .models\ next to itself and one level up, from any directory.
 rem Needs curl.exe and tar.exe (both ship with Windows 10 1803+).
 setlocal enabledelayedexpansion
 
@@ -21,26 +24,37 @@ set "ASR_BASE_URL=https://huggingface.co/onnx-community/whisper-tiny/resolve/mai
 set "OCR_EN_URL=https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv3/en_PP-OCRv3_rec_infer.onnx"
 set "EN_DICT_URL=https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/main/ppocr/utils/en_dict.txt"
 set "OCR_DET_URL=https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv6/det/PP-OCRv6_det_small.onnx"
-set "PDFIUM_URL=https://github.com/bblanchon/pdfium-binaries/releases/latest/download/pdfium-win-x64.tgz"
+set "OCR_REC_V6_URL=https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv6/rec/PP-OCRv6_rec_small.onnx"
+set "OCR_REC_V6_DICT_URL=https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/paddle/PP-OCRv6/rec/PP-OCRv6_rec_small/ppocrv6_dict.txt"
 
 set WITH_ASR=1
 set WITH_INT8=1
 set FORCE=0
+set INTO_CLI=0
 :parse
 if "%~1"=="" goto parsed
 if "%~1"=="--no-asr"  set WITH_ASR=0
 if "%~1"=="--no-int8" set WITH_INT8=0
 if "%~1"=="--force"   set FORCE=1
+if "%~1"=="--cli"     set INTO_CLI=1
 if "%~1"=="--help" (
-  echo usage: download_dependencies.bat [--no-asr] [--no-int8] [--force]
+  echo usage: download_dependencies.bat [--cli] [--no-asr] [--no-int8] [--force]
   exit /b 0
 )
 shift
 goto parse
 :parsed
 
-rem repo root = two levels above this script
+rem repo root = two levels above this script; --cli: the cargo install root
 cd /d "%~dp0..\.."
+if %INTO_CLI%==1 (
+  set "CLI_ROOT=%USERPROFILE%\.cargo"
+  if not "%CARGO_HOME%"=="" set "CLI_ROOT=%CARGO_HOME%"
+  if not "%CARGO_INSTALL_ROOT%"=="" set "CLI_ROOT=%CARGO_INSTALL_ROOT%"
+  if not exist "!CLI_ROOT!" mkdir "!CLI_ROOT!"
+  cd /d "!CLI_ROOT!"
+  echo --cli: installing into !CLI_ROOT!\.models ^(beside bin\, where cargo install puts docling-rs.exe^)
+)
 
 where curl >nul 2>nul || (echo error: curl.exe not found ^(ships with Windows 10 1803+^) & exit /b 1)
 
@@ -55,25 +69,9 @@ set "CURL_TIMEOUTS=--connect-timeout 30 --speed-limit 1024 --speed-time 60 --ret
 if not exist .models\tableformer mkdir .models\tableformer
 if not exist .models\asr mkdir .models\asr
 if not exist .models\chunk mkdir .models\chunk
-if not exist .pdfium\lib mkdir .pdfium\lib
 
 echo fetching docling.rs ML dependencies from %BASE_URL%
 
-rem --- pdfium (native DLL, not re-hosted in the models release) --------------
-rem No "if exist A if COND (...) else (...)" here: in cmd the else binds to the
-rem INNER if, so when the file is missing neither branch runs at all.
-if %FORCE%==1 goto :pdfium_dl
-if not exist .pdfium\lib\pdfium.dll goto :pdfium_dl
-echo   = .pdfium\lib\pdfium.dll (already present)
-goto :pdfium_done
-:pdfium_dl
-echo   ^> .pdfium\lib\pdfium.dll
-curl -fsSL %CURL_TIMEOUTS% -o "%TEMP%\pdfium-win-x64.tgz" "%PDFIUM_URL%" || goto :fail
-tar -xzf "%TEMP%\pdfium-win-x64.tgz" -C .pdfium bin/pdfium.dll || goto :fail
-move /y .pdfium\bin\pdfium.dll .pdfium\lib\pdfium.dll >nul
-rmdir .pdfium\bin 2>nul
-del "%TEMP%\pdfium-win-x64.tgz" 2>nul
-:pdfium_done
 
 rem --- required models --------------------------------------------------------
 call :fetch "%BASE_URL%/layout_heron.onnx"              .models\layout_heron.onnx           || goto :fail
@@ -93,6 +91,13 @@ rem region on bitmap pages. Release first, RapidOCR's hub second; optional -
 rem without it OCR stays region-scoped.
 call :fetch_opt "%BASE_URL%/ocr_det.onnx"               .models\ocr_det.onnx
 if not exist .models\ocr_det.onnx call :fetch_opt "%OCR_DET_URL%" .models\ocr_det.onnx
+rem PP-OCRv6 recognizer + dictionary (#570): RapidOCR's / docling's
+rem multilingual recognizer, preferred over the PP-OCRv3 pairs when present.
+rem Release first, RapidOCR's hub second; optional - the v3 pairs run without it.
+call :fetch_opt "%BASE_URL%/ocr_rec_v6.onnx"            .models\ocr_rec_v6.onnx
+if not exist .models\ocr_rec_v6.onnx call :fetch_opt "%OCR_REC_V6_URL%" .models\ocr_rec_v6.onnx
+call :fetch_opt "%BASE_URL%/ocr_rec_v6_dict.txt"        .models\ocr_rec_v6_dict.txt
+if not exist .models\ocr_rec_v6_dict.txt call :fetch_opt "%OCR_REC_V6_DICT_URL%" .models\ocr_rec_v6_dict.txt
 call :fetch "%BASE_URL%/encoder.onnx"                   .models\tableformer\encoder.onnx    || goto :fail
 call :fetch_opt "%BASE_URL%/encoder.onnx.data"          .models\tableformer\encoder.onnx.data
 call :fetch "%BASE_URL%/decoder.onnx"                   .models\tableformer\decoder.onnx    || goto :fail
@@ -136,7 +141,7 @@ if %WITH_INT8%==1 (
   if exist .models\layout_heron_int8.onnx echo int8 models present - used by default (DOCLING_RS_FP32=1 forces full precision)
 )
 
-echo done - .models\ and .pdfium\lib populated in %CD%
+echo done - .models\ populated in %CD%
 exit /b 0
 
 :fetch

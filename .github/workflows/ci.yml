@@ -66,6 +66,13 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
+            # ort-sys's extracted prebuilt ONNX Runtime (`<cache dir>/
+            # ort.pyke.io/dfbin/<target>/<hash>`): present, the build script
+            # skips the cdn.pyke.io download altogether. One path per OS;
+            # actions/cache ignores the ones that do not exist.
+            ~/.cache/ort.pyke.io
+            ~/Library/Caches/ort.pyke.io
+            ~/AppData/Local/ort.pyke.io
           key: ${{ runner.os }}-cargo-v2-lint-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-v2-lint-
 
@@ -73,7 +80,8 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        shell: bash
+        run: scripts/ci/cargo_retry_ort.sh cargo clippy --workspace --all-targets -- -D warnings
 
       # actions/cache saves target/ in its post-step, i.e. after this runs:
       # drop what is cheap to recreate (incremental data shouldn't exist with
@@ -107,16 +115,36 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
+            # ort-sys's extracted prebuilt ONNX Runtime (`<cache dir>/
+            # ort.pyke.io/dfbin/<target>/<hash>`): present, the build script
+            # skips the cdn.pyke.io download altogether. One path per OS;
+            # actions/cache ignores the ones that do not exist.
+            ~/.cache/ort.pyke.io
+            ~/Library/Caches/ort.pyke.io
+            ~/AppData/Local/ort.pyke.io
           key: ${{ runner.os }}-cargo-v2-test-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-v2-test-
 
+      # The one model this job fetches (17 MB): the picture classifier, so
+      # docling-pdf's `picture_classifier_tells_pictures_apart` runs on an
+      # x86_64 runner — #517 was an x86 NCHWc miscompile in ONNX Runtime
+      # 1.26–1.28 that returned one distribution for every picture. A failed
+      # download only skips that test.
+      - name: Fetch the picture classifier
+        run: |
+          mkdir -p .models
+          curl -fsSL --retry 3 -o .models/picture_classifier.onnx \
+            https://github.com/docling-project/docling.rs/releases/download/models-v1/picture_classifier.onnx \
+            || { rm -f .models/picture_classifier.onnx; echo "::warning::picture classifier download failed; its test skips"; }
+
       # Pure-Rust unit tests + the output-regression suite. The PDF/image/METS
-      # snapshot tests need pdfium + the ONNX models, so they are NOT run here —
-      # this job downloads no ML models and stays fast. --locked doubles as the
+      # snapshot tests need the layout/OCR/TableFormer models, so they are NOT
+      # run here — this job stays fast. --locked doubles as the
       # guard that keeps the committed Cargo.lock in sync with the manifests
       # (a Cargo.toml change without its lock update fails here).
       - name: Test
-        run: cargo test --workspace --locked
+        shell: bash
+        run: scripts/ci/cargo_retry_ort.sh cargo test --workspace --locked
 
       # actions/cache saves target/ in its post-step, i.e. after this runs:
       # drop what is cheap to recreate (incremental data shouldn't exist with
@@ -139,11 +167,11 @@ jobs:
   # manifests — a weekly dependency-update PR that pulls a dep with a higher
   # floor turns this job red, forcing a conscious pin or floor bump.
   msrv:
-    name: msrv (1.85 core · 1.88 workspace)
+    name: msrv (1.85 core · 1.92 workspace)
     runs-on: ubuntu-latest
     env:
       MSRV_CORE: "1.85"
-      MSRV_WORKSPACE: "1.88"
+      MSRV_WORKSPACE: "1.92"
     steps:
       - uses: actions/checkout@v7
 
@@ -157,6 +185,13 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
+            # ort-sys's extracted prebuilt ONNX Runtime (`<cache dir>/
+            # ort.pyke.io/dfbin/<target>/<hash>`): present, the build script
+            # skips the cdn.pyke.io download altogether. One path per OS;
+            # actions/cache ignores the ones that do not exist.
+            ~/.cache/ort.pyke.io
+            ~/Library/Caches/ort.pyke.io
+            ~/AppData/Local/ort.pyke.io
           key: ${{ runner.os }}-cargo-v2-msrv-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-v2-msrv-
 
@@ -164,7 +199,8 @@ jobs:
         run: cargo +${{ env.MSRV_CORE }} check -p docling-core --locked
 
       - name: Check workspace on ${{ env.MSRV_WORKSPACE }}
-        run: cargo +${{ env.MSRV_WORKSPACE }} check --workspace --locked
+        shell: bash
+        run: scripts/ci/cargo_retry_ort.sh cargo +${{ env.MSRV_WORKSPACE }} check --workspace --locked
 
       # actions/cache saves target/ in its post-step, i.e. after this runs:
       # drop what is cheap to recreate (incremental data shouldn't exist with
@@ -183,7 +219,11 @@ jobs:
   # runners: `cargo check` proves the feature plumbing and the EP registration
   # code compile against the matching `ort` feature set. Each provider is
   # checked on the platform its ONNX Runtime binaries exist for — actually
-  # *running* on GPU is out of scope for CI (no GPU hardware here).
+  # *running* on GPU is out of scope for CI (no GPU hardware here). The
+  # cargo steps run through `cargo_retry_ort.sh`: each provider's ONNX
+  # Runtime is a separate prebuilt archive ort-sys fetches from cdn.pyke.io,
+  # and a dropped connection there ("Peer disconnected") is the one failure
+  # worth a second attempt — the extracted archive is cached across runs.
   ep-features:
     name: check (${{ matrix.features }}, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -220,19 +260,28 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
+            # ort-sys's extracted prebuilt ONNX Runtime (`<cache dir>/
+            # ort.pyke.io/dfbin/<target>/<hash>`): present, the build script
+            # skips the cdn.pyke.io download altogether. One path per OS;
+            # actions/cache ignores the ones that do not exist.
+            ~/.cache/ort.pyke.io
+            ~/Library/Caches/ort.pyke.io
+            ~/AppData/Local/ort.pyke.io
           key: ${{ runner.os }}-cargo-v2-ep-${{ matrix.slug }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-v2-ep-${{ matrix.slug }}-
 
       - name: Check docling-cli with GPU features
-        run: cargo check -p docling-cli --features "${{ matrix.features }}"
+        shell: bash
+        run: scripts/ci/cargo_retry_ort.sh cargo check -p docling-cli --features "${{ matrix.features }}"
 
       # docling-rag mirrors the same EP features (ingest conversion + the
-      # onnx-embed embedder session route through docling-pdf's ep module).
+      # onnx-embed embedder session route through docling-onnx).
       - name: Check docling-rag with GPU features
-        run: cargo check -p docling-rag --features "${{ matrix.features }},onnx-embed"
+        shell: bash
+        run: scripts/ci/cargo_retry_ort.sh cargo check -p docling-rag --features "${{ matrix.features }},onnx-embed"
 
-      - name: Test docling-pdf EP selection with GPU features
-        run: 'cargo test -p docling-pdf --lib --features "${{ matrix.features }}" ep::'
+      - name: Test docling-onnx EP selection with GPU features
+        run: 'cargo test -p docling-onnx --lib --features "${{ matrix.features }}"'
 
       # actions/cache saves target/ in its post-step, i.e. after this runs:
       # drop what is cheap to recreate (incremental data shouldn't exist with
@@ -249,7 +298,7 @@ jobs:
 
   # The declarative converters compile for the browser (#79): check the
   # feature-sliced `docling` on wasm32, build the wasm-bindgen crate, and log
-  # the gzipped module size (the number docs/README quote — ~1.9 MB).
+  # the gzipped module size (the number docs/README quote — ~3.4 MB).
   wasm:
     name: wasm32 (declarative converters)
     runs-on: ubuntu-latest
@@ -302,6 +351,81 @@ jobs:
                  target/release/examples target/release/incremental
           find target/debug target/release -maxdepth 1 -type f ! -name '*.d' -size +5M -exec rm -f {} + 2>/dev/null || true
 
+  # IBM Z (#504): cross-check the s390x target — the only big-endian Tier 2
+  # target, so a byte-order assumption anywhere in the serializers or the PDF
+  # raster shows up here. On a pull request that is all this job does (two
+  # `cargo check`s, a couple of minutes with a warm cache). On a master push
+  # or a manual run it also runs docling-core's unit tests as s390x binaries
+  # under qemu-user and builds the CLI natively with `ort-load-dynamic` —
+  # pyke ships no ONNX Runtime for s390x, so that build dlopens the library
+  # at run time — to show the feature degrades: docling-onnx's loader test
+  # fails with the lookup message instead of ort's panic when no runtime is
+  # on the machine, and the CLI converts a DOCX in that state (a PDF would
+  # stop at the missing models first — CI has none). Those two steps are
+  # the slow part (a cold debug build of the whole CLI), hence not per PR.
+  s390x:
+    name: s390x (cross-check · qemu tests · ort-load-dynamic)
+    runs-on: ubuntu-24.04
+    env:
+      CARGO_TARGET_S390X_UNKNOWN_LINUX_GNU_LINKER: s390x-linux-gnu-gcc
+      CARGO_TARGET_S390X_UNKNOWN_LINUX_GNU_RUNNER: qemu-s390x-static -L /usr/s390x-linux-gnu
+      CC_s390x_unknown_linux_gnu: s390x-linux-gnu-gcc
+      CXX_s390x_unknown_linux_gnu: s390x-linux-gnu-g++
+      AR_s390x_unknown_linux_gnu: s390x-linux-gnu-ar
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust (stable + s390x target) and the cross toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add s390x-unknown-linux-gnu
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-s390x-linux-gnu g++-s390x-linux-gnu qemu-user-static
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+            # ort-sys's extracted prebuilt ONNX Runtime (`<cache dir>/
+            # ort.pyke.io/dfbin/<target>/<hash>`): present, the build script
+            # skips the cdn.pyke.io download altogether. One path per OS;
+            # actions/cache ignores the ones that do not exist.
+            ~/.cache/ort.pyke.io
+            ~/Library/Caches/ort.pyke.io
+            ~/AppData/Local/ort.pyke.io
+          key: ${{ runner.os }}-cargo-v2-s390x-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-v2-s390x-
+
+      - name: Check docling (pdf-text) for s390x
+        run: cargo check -p docling-core -p docling --no-default-features --features pdf-text --target s390x-unknown-linux-gnu --locked
+
+      - name: Check docling-cli (ort-load-dynamic) for s390x
+        run: cargo check -p docling-cli --features ort-load-dynamic --target s390x-unknown-linux-gnu --locked
+
+      - name: docling-core unit tests as s390x binaries (qemu)
+        if: github.event_name != 'pull_request'
+        run: cargo test -p docling-core --lib --target s390x-unknown-linux-gnu --locked
+
+      - name: ort-load-dynamic degrades without a runtime (native)
+        if: github.event_name != 'pull_request'
+        run: |
+          cargo test -p docling-onnx --features load-dynamic --locked
+          cargo build -p docling-cli --features ort-load-dynamic --locked
+          ORT_DYLIB_PATH=/nonexistent/libonnxruntime.so ./target/debug/docling-rs tests/data/docx/sources/word_tables.docx > out.md
+          grep -q "Header 0.0" out.md
+
+      - name: Trim target before cache save
+        if: always()
+        shell: bash
+        run: |
+          rm -rf target/debug/examples target/debug/incremental \
+                 target/release/examples target/release/incremental
+          find target/debug target/release -maxdepth 1 -type f ! -name '*.d' -size +5M -exec rm -f {} + 2>/dev/null || true
+
   publish:
     name: release & publish
     needs: [lint, test]
@@ -332,6 +456,13 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
+            # ort-sys's extracted prebuilt ONNX Runtime (`<cache dir>/
+            # ort.pyke.io/dfbin/<target>/<hash>`): present, the build script
+            # skips the cdn.pyke.io download altogether. One path per OS;
+            # actions/cache ignores the ones that do not exist.
+            ~/.cache/ort.pyke.io
+            ~/Library/Caches/ort.pyke.io
+            ~/AppData/Local/ort.pyke.io
           key: ${{ runner.os }}-cargo-v2-publish-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-v2-publish-
 
@@ -356,7 +487,10 @@ jobs:
       # list it assembled as the description. Skipped when the release step was a
       # no-op (no release-worthy commits). Idempotent: if a release for the tag
       # already exists (e.g. a forced re-publish), refresh its notes instead of
-      # failing.
+      # failing. Not marked latest: nothing is published to PyPI, npm, GHCR or
+      # the release's assets until the maintainer runs release.yml for it, which
+      # then marks it latest (install.sh itself takes the newest release that
+      # has its binary, #707).
       - name: Create GitHub Release
         if: steps.release.outputs.released == 'true'
         env:
@@ -367,7 +501,7 @@ jobs:
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release edit "$tag" --title "$tag" --notes-file "$notes"
           else
-            gh release create "$tag" --title "$tag" --notes-file "$notes" --verify-tag
+            gh release create "$tag" --title "$tag" --notes-file "$notes" --verify-tag --latest=false
           fi
 
       # actions/cache saves target/ in its post-step, i.e. after this runs:

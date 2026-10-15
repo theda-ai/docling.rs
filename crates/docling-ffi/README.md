@@ -25,7 +25,7 @@ docling_result_free(r);
 ```
 
 - The result is never `NULL`; exactly one of output/error is set.
-- Output is NUL-terminated, so `to` = `md` / `json` / `latex` reads as a plain
+- Output is NUL-terminated, so `to` = `md` / `json` / `text` / `latex` / `html` / `pandoc` / `vtt` reads as a plain
   C string; `to` = `dclx` is a binary zip — always pair
   `docling_result_output()` with `docling_result_output_len()` there.
 - `filename` selects the input format by extension (same table as the CLI).
@@ -34,33 +34,46 @@ docling_result_free(r);
 
 ## Options
 
-`options_json` is one JSON object (`NULL` or `""` = defaults) whose keys
-mirror [docling-serve](../docling-serve)'s request options:
+`options_json` is one JSON object (`NULL` or `""` = defaults): the output
+selection below plus **every conversion option of
+[`docling::ConvertOptions`](../docling/src/options.rs)** — the one option
+set the CLI, docling-serve, the wasm module and the Python/Node bindings
+share (#577), with the same validation rules and the same engine defaults.
+The full list with each surface's spelling is
+[`docs/OPTIONS.md`](../../docs/OPTIONS.md); the keys here are its "wire"
+column.
 
 | Key | Values | Meaning |
 |---|---|---|
-| `to` | `md` (default) \| `json` \| `dclx` \| `latex` | Output format (`latex` = docling 2.124's LaTeX document, #317) |
-| `strict` | bool | Docling-faithful Markdown instead of the readable default |
+| `to` | `md` (default) \| `json` \| `text` \| `dclx` \| `latex` \| `html` \| `pandoc` \| `vtt` | Output format (`latex` = docling 2.124's LaTeX document, #317; `pandoc` = Pandoc's JSON AST for `pandoc -f json`, #515; `vtt` = WebVTT subtitles, docling's `--to vtt`, #614) |
 | `images` | `placeholder` (default) \| `embedded` | Pictures in Markdown: comment placeholder or base64 data URIs |
-| `no_ocr`, `skip_ocr`, `force_full_page_ocr`, `no_table_former`, `no_text_panels`, `heading_hierarchy` | bool | PDF/image pipeline switches (`skip_ocr` #244: layout + TableFormer, never OCR; `heading_hierarchy` #302: infer section-header levels) |
-| `ocr_mode` | `default` \| `full_page` \| `layout_regions` \| `pdf_aware_layout_regions` | Which regions feed the OCR (docling's `OcrMode`, #254) |
-| `ocr_scale` | float | OCR render scale in px per PDF point (docling's default 3; unset reads the 2.0 px/pt pipeline render) |
-| `compact_tables`, `skip_empty_cells` | bool | Unpadded Markdown tables / drop empty cells from sparse spreadsheet grids (#271) |
-| `fetch_images` | bool | Resolve external `<img src>` for HTML/EPUB (the embedder owns its network policy) |
-| `asr_model`, `asr_lang` | string | Whisper preset / transcription language for audio & video |
-| `video_frames` | int | Max sampled video frames (0 = transcript only) |
-| `pages` | `"A-B"` or `"N"` | PDF page window (1-based inclusive) |
-| `ocr_lang` | `en` (default) \| `ch` | OCR recognition language |
+| `strict`, `compact_tables`, `page_break_placeholder` | bool, bool, string | Markdown shaping: docling-faithful Markdown; unpadded tables (#271); text between pages |
+| `fetch_images`, `list_attachments`, `skip_empty_cells`, `ebcdic_layout`, `encoding`, `ipynb_outputs`, `xbrl_taxonomy`, `use_web_browser` | — | Declarative formats: external `<img src>` (the embedder owns its network policy; the alias of `image_sources=remote`); the email Attachments section (#251); sparse spreadsheet grids (#271); the EBCDIC copybook (#252); text encoding; Jupyter notebook outputs (#673: `none` \| `text`); the XBRL taxonomy directory; headless-browser HTML pre-render |
+| `image_sources`, `image_hosts`, `max_image_bytes`, `max_images`, `max_image_total_mb`, `min_image_bytes` | string, string list, int, int, int, int | The image-source policy (#646): which references resolve (`none` \| `embedded` \| `local` \| `remote`), the remote host allow-list (exact or `*.suffix`), and the per-document limits — largest image, count, total MiB, smallest image |
+| `asr_model`, `asr_lang`, `video_frames` | string, string, int or `"all"` | Audio/video: ASR preset, transcription language, max sampled frames (0 = transcript only; `"all"` = every distinct cut, #647) |
+| `video_scene_threshold`, `video_frame_max_side`, `video_frame_dedupe` | number 0–1, int px, int 0–64 | Video frame sampling (#647): the scene score a cut must exceed (0.27), the cap on a frame's longer side (0 = source size), the difference-hash distance under which a frame is a duplicate (unset = keep all) |
+| `pages`, `document_timeout` | `"A-B"` or `"N"`, seconds | PDF page window (1-based inclusive); per-document budget (#497) |
+| `no_ocr`, `skip_ocr`, `text_layer_only`, `force_full_page_ocr`, `no_table_former`, `no_text_panels`, `heading_hierarchy` | bool | PDF/image pipeline switches (`no_ocr`: layout + TableFormer, never OCR — docling's `--no-ocr`; `skip_ocr` is its pre-2.0 name, still read; `text_layer_only`: no models, the text layer only — what `no_ocr` meant before 2.0, #611; `heading_hierarchy` #302: infer section-header levels) |
+| `password` | string | the password of an encrypted PDF or Office document — .docx/.xlsx/.pptx/.doc/.xls/.ppt (#611, #625); `pdf_password`, docling's name, is read too |
+| `ocr_engine`, `ocr_lang`, `ocr_mode`, `ocr_scale`, `images_scale`, `page_images` | — | OCR engine (`ppocr` \| `tesseract`, #460) and language; which regions feed the OCR (#254); OCR / picture-crop scale in px per PDF point; keep page renders in the JSON (#520) |
+| `ocr_textline_orientation` | bool | RapidOCR's text-line orientation handling (#666): oriented line crops, tall lines turned 90°, the 0/180 classifier |
+| `do_picture_classification`, `do_code_enrichment`, `do_formula_enrichment` | bool | Enrichment models (#423) |
+| `do_picture_ocr`, `picture_ocr_classes`, `picture_ocr_min_side`, `picture_ocr_scale`, `keep_picture_images` | bool, string, int, float, bool | Picture OCR for non-PDF documents (#645): read the embedded pictures' text into the picture's description annotation; comma-separated classifier labels / smallest side in px that gate which pictures are read; the pictures' OCR resolution in px per picture pixel under the 2000 px cap (#666; `1.0` = native); `keep_picture_images=false` drops the image bytes after |
+| `do_picture_description`, `picture_description_endpoint`, `picture_description_model`, `picture_description_api_key`, `picture_description_prompt`, `picture_description_mode`, `picture_description_concurrency` | bool, string, string, string, string, string, int | Picture description through an OpenAI-compatible vision endpoint (#670), every format: the answer is the picture's description annotation (`caption` or `ocr` mode — MarkItDown's prompts); endpoint/model/key fall back to the `vlm_*` options, then `DOCLING_RS_VLM_*` |
+| `redact_allow_terms`, `redact_deny_terms`, `redact_allow_patterns`, `redact_ner_min_score` | string, string, string, float | With `redact_pii` (#694): terms never / always redacted (comma-separated), regexes (one per line) a flagged span must not match in full, the NER detector's minimum confidence (0–1, default 0.85) |
+| `redact_pii`, `redact_mode`, `redact_kinds`, `redact_pattern`, `redact_images` | bool, string, string, string, string | PII redaction (#621): redact personal data from the document before export; `label` \| `pseudonym` \| `fixed:<text>`; comma-separated kinds; `NAME=REGEX` lines; `drop` \| `box_out` \| `keep` for embedded images |
+| `pipeline`, `vlm_endpoint`, `vlm_model`, `vlm_api_key`, `vlm_prompt`, `vlm_max_tokens` | — | `standard` (default) \| `vlm`: the remote vision-model pipeline (#77) and its settings |
 
 Unknown keys fail the conversion with a clear message — a typo never
 silently does nothing.
 
 ## Getting the library
 
-**Prebuilt (no Rust toolchain needed):** every
+**Prebuilt (no Rust toolchain needed):** every published
 [GitHub Release](https://github.com/docling-project/docling.rs/releases)
-ships `docling-ffi-<tag>-<target>.tar.gz` / `.zip` with the shared library
-and `docling.h`:
+(the one marked *Latest* and those before it the maintainer published) ships
+`docling-ffi-<tag>-<target>.tar.gz` / `.zip` with the shared library and
+`docling.h`:
 
 | Asset target | Contents | Notes |
 |---|---|---|

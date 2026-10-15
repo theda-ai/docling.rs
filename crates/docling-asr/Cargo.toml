@@ -21,14 +21,16 @@ coreml = ["docling-onnx/coreml"]
 # self-built runtime (`ORT_LIB_LOCATION`, onnxruntime built with
 # `--use_xnnpack`).
 xnnpack = ["docling-onnx/xnnpack"]
+# ONNX Runtime loaded at run time instead of linked (#504); see docling-onnx.
+ort-load-dynamic = ["docling-onnx/load-dynamic", "ort/load-dynamic"]
 
 [dependencies]
-docling-core = { path = "../docling-core", version = "1.69.1" }
+docling-core = { path = "../docling-core", version = "2.26.0" }
 # Shared ONNX execution-provider selection (DOCLING_RS_EP, #288) — routes the
 # Whisper encoder/decoder sessions through the same switch as docling-pdf.
-docling-onnx = { path = "../docling-onnx", version = "1.69.1" }
+docling-onnx = { path = "../docling-onnx", version = "2.26.0" }
 # Same ort as docling-pdf so the workspace keeps a single ONNX runtime.
-ort = { version = "2.0.0-rc.13", default-features = false, features = ["std", "download-binaries", "tls-rustls"] }
+ort = { version = "2.0.0-rc.14", default-features = false, features = ["std", "download-binaries", "tls-rustls"] }
 serde_json = "1"
 # Pure-Rust audio demuxing/decoding for every container docling's ASR accepts:
 # wav (pcm), mp3, flac, ogg/vorbis, aac (adts), m4a/mp4 (isomp4+aac).

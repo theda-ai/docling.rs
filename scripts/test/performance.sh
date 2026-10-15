@@ -45,7 +45,6 @@ RUST_BIN="$(build_rust_release)"
 # Mirrors the pipeline's own default: the INT8 layout model + TableFormer
 # decoder when present (scripts/install/quantize_models.py; see docs/PDF_CONFORMANCE.md),
 # fp32 with DOCLING_RS_FP32=1.
-[[ -e "$WORKSPACE_DIR/.pdfium/lib/libpdfium.so" ]] && export PDFIUM_DYNAMIC_LIB_PATH="${PDFIUM_DYNAMIC_LIB_PATH:-$WORKSPACE_DIR/.pdfium/lib}"
 if [[ "${DOCLING_RS_FP32:-0}" != "1" && -e "$WORKSPACE_DIR/.models/layout_heron_int8.onnx" ]]; then
   export DOCLING_LAYOUT_ONNX="${DOCLING_LAYOUT_ONNX:-$WORKSPACE_DIR/.models/layout_heron_int8.onnx}"
   [[ -e "$WORKSPACE_DIR/.models/tableformer/decoder_int8.onnx" ]] && export DOCLING_TABLEFORMER_DECODER="${DOCLING_TABLEFORMER_DECODER:-$WORKSPACE_DIR/.models/tableformer/decoder_int8.onnx}"
@@ -200,5 +199,5 @@ else
   echo
   echo "Note: the local Python docling (.venv-compare) can't convert this format —"
   echo "PDF/images/audio need the full torch/ML pipeline it omits — so no head-to-head"
-  echo "is shown. The Rust figure runs the complete pipeline (pdfium + layout + OCR)."
+  echo "is shown. The Rust figure runs the complete pipeline (render + layout + OCR)."
 fi

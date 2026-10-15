@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import enum
 from dataclasses import dataclass, field
-from typing import BinaryIO, Optional
+from typing import Any, BinaryIO, Dict, Optional
 
 
 class InputFormat(str, enum.Enum):
@@ -50,6 +50,14 @@ class InputFormat(str, enum.Enum):
     XML_XBRL = "xml_xbrl"
     XML_DOCLANG = "xml_doclang"
     METS_GBS = "mets_gbs"
+    # #671: plain text / source code (also the fallback for an unknown
+    # extension whose bytes are text), JSON Lines, and bare ``.xml`` that is
+    # routed by its content.
+    TEXT = "text"
+    JSONL = "jsonl"
+    XML = "xml"
+    #: Jupyter notebooks (#673).
+    IPYNB = "ipynb"
 
 
 class AcceleratorDevice(str, enum.Enum):
@@ -58,7 +66,9 @@ class AcceleratorDevice(str, enum.Enum):
     in place: GPU-when-usable with CPU fallback on the ``docling-rs-cuda``
     wheel, plain CPU on the CPU wheel. ``CUDA`` requires the GPU wheel and
     fails loudly when the GPU can't initialize; ``CPU`` forces CPU. ``MPS``
-    has no ONNX Runtime provider here and warns."""
+    selects the CoreML provider (opt-in in the engine, #602) in a wheel built
+    with it (``maturin build --features coreml`` on macOS) and warns
+    elsewhere — the PyPI macOS wheels are CPU-only."""
 
     AUTO = "auto"
     CPU = "cpu"
@@ -120,12 +130,23 @@ class PdfPipelineOptions:
     directly too — #187's escape hatch for undecodable text layers),
     ``do_picture_classification`` / ``do_code_enrichment`` /
     ``do_formula_enrichment`` (the opt-in enrichment models),
+    ``do_picture_ocr`` + ``picture_ocr_classes`` / ``picture_ocr_min_side`` /
+    ``picture_ocr_scale`` / ``keep_picture_images`` (#645, #666: OCR the
+    pictures of non-PDF documents), ``ocr_textline_orientation`` (#666:
+    RapidOCR's text-line orientation handling),
     ``no_text_panels`` (a docling.rs extension, #173/#174: keep every detected
     picture as a picture instead of demoting uncaptioned dense-text panels to
     paragraphs) and
-    ``accelerator_options.num_threads``. The remaining fields are accepted so
-    docling code constructs unchanged, but do not alter the pipeline (images are
-    always extracted; the export image mode is chosen by docling-core at
+    ``accelerator_options.num_threads``. ``do_picture_description`` with
+    ``picture_description_options`` runs in Python on the converted document
+    (:mod:`docling_rs.picture_description`). ``generate_page_images`` keeps
+    each page's render as ``document.pages[n].image``, and ``images_scale``
+    sets the picture-crop / page-image resolution once either
+    ``generate_picture_images`` or ``generate_page_images`` is on (#520 —
+    docling renders images only then; otherwise crops keep the engine's 2.0
+    px/pt render, since picture images are always extracted here). The
+    remaining fields are accepted so docling code constructs unchanged, but do
+    not alter the pipeline (the export image mode is chosen by docling-core at
     ``export_to_markdown(...)`` time)."""
 
     do_ocr: bool = True
@@ -138,6 +159,24 @@ class PdfPipelineOptions:
     do_picture_classification: bool = False
     do_code_enrichment: bool = False
     do_formula_enrichment: bool = False
+    #: docling.rs extension (#645): OCR the pictures embedded in non-PDF
+    #: documents with the engine's OCR models; the text lands in
+    #: ``picture.meta.description`` (+ the ``description`` annotation), as
+    #: ``do_picture_description`` writes it. ``picture_ocr_classes`` (a
+    #: comma-separated string or a list of DocumentFigureClassifier labels)
+    #: and ``picture_ocr_min_side`` (px, default 32) filter which pictures
+    #: are read; ``picture_ocr_scale`` (#666) sets their OCR resolution in px
+    #: per picture pixel under RapidOCR's 2000 px cap (``1.0`` = native);
+    #: ``keep_picture_images=False`` drops the image bytes after.
+    do_picture_ocr: bool = False
+    picture_ocr_classes: Optional[Any] = None
+    picture_ocr_min_side: Optional[int] = None
+    picture_ocr_scale: Optional[float] = None
+    keep_picture_images: bool = True
+    #: docling.rs extension (#666): RapidOCR's text-line orientation handling
+    #: — oriented line crops, tall lines turned 90°, the 0/180 classifier.
+    #: ``None`` keeps the engine default (off).
+    ocr_textline_orientation: Optional[bool] = None
     table_structure_options: TableStructureOptions = field(
         default_factory=TableStructureOptions
     )
@@ -145,6 +184,43 @@ class PdfPipelineOptions:
     images_scale: float = 1.0
     generate_page_images: bool = False
     generate_picture_images: bool = False
+    #: docling's picture description enrichment. With
+    #: :class:`PictureDescriptionApiOptions` (docling's, or this module's)
+    #: the engine describes every picture through the OpenAI-compatible
+    #: endpoint it names (#670); with a Python-side describer (a
+    #: :class:`docling_rs.picture_description.PictureDescriptionBaseOptions`
+    #: subclass such as ``docling_rs.langchain.PictureDescriptionLangChainOptions``)
+    #: the pass runs in Python on the converted document.
+    do_picture_description: bool = False
+    picture_description_options: Optional[Any] = None
+    #: Accepted for docling compatibility; no effect (no plugin system, no
+    #: remote-service gate — the describer you pass is what runs).
+    allow_external_plugins: bool = False
+    enable_remote_services: bool = False
+
+
+@dataclass
+class PictureDescriptionApiOptions:
+    """docling's ``PictureDescriptionApiOptions``: describe pictures through
+    an OpenAI-compatible vision endpoint. Mapped onto the engine's
+    ``picture_description_*`` options (#670) — ``url`` the endpoint,
+    ``params["model"]`` the model, an ``Authorization: Bearer …`` header the
+    key, ``prompt`` and ``concurrency`` theirs; ``timeout``, ``scale``,
+    ``batch_size`` and ``provenance`` are accepted for compatibility
+    (``DOCLING_RS_VLM_TIMEOUT`` caps a request; ``created_by`` is the model).
+    """
+
+    kind: str = "api"
+    url: str = "http://localhost:8000/v1/chat/completions"
+    headers: Dict[str, str] = field(default_factory=dict)
+    params: Dict[str, Any] = field(default_factory=dict)
+    timeout: float = 20.0
+    concurrency: int = 1
+    prompt: str = "Describe this image in a few sentences."
+    provenance: str = ""
+    batch_size: int = 8
+    scale: float = 2.0
+    picture_area_threshold: float = 0.05
 
 
 @dataclass
@@ -159,7 +235,11 @@ class PdfFormatOption:
 class DocumentStream:
     """docling's ``DocumentStream``: an in-memory source whose ``name`` (with
     extension) drives format detection. ``stream`` is any binary file-like
-    object (e.g. ``io.BytesIO``)."""
+    object (e.g. ``io.BytesIO``). ``format`` (a docling.rs extension, #564)
+    names the :class:`InputFormat` outright when the name cannot — an email
+    attachment called ``scan.bin`` sent as ``application/pdf``; ``None``
+    keeps the extension-based detection."""
 
     name: str
     stream: BinaryIO
+    format: Optional["InputFormat"] = None

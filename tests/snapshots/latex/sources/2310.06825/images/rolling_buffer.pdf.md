@@ -12,46 +12,26 @@ The Timestep i Timestep i + 1
 
 Timestep i + 2
 
-.
-
 IS
 
 an
 
-.
-
 IS
 
-cat sat
-
-.
-
-IS
+cat sat IS
 
 an
 
-.
-
 IS
-
-a
 
 This
 
-Mistral the cat sat
-
-.
+Mistral the a
 
 IS
 
 an
 
-.
-
 IS
 
-a
-
-of
-
-Mistral the mat sat on example on example good on
+example of Mistral on the a cat sat mat example good sat on on

@@ -423,7 +423,6 @@ mod tests {
         assert_eq!(parse_ocr_lang("zh-Hans").unwrap(), OcrLang::Ch);
         assert_eq!(parse_ocr_lang("en-US").unwrap(), OcrLang::En);
         assert!(parse_ocr_lang("de").is_err());
-        assert!(parse_ocr_lang("de").is_err());
     }
 
     #[test]

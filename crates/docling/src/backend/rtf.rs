@@ -18,7 +18,12 @@
 //! - tables: `\trowd` … `\cell` … `\row` rows, ragged rows padded; nested
 //!   groups inside cells contribute their text
 //! - embedded pictures: `\pict` with `\pngblip`/`\jpegblip` hex data becomes a
-//!   [`Node::Picture`] with the decoded bytes
+//!   [`Node::Picture`] with the decoded bytes; `\emfblip`/`\wmetafile` ones
+//!   are rendered to PNG (`{\nonshppict}` fallback copies are skipped)
+//! - equations: `{\mmath{\*\moMath …}}` — OMML in control-word form — is
+//!   rebuilt as OMML and converted to LaTeX by the DOCX backend's `omml.rs`
+//!   (inline `$…$`, or a formula when the paragraph holds nothing else); the
+//!   `{\mmathPict}` fallback picture is skipped (#578)
 //! - encodings: `\'xx` bytes through the `\ansicpg` codepage (1252 default,
 //!   1250/1251 supported), `\uN` unicode with the `\uc` skip protocol
 //!
@@ -73,6 +78,9 @@ struct GroupState {
     /// identity, what `numId` is in DOCX. Writers that emit only the
     /// `\listtext` compatibility markers leave it unset.
     ls: Option<i32>,
+    /// Inside `{\nonshppict …}`: the WMF copy Word writes for readers that
+    /// predate `\shppict`, of a picture already read from the `\shppict`.
+    nonshppict: bool,
 }
 
 /// One formatted run of paragraph text.
@@ -81,6 +89,9 @@ struct Run {
     bold: bool,
     italic: bool,
     strike: bool,
+    /// An equation: `text` is its LaTeX, rendered `$…$` inline (or `$$…$$`
+    /// when the paragraph holds nothing else).
+    math: bool,
 }
 
 /// The pending `\listtext`/`\pntext` marker for the paragraph being built:
@@ -324,7 +335,17 @@ impl<'a> Parser<'a> {
             "row" => self.end_row(),
             "nestcell" | "nestrow" => {} // nested tables flatten into the cell
             "stylesheet" => self.read_stylesheet(),
-            "pict" => self.read_picture(doc),
+            "pict" if !self.state.nonshppict => self.read_picture(doc),
+            // `{\mmathPict …}` is the picture of the equation that precedes
+            // it, for readers without math support — skipped like a
+            // `\nonshppict` copy (#578; it used to surface as an image
+            // placeholder ahead of the paragraph).
+            "nonshppict" | "mmathPict" => {
+                self.state.skip = true;
+                self.state.nonshppict = true;
+            }
+            // `{\mmath …}`: an equation (RTF's spelling of OMML, #578).
+            "mmath" => self.read_math(),
             "fonttbl" | "colortbl" | "info" | "listtable" | "listoverridetable" | "header"
             | "headerl" | "headerr" | "headerf" | "footer" | "footerl" | "footerr" | "footerf"
             | "footnote" | "ftnsep" | "ftnsepc" => {
@@ -350,6 +371,41 @@ impl<'a> Parser<'a> {
             }
             _ => {} // unknown control words are ignored per spec
         }
+    }
+
+    /// `{\mmath{\*\moMath …}}` — read the rest of the group, rebuild the
+    /// OMML it spells (see [`rtf_math_to_omml`]) and push each equation's
+    /// LaTeX as a math run, through the converter the DOCX backend uses.
+    /// A group with no equation in it — LibreOffice writes
+    /// `{\mmath {\*\shppict …}}` for a formula it could only keep as a
+    /// picture — is left to the main loop, so that picture still surfaces.
+    fn read_math(&mut self) {
+        if self.state.skip {
+            return;
+        }
+        let start = self.pos;
+        let end = group_end(self.bytes, start);
+        let xml = rtf_math_to_omml(&self.bytes[start..end], self.codepage);
+        let Ok(tree) = roxmltree::Document::parse(&xml) else {
+            return;
+        };
+        let equations: Vec<String> = tree
+            .descendants()
+            .filter(|n| n.has_tag_name("oMath"))
+            .map(crate::backend::omml::to_latex)
+            .filter(|latex| !latex.is_empty())
+            .collect();
+        if equations.is_empty() {
+            return;
+        }
+        self.pos = end; // the closing `}` is left to the main loop
+        self.runs.extend(equations.into_iter().map(|text| Run {
+            text,
+            bold: false,
+            italic: false,
+            strike: false,
+            math: true,
+        }));
     }
 
     /// After `\uN`, skip the next `uc` fallback characters (each `\'xx`
@@ -469,11 +525,14 @@ impl<'a> Parser<'a> {
     }
 
     /// `{\pict \pngblip|\jpegblip … <hex>}` → a picture node with the decoded
-    /// bytes. Metafile-only pictures (`\wmetafile`/`\emfblip`) are skipped —
-    /// no portable decoder — as is the rare inline-binary `\bin` form.
+    /// bytes. A metafile (`\emfblip`, `\wmetafileN` — a WMF without its
+    /// placeable header, sized by `\picwgoal`/`\pichgoal` twips) is rendered
+    /// to PNG (#536); the rare inline-binary `\bin` form is skipped.
     fn read_picture(&mut self, doc: &mut DoclingDocument) {
         let mut depth = 0usize;
         let mut mimetype: Option<&'static str> = None;
+        let mut metafile = false;
+        let mut goal: (Option<i64>, Option<i64>) = (None, None);
         let mut hex = String::new();
         let mut skip_binary = false;
         while let Some(b) = self.next_byte() {
@@ -495,15 +554,22 @@ impl<'a> Parser<'a> {
                         .iter()
                         .map(|&b| b as char)
                         .collect();
+                    let num = self.pos;
                     while self.peek().is_some_and(|b| b.is_ascii_digit() || b == b'-') {
                         self.pos += 1;
                     }
+                    let param: Option<i64> = std::str::from_utf8(&self.bytes[num..self.pos])
+                        .ok()
+                        .and_then(|n| n.parse().ok());
                     if self.peek() == Some(b' ') {
                         self.pos += 1;
                     }
                     match word.as_str() {
                         "pngblip" => mimetype = Some("image/png"),
                         "jpegblip" => mimetype = Some("image/jpeg"),
+                        "emfblip" | "wmetafile" => metafile = true,
+                        "picwgoal" => goal.0 = param,
+                        "pichgoal" => goal.1 = param,
                         "bin" => skip_binary = true,
                         _ => {}
                     }
@@ -512,8 +578,7 @@ impl<'a> Parser<'a> {
                 _ => {}
             }
         }
-        let Some(mimetype) = mimetype else { return };
-        if skip_binary || hex.is_empty() {
+        if skip_binary || hex.is_empty() || (mimetype.is_none() && !metafile) {
             return;
         }
         let data: Vec<u8> = hex
@@ -521,18 +586,40 @@ impl<'a> Parser<'a> {
             .chunks_exact(2)
             .filter_map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
             .collect();
+        let Some(mimetype) = mimetype else {
+            // 15 twips per pixel at 96 dpi.
+            let hint = match goal {
+                (Some(w), Some(h)) if w > 0 && h > 0 => Some((w as f64 / 15.0, h as f64 / 15.0)),
+                _ => None,
+            };
+            if let Some(image) = super::metafile::render(&data, hint) {
+                doc.push(Node::Picture {
+                    caption: None,
+                    caption_href: None,
+                    image: Some(image),
+                    classification: None,
+                    description: None,
+                    caption_parent: Default::default(),
+                    caption_location: None,
+                });
+            }
+            return;
+        };
         let (width, height) = image_size(mimetype, &data).unwrap_or((0, 0));
         doc.push(Node::Picture {
             caption: None,
             caption_href: None,
             image: Some(PictureImage {
+                dpi: PictureImage::DEFAULT_DPI,
                 mimetype: mimetype.to_string(),
                 width,
                 height,
                 data,
             }),
             classification: None,
+            description: None,
             caption_parent: Default::default(),
+            caption_location: None,
         });
     }
 
@@ -600,6 +687,7 @@ impl<'a> Parser<'a> {
             bold: false,
             italic: false,
             strike: false,
+            math: false,
         });
     }
 
@@ -609,7 +697,12 @@ impl<'a> Parser<'a> {
         }
         let (bold, italic, strike) = (self.state.bold, self.state.italic, self.state.strike);
         match self.runs.last_mut() {
-            Some(run) if run.bold == bold && run.italic == italic && run.strike == strike => {
+            Some(run)
+                if !run.math
+                    && run.bold == bold
+                    && run.italic == italic
+                    && run.strike == strike =>
+            {
                 run.text.push(ch);
             }
             _ => self.runs.push(Run {
@@ -617,6 +710,7 @@ impl<'a> Parser<'a> {
                 bold,
                 italic,
                 strike,
+                math: false,
             }),
         }
     }
@@ -631,6 +725,14 @@ impl<'a> Parser<'a> {
     fn take_text(&mut self) -> String {
         let mut out = String::new();
         for run in self.runs.drain(..) {
+            if run.math {
+                // The DOCX backend's inline-equation spacing (docling joins
+                // the paragraph's text and formula parts with a space, so a
+                // word run's own trailing space doubles up) — the same
+                // equation as `.docx` reads `Synthetic equation:  $E=mc^{2}$`.
+                out.push_str(&format!(" ${}$ ", run.text));
+                continue;
+            }
             let trimmed = run.text.trim();
             if trimmed.is_empty() {
                 out.push_str(&run.text);
@@ -745,6 +847,7 @@ impl<'a> Parser<'a> {
             cells: None,
             caption: None,
             caption_parent: Default::default(),
+            caption_location: None,
         }));
         self.prev_was_list = false;
     }
@@ -758,6 +861,22 @@ impl<'a> Parser<'a> {
         // Leaving the table region: emit the assembled table first.
         self.flush_table(doc);
 
+        // A paragraph of equations alone: standalone `$$…$$` formulas, as the
+        // DOCX backend renders an OMML-only paragraph.
+        if self.runs.iter().any(|r| r.math)
+            && self.runs.iter().all(|r| r.math || r.text.trim().is_empty())
+        {
+            self.list_marker = None;
+            for run in self.runs.drain(..).filter(|r| r.math) {
+                doc.push(Node::Formula {
+                    orig: run.text.clone(),
+                    latex: run.text,
+                    location: None,
+                });
+            }
+            self.prev_was_list = false;
+            return;
+        }
         let marker = self.list_marker.take();
         let text = self.take_text();
         if text.is_empty() {
@@ -837,6 +956,236 @@ impl<'a> Parser<'a> {
         doc.push(Node::Paragraph { text });
         self.prev_was_list = false;
     }
+}
+
+/// Position of the `}` closing the group whose content starts at `start`
+/// (or the end of input), stepping over escaped braces.
+fn group_end(bytes: &[u8], start: usize) -> usize {
+    let mut depth = 0usize;
+    let mut i = start;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 1,
+            b'{' => depth += 1,
+            b'}' if depth == 0 => return i,
+            b'}' => depth -= 1,
+            _ => {}
+        }
+        i += 1;
+    }
+    bytes.len()
+}
+
+/// OMML elements whose text content is math text (a bare string becomes an
+/// `<m:r>` run); in every other element text is the property's value.
+const MATH_CONTAINERS: &[&str] = &[
+    "oMathPara",
+    "oMath",
+    "e",
+    "num",
+    "den",
+    "sub",
+    "sup",
+    "deg",
+    "fName",
+    "lim",
+];
+
+/// Rebuild the OMML an RTF math group spells. RTF's math destinations are
+/// OMML transliterated (RTF 1.9.1, "Math"): every element `m:X` is a group
+/// `{\mX …}` (often starred, `{\*\moMath …}`), a run's text sits directly in
+/// its `{\mr …}` group, a property's value is either the group's text
+/// (`{\mbegChr (}`, `{\mchr \u8721?}`) or a control-word parameter
+/// (`\msty2`), and character-formatting groups (`{\rtlch\f34 …}`) are
+/// interleaved freely — transparent here. Element nesting is capped at the
+/// XML depth limit (deeper elements are flattened into their parent).
+fn rtf_math_to_omml(raw: &[u8], codepage: u32) -> String {
+    /// One open RTF group: the element it opened (if its head was `\mX`),
+    /// where that element's start tag ends in `out` (for a late `m:val`),
+    /// the property text it gathered, and the `\uc` in force.
+    struct Frame {
+        elem: Option<String>,
+        tag_end: usize,
+        val: String,
+        uc: usize,
+    }
+    fn esc(s: &str) -> String {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+    }
+    let limit = crate::backend::xml_depth::max_depth().saturating_sub(2);
+    let mut out = String::from(
+        r#"<m:root xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">"#,
+    );
+    let mut frames: Vec<Frame> = vec![Frame {
+        elem: None,
+        tag_end: 0,
+        val: String::new(),
+        uc: 1,
+    }];
+    let mut open_elems = 0usize;
+    // The innermost open element's name.
+    let current =
+        |frames: &[Frame]| -> Option<String> { frames.iter().rev().find_map(|f| f.elem.clone()) };
+    let push_text =
+        |frames: &mut Vec<Frame>, out: &mut String, text: &str| match current(frames).as_deref() {
+            Some("r") => out.push_str(&format!("<m:t>{}</m:t>", esc(text))),
+            Some(e) if MATH_CONTAINERS.contains(&e) => {
+                if !text.trim().is_empty() {
+                    out.push_str(&format!("<m:r><m:t>{}</m:t></m:r>", esc(text)));
+                }
+            }
+            Some(_) => {
+                if let Some(f) = frames.iter_mut().rev().find(|f| f.elem.is_some()) {
+                    f.val.push_str(text);
+                }
+            }
+            None => {}
+        };
+    let mut i = 0;
+    let mut text = String::new();
+    let mut group_head = false;
+    while i < raw.len() {
+        let b = raw[i];
+        if !matches!(b, b'{' | b'}' | b'\\' | b'\r' | b'\n') {
+            text.push(decode_byte(b, codepage));
+            i += 1;
+            continue;
+        }
+        // A `\'xx` byte continues the text it sits in; anything else ends it.
+        let hex_byte = b == b'\\' && raw.get(i + 1) == Some(&b'\'');
+        if !text.is_empty() && !hex_byte {
+            push_text(&mut frames, &mut out, &std::mem::take(&mut text));
+        }
+        match b {
+            b'{' => {
+                let uc = frames.last().map_or(1, |f| f.uc);
+                frames.push(Frame {
+                    elem: None,
+                    tag_end: 0,
+                    val: String::new(),
+                    uc,
+                });
+                group_head = true;
+                i += 1;
+                continue;
+            }
+            b'}' => {
+                if frames.len() > 1 {
+                    let f = frames.pop().expect("non-root frame");
+                    if let Some(name) = f.elem {
+                        let val = f.val.trim();
+                        if !val.is_empty() {
+                            out.insert_str(f.tag_end - 1, &format!(r#" m:val="{}""#, esc(val)));
+                        }
+                        out.push_str(&format!("</m:{name}>"));
+                        open_elems -= 1;
+                    }
+                }
+                group_head = false;
+                i += 1;
+                continue;
+            }
+            b'\r' | b'\n' => {
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+        // A control word or symbol.
+        i += 1;
+        let Some(&c) = raw.get(i) else { break };
+        if !c.is_ascii_alphabetic() {
+            i += 1;
+            match c {
+                b'\'' => {
+                    let hex =
+                        std::str::from_utf8(raw.get(i..i + 2).unwrap_or_default()).unwrap_or("");
+                    if let Ok(v) = u8::from_str_radix(hex, 16) {
+                        text.push(decode_byte(v, codepage));
+                    }
+                    i += 2;
+                }
+                b'\\' | b'{' | b'}' => text.push(c as char),
+                b'~' => text.push('\u{00A0}'),
+                // `\*` keeps the group-head position for the word after it.
+                b'*' => continue,
+                _ => {}
+            }
+            group_head = false;
+            continue;
+        }
+        let start = i;
+        while raw.get(i).is_some_and(u8::is_ascii_alphabetic) {
+            i += 1;
+        }
+        let word = std::str::from_utf8(&raw[start..i]).unwrap_or("");
+        let num_start = i;
+        if raw.get(i) == Some(&b'-') {
+            i += 1;
+        }
+        while raw.get(i).is_some_and(u8::is_ascii_digit) {
+            i += 1;
+        }
+        let param: Option<i64> = std::str::from_utf8(&raw[num_start..i])
+            .ok()
+            .and_then(|p| p.parse().ok());
+        if raw.get(i) == Some(&b' ') {
+            i += 1;
+        }
+        let head = std::mem::replace(&mut group_head, false);
+        match (word, param) {
+            ("u", Some(v)) => {
+                let v = if v < 0 { v + 65536 } else { v } as u32;
+                if let Some(ch) = char::from_u32(v) {
+                    text.push(ch);
+                }
+                // Skip the `\uc` fallback characters (`\'xx` counts as one).
+                for _ in 0..frames.last().map_or(1, |f| f.uc) {
+                    match raw.get(i) {
+                        Some(b'\\') if raw.get(i + 1) == Some(&b'\'') => i += 4,
+                        Some(b'{' | b'}' | b'\\') | None => break,
+                        _ => i += 1,
+                    }
+                }
+            }
+            ("uc", p) => {
+                if let Some(f) = frames.last_mut() {
+                    f.uc = p.unwrap_or(1).max(0) as usize;
+                }
+            }
+            (w, p) if w.len() > 1 && w.starts_with('m') => {
+                let name = &w[1..];
+                if head && open_elems < limit {
+                    out.push_str(&format!("<m:{name}>"));
+                    let f = frames.last_mut().expect("a frame per open group");
+                    f.elem = Some(name.to_string());
+                    f.tag_end = out.len();
+                    if let Some(p) = p {
+                        f.val = p.to_string();
+                    }
+                    open_elems += 1;
+                } else if let Some(p) = p {
+                    // `\msty2`-style: a property of the enclosing element.
+                    out.push_str(&format!(r#"<m:{name} m:val="{p}"/>"#));
+                }
+            }
+            _ => {} // character formatting and the like
+        }
+    }
+    if !text.is_empty() {
+        push_text(&mut frames, &mut out, &text);
+    }
+    // Close whatever an unterminated group left open.
+    while let Some(f) = frames.pop() {
+        if let Some(name) = f.elem {
+            out.push_str(&format!("</m:{name}>"));
+        }
+    }
+    out.push_str("</m:root>");
+    out
 }
 
 /// Markdown heading level from a style name, matching the DOCX backend's
@@ -1208,6 +1557,102 @@ mod tests {
         assert_eq!(img.mimetype, "image/png");
         assert_eq!((img.width, img.height), (1, 1));
         assert_eq!(&img.data[..8], b"\x89PNG\r\n\x1a\n");
+    }
+
+    /// A `\wmetafile8` picture renders to PNG at its `\picwgoal`/`\pichgoal`
+    /// size; the `{\nonshppict}` WMF fallback of a `\shppict` PNG does not
+    /// add a second picture.
+    #[cfg(feature = "pdf")]
+    #[test]
+    fn renders_metafile_pictures_once() {
+        let wmf = crate::backend::metafile::tests::wmf(
+            None,
+            &crate::backend::metafile::tests::wmf_body(),
+        );
+        let hex: String = wmf.iter().map(|b| format!("{b:02x}")).collect();
+        let rtf = format!(
+            r"{{\rtf1\ansi{{\pict\wmetafile8\picw1000\pich500\picwgoal1800\pichgoal900 {hex}}}\par}}"
+        );
+        let doc = convert(&rtf);
+        let Node::Picture {
+            image: Some(img), ..
+        } = &doc.nodes[0]
+        else {
+            panic!("expected a picture, got {:?}", doc.nodes)
+        };
+        assert_eq!(
+            (img.mimetype.as_str(), img.width, img.height),
+            ("image/png", 120, 60)
+        );
+
+        let rtf = format!(
+            r"{{\rtf1\ansi{{\*\shppict{{\pict\wmetafile8 {hex}}}}}{{\nonshppict{{\pict\wmetafile8 {hex}}}}}\par}}"
+        );
+        let pictures = convert(&rtf)
+            .nodes
+            .iter()
+            .filter(|n| matches!(n, Node::Picture { .. }))
+            .count();
+        assert_eq!(pictures, 1);
+    }
+
+    /// #578: an `\mmath` group is OMML spelled in control words — inline in
+    /// a sentence it is `$…$` (the DOCX backend's spacing), the
+    /// `\mmathPict` picture after it is the fallback rendering and dropped.
+    #[test]
+    fn inline_math_becomes_latex_and_its_picture_is_skipped() {
+        let doc = convert(concat!(
+            r"{\rtf1\ansi{\mmathPr\mmathFont34\mbrkBin0}{Synthetic equation: }",
+            r"{\mmath{\*\moMath{\rtlch\i\f34 {\mr\mscr0\msty2 E}}{\mr =}{\mr m}",
+            r"{\msSup{\msSupPr{\mctrlPr\i\f34 }}{\me{\mr c}}{\msup{\mr 2}}}}}",
+            r"{\mmathPict{\*\shppict{\pict\pngblip 89504e47}}{\nonshppict{\pict\wmetafile8 0100}}}",
+            r"\par}"
+        ));
+        assert_eq!(
+            doc.nodes,
+            vec![Node::Paragraph {
+                text: "Synthetic equation:  $E=mc^{2}$".into()
+            }]
+        );
+    }
+
+    /// A paragraph of equations alone yields one display formula each, and
+    /// the structures + property values (`\mchr \u8721`, `\mbegChr`) reach
+    /// the shared OMML converter.
+    #[test]
+    fn display_math_structures() {
+        let doc = convert(concat!(
+            r"{\rtf1\ansi{\mmath{\*\moMath{\mnary{\mnaryPr{\mchr \u8721\'3f}}",
+            r"{\msub{\mr k}{\mr =}{\mr 0}}{\msup{\mr n}}{\me{\mf{\mnum{\mr 1}}{\mden{\mr k}}}}}}}",
+            r"{\mmath{\*\moMath{\md{\mdPr{\mbegChr [}{\mendChr ]}}{\me{\mrad{\mradPr{\mdegHide 1}}{\mdeg}{\me{\mr x}}}}}}}",
+            r"\par}"
+        ));
+        assert_eq!(
+            doc.nodes,
+            vec![
+                Node::Formula {
+                    latex: r"\sum_{k=0}^{n}\frac{1}{k}".into(),
+                    orig: r"\sum_{k=0}^{n}\frac{1}{k}".into(),
+                    location: None,
+                },
+                Node::Formula {
+                    latex: r"\left[\sqrt{x}\right]".into(),
+                    orig: r"\left[\sqrt{x}\right]".into(),
+                    location: None,
+                },
+            ]
+        );
+    }
+
+    /// LibreOffice writes `{\mmath {\*\shppict …}}` for a formula it kept
+    /// only as a picture: with no equation inside, the picture still counts.
+    #[test]
+    fn math_group_without_an_equation_keeps_its_picture() {
+        let png = "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d4944415478da63f8cfc0f01f0005000201a2b0b1e10000000049454e44ae426082";
+        let doc = convert(&format!(
+            r"{{\rtf1\ansi{{\mmath {{\*\shppict{{\pict\pngblip {png}}}}}}}\par}}"
+        ));
+        assert!(matches!(doc.nodes.as_slice(), [Node::Picture { .. }]));
     }
 
     #[test]

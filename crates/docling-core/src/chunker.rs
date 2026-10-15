@@ -471,6 +471,7 @@ impl Walker<'_> {
                 let self_ref = self.alloc.text();
                 self.emit_inline(text, self_ref);
             }
+            Node::LabeledText { .. } => self.one(&node.labeled_as_paragraph()),
             Node::CheckboxItem { checked, text } => {
                 let self_ref = self.alloc.text();
                 let mark = if *checked { "- [x] " } else { "- [ ] " };
@@ -522,20 +523,52 @@ impl Walker<'_> {
                     }],
                 );
             }
-            Node::Picture { caption, .. } => {
+            Node::Picture {
+                caption,
+                description,
+                ..
+            } => {
                 let cap = caption.as_deref().filter(|c| !c.is_empty());
                 let cap_item = cap.map(|c| ChunkItem {
                     self_ref: self.alloc.text(),
                     kind: ChunkItemKind::Text,
                     text: unescape_text(c),
                 });
-                self.alloc.picture();
+                let pic_ref = self.alloc.picture();
                 // The picture itself serializes to the (empty) chunking image
                 // placeholder, and its caption is already consumed by the
-                // caption chunk — so only the caption text is emitted.
-                if let Some(cap_item) = cap_item {
-                    let body = cap_item.text.clone();
-                    self.emit(body, vec![cap_item]);
+                // caption chunk — so only the caption text is emitted. A
+                // description (the picture-OCR text, #645) is the picture's
+                // own annotation text — docling's chunker serializes the
+                // picture through the Markdown picture serializer, so the
+                // description lands in the chunk after the caption.
+                let desc = description
+                    .as_ref()
+                    .map(|d| d.text.as_str())
+                    .filter(|t| !t.is_empty());
+                match (cap_item, desc) {
+                    (Some(cap_item), None) => {
+                        let body = cap_item.text.clone();
+                        self.emit(body, vec![cap_item]);
+                    }
+                    (Some(cap_item), Some(desc)) => {
+                        let body = format!("{}\n\n{desc}", cap_item.text);
+                        let pic_item = ChunkItem {
+                            self_ref: pic_ref,
+                            kind: ChunkItemKind::Picture,
+                            text: desc.to_string(),
+                        };
+                        self.emit(body, vec![cap_item, pic_item]);
+                    }
+                    (None, Some(desc)) => {
+                        let pic_item = ChunkItem {
+                            self_ref: pic_ref,
+                            kind: ChunkItemKind::Picture,
+                            text: desc.to_string(),
+                        };
+                        self.emit(desc.to_string(), vec![pic_item]);
+                    }
+                    (None, None) => {}
                 }
             }
             Node::Chart {
@@ -591,6 +624,8 @@ impl Walker<'_> {
                 self.alloc.group();
                 self.walk(children);
             }
+            // A key-value graph holds no text items, so no chunk comes of it.
+            Node::KeyValueGraph { .. } => {}
             Node::FieldRegion { items } => {
                 // Each field part (marker / key / value) is its own text item,
                 // and docling chunks each one individually.
@@ -630,12 +665,39 @@ impl Walker<'_> {
             // Layout provenance and comment annotations are transparent.
             Node::Located { inner, .. }
             | Node::Prov { inner, .. }
+            | Node::Track { inner, .. }
             | Node::Commented { inner, .. } => self.one(inner),
+            // A PDF page header/footer is a furniture-layer JSON text item:
+            // never chunked (docling's chunker reads the body layer), but it
+            // takes a `#/texts/N` number, so later refs keep matching the JSON.
+            Node::PageFurniture { .. } | Node::FurnitureText { .. } => {
+                self.alloc.text();
+            }
+            // A picture's children are JSON items docling's chunker never
+            // reaches (it iterates without `traverse_pictures`): allocate
+            // their refs only — one text each, plus the list group `json.rs`
+            // opens for each list item (each starts its own list) — so later
+            // refs keep matching the JSON.
+            Node::PictureChildren(children) => {
+                for child in children {
+                    match child {
+                        // A header/footer child is numbered exactly as a
+                        // top-level one is, whatever the JSON does with it.
+                        Node::PageFurniture { .. } => self.one(child),
+                        Node::ListItem { .. } => {
+                            self.alloc.group();
+                            self.alloc.text();
+                        }
+                        _ => {
+                            self.alloc.text();
+                        }
+                    }
+                }
+            }
             // Non-body layers and doclang-only nodes don't reach the chunker
             // (nor the JSON body).
             Node::CommentSection { .. }
             | Node::Furniture { .. }
-            | Node::PageFurniture { .. }
             | Node::PageBreak
             | Node::PageInfo { .. }
             | Node::DoclangOnly(_) => {}
@@ -1092,6 +1154,7 @@ fn cell_chunk_text(t: &Table, r: usize, c: usize) -> String {
 fn block_chunk_text(node: &Node) -> String {
     match node {
         Node::Paragraph { text } => unescape_text(text),
+        Node::LabeledText { .. } => block_chunk_text(&node.labeled_as_paragraph()),
         Node::InlineGroup { md_text, .. } => unescape_text(md_text),
         Node::Code { text, .. } => format!("```\n{}\n```", unescape_text(text)),
         Node::Table(inner) => triplet_table_text(inner),
@@ -1118,9 +1181,10 @@ fn block_chunk_text(node: &Node) -> String {
             format!("{mark}{}", unescape_text(text))
         }
         Node::Heading { text, .. } => unescape_text(text),
-        Node::Located { inner, .. } | Node::Prov { inner, .. } | Node::Commented { inner, .. } => {
-            block_chunk_text(inner)
-        }
+        Node::Located { inner, .. }
+        | Node::Prov { inner, .. }
+        | Node::Track { inner, .. }
+        | Node::Commented { inner, .. } => block_chunk_text(inner),
         Node::Group { layer: Some(_), .. } => String::new(),
         Node::Group { children, .. } => children
             .iter()
@@ -2185,6 +2249,75 @@ mod tests {
             Some(&["Title".into(), "Sec".into()][..])
         );
         assert_eq!(contextualize(&chunks[1]), "Title\nSec\nBody");
+    }
+
+    /// A page footer is a JSON text item (furniture layer) the chunker never
+    /// chunks; the refs of the items after it still match the JSON.
+    #[test]
+    fn page_furniture_keeps_refs_aligned_with_json() {
+        let doc = doc_with(vec![
+            Node::Paragraph {
+                text: "Before".into(),
+            },
+            Node::PageFurniture {
+                footer: true,
+                location: [0, 490, 100, 512],
+                text: "1.10.2".into(),
+            },
+            Node::Paragraph {
+                text: "After".into(),
+            },
+        ]);
+        let chunks = HierarchicalChunker.chunk(&doc);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[1].text, "After");
+        let json: serde_json::Value = serde_json::from_str(&doc.export_to_json()).unwrap();
+        assert_eq!(json["texts"][2]["text"], "After");
+        assert_eq!(chunks[1].doc_items[0].self_ref, "#/texts/2");
+    }
+
+    /// A picture's children are never chunked, but they take `#/texts/N`
+    /// (and list-group) slots in the JSON — the refs after them must still
+    /// point at the right items.
+    #[test]
+    fn picture_children_are_not_chunked_but_keep_refs_aligned() {
+        let doc = doc_with(vec![
+            Node::Picture {
+                caption: None,
+                caption_href: None,
+                image: None,
+                classification: None,
+                description: None,
+                caption_parent: crate::CaptionParent::Item,
+                caption_location: None,
+            },
+            Node::PictureChildren(vec![
+                Node::Paragraph {
+                    text: "axis label".into(),
+                },
+                Node::ListItem {
+                    ordered: false,
+                    number: 0,
+                    first_in_list: true,
+                    text: "callout".into(),
+                    level: 0,
+                    marker: None,
+                    location: None,
+                    dclx: None,
+                    href: None,
+                    layer: None,
+                },
+            ]),
+            Node::Paragraph {
+                text: "Body".into(),
+            },
+        ]);
+        let chunks = HierarchicalChunker.chunk(&doc);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].text, "Body");
+        let json = doc.export_to_json_value();
+        assert_eq!(json["texts"][2]["text"], "Body");
+        assert_eq!(chunks[0].doc_items[0].self_ref, "#/texts/2");
     }
 
     #[test]

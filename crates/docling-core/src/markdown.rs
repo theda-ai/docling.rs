@@ -1,6 +1,13 @@
 //! Markdown serializer for [`DoclingDocument`].
 
-use crate::document::{DoclingDocument, Node, Table};
+use crate::document::{
+    ContentLayer, ContentLayers, DoclingDocument, MarkdownExportOptions, Node, Table,
+};
+
+/// What docling's Markdown serializer writes for an item it has no component
+/// for — a `KeyValueItem` (the XBRL fact graph) is the one such item a backend
+/// produces.
+const MISSING_KEY_VALUE_ITEM: &str = "<!-- missing-key-value-item -->";
 
 /// How pictures are rendered (mirrors docling-core's `ImageRefMode`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -42,6 +49,160 @@ struct Ctx {
     /// Whether any block has been rendered yet — for a streamer, across every
     /// earlier push too — which is what makes a boundary a *pending* break.
     emitted_any: bool,
+    /// The content layers rendered ([`MarkdownExportOptions::layers`], #599).
+    layers: ContentLayers,
+    /// The layer the items being rendered sit on: `None` (body) at the
+    /// root, the group's or wrapper's layer inside a non-body group or a
+    /// [`Node::Furniture`] — what the layer gate compares against the set,
+    /// as every item of a hidden sheet carries that sheet's layer upstream.
+    current_layer: Option<ContentLayer>,
+    /// Render a picture's nested text items ([`MarkdownExportOptions::traverse_pictures`]).
+    traverse_pictures: bool,
+    /// Keep the backends' HTML-entity escaping (`&amp;` …) in the output;
+    /// off, it is undone ([`MarkdownExportOptions::escape_html`]).
+    escape_html: bool,
+    /// Keep the backends' `\_` escaping; off, it is undone.
+    escape_underscores: bool,
+    /// What a picture prints as without image data.
+    image_placeholder: String,
+    /// The plain-text export ([`MarkdownExportOptions::plain_text`], #613).
+    plain: bool,
+}
+
+impl Ctx {
+    /// Serializer state for `options` (the page-break setting is the
+    /// document's, the strictness the caller's).
+    fn new(doc: &DoclingDocument, strict: bool, options: &MarkdownExportOptions) -> Self {
+        Ctx {
+            strict,
+            compact_tables: doc.compact_tables,
+            images: options.image_mode,
+            artifacts_dir: options.artifacts_dir.clone(),
+            artifacts: Vec::new(),
+            pic_index: 0,
+            in_table_cell: false,
+            page_break: doc.page_break_placeholder.clone(),
+            pending_page_break: false,
+            emitted_any: false,
+            layers: options.layers,
+            current_layer: None,
+            traverse_pictures: options.traverse_pictures,
+            escape_html: options.escape_html,
+            escape_underscores: options.escape_underscores,
+            image_placeholder: options.image_placeholder.clone(),
+            plain: options.plain_text,
+        }
+    }
+
+    /// Whether an item on the layer being rendered is in the chosen set.
+    fn layer_visible(&self) -> bool {
+        self.layers.contains(self.current_layer)
+    }
+
+    /// The backends escape inline text for Markdown when they build the
+    /// nodes (`&` → `&amp;`, `_` → `\_`, what docling-core's `post_process`
+    /// does at serialization time); an export that turns an escaping off
+    /// undoes it here, the way the JSON export recovers the raw text. Code,
+    /// formulas and table cells never pass through — upstream leaves those
+    /// unescaped too.
+    fn unescape(&self, text: &str) -> String {
+        let mut out = std::borrow::Cow::Borrowed(text);
+        if !self.escape_html
+            && (out.contains("&amp;") || out.contains("&lt;") || out.contains("&gt;"))
+        {
+            out = std::borrow::Cow::Owned(
+                out.replace("&lt;", "<")
+                    .replace("&gt;", ">")
+                    .replace("&amp;", "&"),
+            );
+        }
+        if !self.escape_underscores && out.contains("\\_") {
+            out = std::borrow::Cow::Owned(out.replace("\\_", "_"));
+        }
+        out.into_owned()
+    }
+
+    /// A text item's inline text: the strict-mode cleanup, then the
+    /// escaping the options turn off undone.
+    fn text(&self, text: &str) -> String {
+        let text = strict_text(text, self.strict);
+        if self.plain {
+            self.unescape(&plain_inline(&self.drop_image_markers(&text)))
+        } else {
+            self.unescape(&text)
+        }
+    }
+
+    /// A caption's text (the backends escape it, but strict mode leaves it
+    /// alone): the escaping the options turn off undone, and, for the plain
+    /// export, its inline markup dropped.
+    fn caption(&self, text: &str) -> String {
+        if self.plain {
+            self.unescape(&plain_inline(text))
+        } else {
+            self.unescape(text)
+        }
+    }
+
+    /// docling-core's `_md_line_breaks` for the Markdown export; the plain
+    /// export's `PlainTextTextSerializer` keeps the text's own newlines.
+    fn breaks(&self, text: &str) -> String {
+        if self.plain {
+            text.to_string()
+        } else {
+            md_line_breaks(text)
+        }
+    }
+
+    /// A table for the plain export: a rich cell's text is its Markdown
+    /// serialization in our model (bold runs, links, hard line breaks),
+    /// where upstream serializes the cell with the plain serializer — so
+    /// the markup goes before the grid is laid out, which also lets a
+    /// once-bold number right-align like a plain one. A simple cell holds
+    /// raw text and passes through unchanged.
+    fn plain_table(&self, table: &Table) -> Table {
+        let mut plain = table.clone();
+        for cell in plain.rows.iter_mut().flatten() {
+            if cell.contains(['*', '~', '`', '[', '\n', '<']) {
+                let text = self.drop_image_markers(&strip_hard_breaks(cell));
+                *cell = plain_inline(&text);
+            }
+        }
+        plain
+    }
+
+    /// Pictures some backends fold into an item's text (an HTML `<img>`
+    /// inside a `<li>`, a LaTeX figure in a paragraph) arrive as baked
+    /// `<!-- image -->` lines — docling's picture *children* of the item,
+    /// which its serializer prints with the active image placeholder. The
+    /// plain export's placeholder is empty, so such a line goes, as a
+    /// picture item would.
+    fn drop_image_markers(&self, text: &str) -> String {
+        const MARKER: &str = "<!-- image -->";
+        if !text.contains(MARKER) && !text.contains("```") {
+            return text.to_string();
+        }
+        // Block by block (`\n\n`, the serializer's part delimiter): a block
+        // left empty goes with its delimiter, as docling joins only the parts
+        // that carry text.
+        text.split("\n\n")
+            .filter_map(|block| {
+                let lines: Vec<String> = block
+                    .split('\n')
+                    .filter_map(|line| {
+                        // A folded code block's fences go too: the plain
+                        // export prints code unfenced.
+                        if line.trim() == MARKER || line.trim() == "```" {
+                            return None;
+                        }
+                        Some(line.replace(MARKER, &self.image_placeholder))
+                    })
+                    .collect();
+                (!lines.is_empty()).then(|| lines.join("\n"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
 }
 
 /// Render a document to a Markdown string (pictures as placeholders).
@@ -62,25 +223,33 @@ pub fn to_markdown_images(
     images: ImageMode,
     artifacts_dir: &str,
 ) -> (String, Vec<(String, Vec<u8>)>) {
-    let mut ctx = Ctx {
+    to_markdown_with_options(
+        doc,
         strict,
-        compact_tables: doc.compact_tables,
-        images,
-        artifacts_dir: artifacts_dir.to_string(),
-        artifacts: Vec::new(),
-        pic_index: 0,
-        in_table_cell: false,
-        page_break: doc.page_break_placeholder.clone(),
-        pending_page_break: false,
-        emitted_any: false,
-    };
+        &MarkdownExportOptions {
+            image_mode: images,
+            artifacts_dir: artifacts_dir.to_string(),
+            ..MarkdownExportOptions::default()
+        },
+    )
+}
+
+/// Render to Markdown per `options` ([`MarkdownExportOptions`], #599):
+/// content layers, picture traversal, escaping, the image placeholder and
+/// the image mode. Returns the Markdown and the referenced-image artifacts.
+pub fn to_markdown_with_options(
+    doc: &DoclingDocument,
+    strict: bool,
+    options: &MarkdownExportOptions,
+) -> (String, Vec<(String, Vec<u8>)>) {
+    let mut ctx = Ctx::new(doc, strict, options);
     let mut blocks: Vec<String> = Vec::new();
     render(&doc.nodes, &mut blocks, &mut ctx);
     let mut body = blocks.join("\n\n");
     // Strict mode only: turn recovered source hyperlinks into Markdown links.
     // docling's standard pipeline drops them, so doing this in legacy mode would
     // diverge from docling — hence strict-only, leaving conformance output intact.
-    if strict && !doc.links.is_empty() {
+    if strict && !options.plain_text && !doc.links.is_empty() {
         body = apply_links(&body, &doc.links);
     }
     let md = if body.is_empty() {
@@ -100,21 +269,13 @@ pub fn to_markdown_images(
 /// result into its cell text; the table serializer later turns the newlines
 /// into spaces.
 pub fn to_markdown_table_cell(doc: &DoclingDocument, strict: bool) -> String {
-    let mut ctx = Ctx {
-        strict,
-        compact_tables: doc.compact_tables,
-        images: ImageMode::Placeholder,
-        artifacts_dir: String::new(),
-        artifacts: Vec::new(),
-        pic_index: 0,
-        in_table_cell: true,
-        // A rich cell is one page's content; its sub-document carries no
-        // page boundaries and docling's `_iterate_items` runs the page-break
-        // scan over the document root only.
-        page_break: None,
-        pending_page_break: false,
-        emitted_any: false,
-    };
+    let mut ctx = Ctx::new(doc, strict, &MarkdownExportOptions::default());
+    ctx.in_table_cell = true;
+    ctx.artifacts_dir = String::new();
+    // A rich cell is one page's content; its sub-document carries no page
+    // boundaries and docling's `_iterate_items` runs the page-break scan
+    // over the document root only.
+    ctx.page_break = None;
     let mut blocks: Vec<String> = Vec::new();
     render(&doc.nodes, &mut blocks, &mut ctx);
     blocks.join("\n\n")
@@ -222,6 +383,20 @@ pub struct MarkdownStreamer {
     /// so the break it implies is paid by that batch's first block).
     page_break: Option<String>,
     pending_page_break: bool,
+    /// Whether an earlier push rendered an *item* — the page-break scan's
+    /// state ([`Ctx`]'s `emitted_any`). It differs from `emitted_any` (text
+    /// written) only when every block of the earlier pushes was empty and
+    /// dropped (#605): a page break before the next item is still owed then,
+    /// exactly as in the buffered export.
+    items_emitted: bool,
+    /// The export options beyond the image mode (#599): layers, picture
+    /// traversal, escaping, the placeholder — [`with_export_options`](Self::with_export_options).
+    layers: ContentLayers,
+    traverse_pictures: bool,
+    escape_html: bool,
+    escape_underscores: bool,
+    image_placeholder: String,
+    plain: bool,
 }
 
 impl MarkdownStreamer {
@@ -258,7 +433,32 @@ impl MarkdownStreamer {
             pic_index: 0,
             page_break: None,
             pending_page_break: false,
+            items_emitted: false,
+            layers: ContentLayers::BODY,
+            traverse_pictures: false,
+            escape_html: true,
+            escape_underscores: true,
+            image_placeholder: "<!-- image -->".to_string(),
+            plain: false,
         }
+    }
+
+    /// Take every setting of `options` ([`MarkdownExportOptions`], #599):
+    /// the image mode and artifacts directory the constructors took, plus the
+    /// content layers, picture traversal, escaping and image placeholder.
+    /// The concatenated chunks match the buffered
+    /// [`to_markdown_with_options`] byte-for-byte. Set before the first
+    /// [`push`](Self::push).
+    pub fn with_export_options(mut self, options: &MarkdownExportOptions) -> Self {
+        self.images = options.image_mode;
+        self.artifacts_dir = options.artifacts_dir.clone();
+        self.layers = options.layers;
+        self.traverse_pictures = options.traverse_pictures;
+        self.escape_html = options.escape_html;
+        self.escape_underscores = options.escape_underscores;
+        self.image_placeholder = options.image_placeholder.clone();
+        self.plain = options.plain_text;
+        self
     }
 
     /// Insert `placeholder` between pages, mirroring
@@ -294,20 +494,29 @@ impl MarkdownStreamer {
             in_table_cell: false,
             page_break: std::mem::take(&mut self.page_break),
             pending_page_break: self.pending_page_break,
-            emitted_any: self.emitted_any,
+            emitted_any: self.items_emitted,
+            layers: self.layers,
+            current_layer: None,
+            traverse_pictures: self.traverse_pictures,
+            escape_html: self.escape_html,
+            escape_underscores: self.escape_underscores,
+            image_placeholder: std::mem::take(&mut self.image_placeholder),
+            plain: self.plain,
         };
         let mut blocks: Vec<String> = Vec::new();
         render(nodes, &mut blocks, &mut ctx);
+        self.image_placeholder = std::mem::take(&mut ctx.image_placeholder);
         self.artifacts_dir = std::mem::take(&mut ctx.artifacts_dir);
         self.artifacts = std::mem::take(&mut ctx.artifacts);
         self.pic_index = ctx.pic_index;
         self.page_break = std::mem::take(&mut ctx.page_break);
         self.pending_page_break = ctx.pending_page_break;
+        self.items_emitted = ctx.emitted_any;
         if blocks.is_empty() {
             return String::new();
         }
         let mut body = blocks.join("\n\n");
-        if self.strict && !self.links.is_empty() {
+        if self.strict && !self.plain && !self.links.is_empty() {
             body = apply_links_chunk(&body, &mut self.links);
         }
         let chunk = if self.emitted_any {
@@ -349,6 +558,124 @@ fn strict_text(text: &str, strict: bool) -> String {
         .replace("( ", "(")
         .replace(" ]", "]")
         .replace("[ ", "[")
+}
+
+/// The plain export's inline text (#613): the Markdown markers docling-core's
+/// `PlainTextDocSerializer` never writes — `serialize_bold` / `_italic` /
+/// `_strikethrough` return the text, `serialize_hyperlink` the label, and
+/// `format_code_blocks=False` drops inline code's backticks. The backends
+/// bake those markers into an item's Markdown text (`***x***`, `**x**`,
+/// `*x*`, `~~x~~`, `` `x` ``, `[label](url)`, the set DocLang's run parser
+/// reads too), so they are taken out here, nested ones included. A marker
+/// counts only when it closes and its content is tight against both
+/// markers (CommonMark's flanking rule): `2 * 3 * 4` is arithmetic and IBM
+/// i's `*USE … have *OBJMGT` are special values, not emphasis, and stay as
+/// they are — docling's own emphasis around a space (WebVTT's `* *`) stays
+/// literal too. Inline `$…$` formulas pass through untouched.
+pub(crate) fn plain_inline(text: &str) -> String {
+    if !text.contains(['*', '~', '`', '[']) {
+        return text.to_string();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    plain_inline_into(&chars, &mut out);
+    out
+}
+
+fn plain_inline_into(chars: &[char], out: &mut String) {
+    let find = |open: usize, pat: &[char]| -> Option<usize> {
+        chars
+            .get(open..)?
+            .windows(pat.len())
+            .position(|w| w == pat)
+            .map(|p| open + p)
+    };
+    // An emphasis span opening at `i` with marker `pat`: its closing index
+    // when the content is non-empty and tight against both markers.
+    let span = |i: usize, pat: &[char]| -> Option<usize> {
+        if !chars[i..].starts_with(pat) {
+            return None;
+        }
+        let open = i + pat.len();
+        let end = find(open, pat)?;
+        (end > open && !chars[open].is_whitespace() && !chars[end - 1].is_whitespace())
+            .then_some(end)
+    };
+    let mut i = 0;
+    while i < chars.len() {
+        let mut matched = false;
+        for pat in [&['*', '*', '*'][..], &['*', '*'], &['~', '~'], &['*']] {
+            if let Some(end) = span(i, pat) {
+                plain_inline_into(&chars[i + pat.len()..end], out);
+                i = end + pat.len();
+                matched = true;
+                break;
+            }
+        }
+        if matched {
+            continue;
+        }
+        // Inline code: content tight against both backticks, as docling
+        // writes it — a backtick opening a quotation (`` `like this’ ``,
+        // JATS prose) stays.
+        if chars[i] == '`' {
+            if let Some(end) = find(i + 1, &['`']).filter(|&e| {
+                e > i + 1 && !chars[i + 1].is_whitespace() && !chars[e - 1].is_whitespace()
+            }) {
+                out.extend(&chars[i + 1..end]);
+                i = end + 1;
+                continue;
+            }
+        }
+        // An inline formula is LaTeX, printed as it is — its brackets and
+        // stars are not Markdown.
+        if chars[i] == '$' {
+            if let Some(end) = find(i + 1, &['$']) {
+                out.extend(&chars[i..=end]);
+                i = end + 1;
+                continue;
+            }
+        }
+        // A link: the `]` closing this `[` (brackets nest) directly followed
+        // by `(` — a citation `[23,24]` before a later link is no anchor.
+        if chars[i] == '[' {
+            if let Some(close) = closing_bracket(chars, i) {
+                if chars.get(close + 1) == Some(&'(') {
+                    if let Some(endp) = crate::doclang::link_dest_end(chars, close + 2) {
+                        plain_inline_into(&chars[i + 1..close], out);
+                        i = endp + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        // A run of the same marker that opened nothing stays literal as a
+        // whole, so `***` before a lone `*` is not re-read from its middle.
+        let c = chars[i];
+        out.push(c);
+        i += 1;
+        if matches!(c, '*' | '~') {
+            while i < chars.len() && chars[i] == c {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+}
+
+/// The index of the `]` matching the `[` at `open`, nested brackets
+/// balanced; `None` when it never closes.
+fn closing_bracket(chars: &[char], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (k, c) in chars.iter().enumerate().skip(open + 1) {
+        match c {
+            '[' => depth += 1,
+            ']' if depth == 0 => return Some(k),
+            ']' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
 }
 
 /// docling-core 2.92's `_md_line_breaks` (docling-core#721): a single `\n`
@@ -423,7 +750,7 @@ fn render(nodes: &[Node], blocks: &mut Vec<String>, ctx: &mut Ctx) {
                         _ => break,
                     }
                 }
-                render_list_run(&nodes[start..i], blocks, ctx.strict);
+                render_list_run(&nodes[start..i], blocks, ctx);
             }
             other => {
                 render_one(other, blocks, ctx);
@@ -431,6 +758,17 @@ fn render(nodes: &[Node], blocks: &mut Vec<String>, ctx: &mut Ctx) {
             }
         }
         if blocks.len() > before {
+            // docling-core joins only the parts that carry text
+            // (`"\n\n".join(p.text for p in parts if p.text)`, at the
+            // document and every group scope), so an item that renders an
+            // empty block — a picture or chart under `image_placeholder: ""`,
+            // an empty field part or inline group — adds no blank lines
+            // (#605). It still counts as an item for the page-break scan:
+            // upstream's page-break marker sits between the *items* of two
+            // pages and is never empty itself, so the placeholder below still
+            // goes in (an empty placeholder keeps its doubled delimiter).
+            let kept: Vec<String> = blocks.drain(before..).filter(|b| !b.is_empty()).collect();
+            blocks.extend(kept);
             if ctx.pending_page_break {
                 // The placeholder is a block of its own, joined by the document
                 // delimiter like docling's `_PageBreakSerResult` part — an
@@ -451,7 +789,7 @@ fn render(nodes: &[Node], blocks: &mut Vec<String>, ctx: &mut Ctx) {
 /// Ordered items use their explicit `number`. A new sibling list (marked by
 /// `first_in_list`) at the same depth is separated by a blank line, matching
 /// docling-core's serializer.
-fn render_list_run(items: &[Node], blocks: &mut Vec<String>, strict: bool) {
+fn render_list_run(items: &[Node], blocks: &mut Vec<String>, ctx: &Ctx) {
     let mut lines: Vec<String> = Vec::new();
     // Whether a top-level item has been rendered yet — a fresh-list flag on
     // the very first item opens nothing.
@@ -464,7 +802,7 @@ fn render_list_run(items: &[Node], blocks: &mut Vec<String>, strict: bool) {
             first_in_list,
             text,
             level,
-            marker: _,
+            marker: orig_marker,
             location: _,
             dclx: _,
             href: _,
@@ -473,9 +811,10 @@ fn render_list_run(items: &[Node], blocks: &mut Vec<String>, strict: bool) {
         else {
             continue;
         };
-        // A non-body (furniture) list item is omitted from Markdown, matching
-        // docling's content-layer filtering.
-        if layer.is_some() {
+        // docling's content-layer filtering: an item renders when its layer
+        // — its own, else the layer of the group it sits in — is in the set
+        // (body only by default, so a furniture list item is omitted).
+        if !ctx.layers.contains(layer.or(ctx.current_layer)) {
             continue;
         }
         let level = *level as usize;
@@ -496,12 +835,20 @@ fn render_list_run(items: &[Node], blocks: &mut Vec<String>, strict: bool) {
         }
 
         let indent = "    ".repeat(level);
-        let marker = if *ordered {
-            format!("{number}.")
-        } else {
-            "-".to_string()
+        // docling-core's `case_already_valid`: a marker of digits and a dot
+        // prints verbatim — Python's `\d+\.` admits every Unicode decimal
+        // digit, so a DOCX `decimalFullWidth` marker (`１.`, docling#4336)
+        // is kept as it is rather than renumbered in ASCII.
+        let verbatim = orig_marker.as_deref().filter(|m| {
+            m.strip_suffix('.')
+                .is_some_and(|d| !d.is_empty() && d.chars().all(char::is_numeric))
+        });
+        let marker = match verbatim {
+            Some(m) if *ordered => m.to_string(),
+            _ if *ordered => format!("{number}."),
+            _ => "-".to_string(),
         };
-        lines.push(format!("{indent}{marker} {}", list_item_text(text, strict)));
+        lines.push(format!("{indent}{marker} {}", list_item_text(text, ctx)));
     }
 
     // A run consisting only of furniture (content-layer-filtered) items yields no
@@ -518,8 +865,11 @@ fn render_list_run(items: &[Node], blocks: &mut Vec<String>, strict: bool) {
 /// the item line with plain newlines — so a folded tail keeps its newlines
 /// unmarked. The tail is recognised structurally: every line after the first is
 /// an image marker or an alt caption directly followed by one.
-fn list_item_text(text: &str, strict: bool) -> String {
-    let escaped = strict_text(text, strict);
+fn list_item_text(text: &str, ctx: &Ctx) -> String {
+    let escaped = ctx.text(text);
+    if ctx.plain {
+        return escaped;
+    }
     if let Some((own, tail)) = escaped.split_once('\n') {
         if is_folded_child_tail(tail) {
             return format!("{}\n{tail}", md_line_breaks(own));
@@ -562,10 +912,42 @@ fn is_folded_child_tail(tail: &str) -> bool {
     any
 }
 
+/// Render one item: docling's content-layer gate first — an item whose layer
+/// (the group's or wrapper's it sits in, else the body) is outside the set
+/// renders nothing, while a container still walks its children — then the
+/// item itself.
 fn render_one(node: &Node, blocks: &mut Vec<String>, ctx: &mut Ctx) {
     match node {
+        // Containers and layer wrappers decide for their children.
+        Node::Group { .. }
+        | Node::Furniture { .. }
+        | Node::PageFurniture { .. }
+        | Node::FurnitureText { .. }
+        | Node::CommentSection { .. }
+        | Node::PictureChildren(_)
+        | Node::Commented { .. }
+        | Node::Located { .. }
+        | Node::Prov { .. }
+        | Node::Track { .. }
+        | Node::PageBreak
+        | Node::PageInfo { .. }
+        | Node::DoclangOnly(_) => {}
+        _ if !ctx.layer_visible() => return,
+        _ => {}
+    }
+    render_item(node, blocks, ctx)
+}
+
+fn render_item(node: &Node, blocks: &mut Vec<String>, ctx: &mut Ctx) {
+    match node {
         Node::Heading { level, text } => {
-            let text = heading_line_breaks(&strict_text(text, ctx.strict));
+            if ctx.plain {
+                // `PlainTextTextSerializer`: the heading's text as it is —
+                // no `#`, its newlines kept.
+                blocks.push(ctx.text(text));
+                return;
+            }
+            let text = heading_line_breaks(&ctx.text(text));
             if ctx.in_table_cell {
                 // docling-core#540: no `#` markers inside a table cell.
                 blocks.push(text);
@@ -577,23 +959,21 @@ fn render_one(node: &Node, blocks: &mut Vec<String>, ctx: &mut Ctx) {
         // An empty body paragraph (docling's blank-line text item) contributes
         // nothing to Markdown — only DocLang/JSON keep it.
         Node::Paragraph { text } if text.is_empty() => {}
-        Node::Paragraph { text } => blocks.push(md_line_breaks(&strict_text(text, ctx.strict))),
+        Node::Paragraph { text } => blocks.push(ctx.breaks(&ctx.text(text))),
+        Node::LabeledText { .. } => render_item(&node.labeled_as_paragraph(), blocks, ctx),
         // A standalone caption item renders like a text item; its hyperlink
         // annotation becomes a Markdown link around the whole caption.
         Node::Caption { text, .. } if text.is_empty() => {}
         Node::Caption { text, href } => {
-            let body = md_line_breaks(&strict_text(text, ctx.strict));
+            let body = ctx.breaks(&ctx.text(text));
             blocks.push(match href {
-                Some(url) => format!("[{body}]({url})"),
-                None => body,
+                Some(url) if !ctx.plain => format!("[{body}]({url})"),
+                _ => body,
             });
         }
         Node::CheckboxItem { checked, text } => {
             let mark = if *checked { "- [x] " } else { "- [ ] " };
-            blocks.push(md_line_breaks(&strict_text(
-                &format!("{mark}{text}"),
-                ctx.strict,
-            )));
+            blocks.push(ctx.breaks(&ctx.text(&format!("{mark}{text}"))));
         }
         Node::Code {
             language,
@@ -612,7 +992,13 @@ fn render_one(node: &Node, blocks: &mut Vec<String>, ctx: &mut Ctx) {
                 Some(p) if ctx.strict => p.as_str(),
                 _ => text.as_str(),
             };
-            blocks.push(format!("```{lang}\n{body}\n```"));
+            // The plain export (`format_code_blocks=False`) prints the code
+            // as it is.
+            blocks.push(if ctx.plain {
+                body.to_string()
+            } else {
+                format!("```{lang}\n{body}\n```")
+            });
         }
         // A CodeFormula-decoded display formula renders as docling's `$$…$$`
         // (the un-enriched pipeline emits a placeholder paragraph instead).
@@ -622,19 +1008,36 @@ fn render_one(node: &Node, blocks: &mut Vec<String>, ctx: &mut Ctx) {
             // `caption` is already escaped (backend convention), like a paragraph.
             if let Some(cap) = &table.caption {
                 if !cap.is_empty() {
-                    blocks.push(md_line_breaks(&strict_text(cap, ctx.strict)));
+                    blocks.push(ctx.breaks(&ctx.text(cap)));
                 }
             }
-            let rendered = render_table(table, ctx.compact_tables);
+            let rendered = if ctx.plain {
+                render_table(&ctx.plain_table(table), ctx.compact_tables)
+            } else {
+                render_table(table, ctx.compact_tables)
+            };
             if !rendered.is_empty() {
                 blocks.push(rendered);
             }
         }
-        // Classification predictions don't affect docling's Markdown output.
-        Node::Picture { caption, image, .. } => {
+        // Classification predictions don't affect docling's Markdown output;
+        // a description (the picture-OCR text, #645) prints between the
+        // caption and the image placeholder — docling's
+        // `MarkdownPictureSerializer` order: captions, annotations, image.
+        Node::Picture {
+            caption,
+            image,
+            description,
+            ..
+        } => {
             if let Some(cap) = caption {
                 if !cap.is_empty() {
-                    blocks.push(md_line_breaks(cap));
+                    blocks.push(ctx.breaks(&ctx.caption(cap)));
+                }
+            }
+            if let Some(desc) = description {
+                if !desc.text.is_empty() {
+                    blocks.push(ctx.breaks(&ctx.text(&desc.text)));
                 }
             }
             blocks.push(picture_marker(image.as_ref(), ctx));
@@ -650,21 +1053,35 @@ fn render_one(node: &Node, blocks: &mut Vec<String>, ctx: &mut Ctx) {
         } => {
             if let Some(cap) = caption {
                 if !cap.is_empty() {
-                    blocks.push(md_line_breaks(cap));
+                    blocks.push(ctx.breaks(&ctx.caption(cap)));
                 }
             }
             blocks.push(picture_marker(None, ctx));
             blocks.push(humanize_label(kind));
-            let rendered = render_table(table, false);
+            let rendered = if ctx.plain {
+                render_table(&ctx.plain_table(table), false)
+            } else {
+                render_table(table, false)
+            };
             if !rendered.is_empty() {
                 blocks.push(rendered);
             }
         }
         // A DocLang-only node is omitted from Markdown.
         Node::DoclangOnly(_) => {}
-        // A group on a non-body layer (a hidden spreadsheet sheet) renders
-        // nothing, like every other non-body item.
-        Node::Group { layer: Some(_), .. } => {}
+        // A group on a non-body layer (a hidden spreadsheet sheet): its items
+        // sit on that layer, as every item of such a sheet does upstream — so
+        // they render exactly when the set includes it (#599), nothing by
+        // default.
+        Node::Group {
+            layer: Some(layer),
+            children,
+            ..
+        } => {
+            let outer = ctx.current_layer.replace(*layer);
+            render(children, blocks, ctx);
+            ctx.current_layer = outer;
+        }
         Node::Group { children, .. } => render(children, blocks, ctx),
         Node::FieldRegion { items } => {
             // The region container and each field item carry no text of their
@@ -673,31 +1090,61 @@ fn render_one(node: &Node, blocks: &mut Vec<String>, ctx: &mut Ctx) {
             // only an item's marker/key/value appear, as separate paragraphs.
             for item in items {
                 for part in [&item.marker, &item.key, &item.value].into_iter().flatten() {
-                    blocks.push(md_line_breaks(&strict_text(part, ctx.strict)));
+                    blocks.push(ctx.breaks(&ctx.text(part)));
                 }
             }
         }
+        // docling's Markdown serializer has no component for a `KeyValueItem`
+        // and writes its fallback placeholder in the item's place.
+        Node::KeyValueGraph { .. } => blocks.push(MISSING_KEY_VALUE_ITEM.to_string()),
         // A rich inline group renders exactly like a paragraph of its Markdown
         // text — the structured runs are DocLang-only.
-        Node::InlineGroup { md_text, .. } => {
-            blocks.push(md_line_breaks(&strict_text(md_text, ctx.strict)))
-        }
+        Node::InlineGroup { md_text, .. } => blocks.push(ctx.breaks(&ctx.text(md_text))),
         // A plain-text backend dump renders verbatim as a single block.
         Node::TextDump(text) => {
             if !text.is_empty() {
                 blocks.push(text.clone());
             }
         }
-        // Furniture (page headers/footers, HTML `<title>`) is excluded from
-        // Markdown by default, mirroring docling.
-        Node::Furniture { .. } => {}
-        Node::PageFurniture { .. } => {}
-        // A comment lives in the notes layer — omitted like other furniture;
-        // the annotation on a body item is JSON-only, so render the item.
-        Node::CommentSection { .. } => {}
+        // Furniture (page headers/footers, HTML `<title>`, notes) is out of
+        // the default body-only export, mirroring docling; a set that
+        // includes its layer renders the wrapped item like a body item (#599).
+        Node::Furniture { layer, inner } => {
+            let outer = ctx.current_layer.replace(*layer);
+            render_one(inner, blocks, ctx);
+            ctx.current_layer = outer;
+        }
+        // A page header/footer or a `.doc` furniture paragraph: upstream's
+        // `page_header` / `page_footer` / `footnote` text item, a plain
+        // paragraph when the furniture layer renders.
+        Node::PageFurniture { text, .. } | Node::FurnitureText { text, .. } => {
+            if ctx.layers.furniture && !text.is_empty() {
+                blocks.push(ctx.breaks(&ctx.text(text)));
+            }
+        }
+        // A picture's contained text: docling's Markdown picture serializer
+        // prints the caption and the image, never the children — unless the
+        // export traverses pictures, when the item walk yields them after
+        // the picture and they render as the text items they are (#599).
+        Node::PictureChildren(children) => {
+            if ctx.traverse_pictures {
+                render(children, blocks, ctx);
+            }
+        }
+        // A comment lives in the notes layer — out like other furniture
+        // unless that layer renders (the note's `[author: …]: text` as a
+        // paragraph); the annotation on a body item is JSON-only, so render
+        // the item.
+        Node::CommentSection { text, .. } => {
+            if ctx.layers.notes && !text.is_empty() {
+                blocks.push(ctx.breaks(&ctx.text(text)));
+            }
+        }
         Node::Commented { inner, .. } => render_one(inner, blocks, ctx),
         // Layout provenance is DocLang-only; render the wrapped node.
-        Node::Located { inner, .. } | Node::Prov { inner, .. } => render_one(inner, blocks, ctx),
+        Node::Located { inner, .. } | Node::Prov { inner, .. } | Node::Track { inner, .. } => {
+            render_one(inner, blocks, ctx)
+        }
         // Page breaks are DocLang-only; docling omits them from Markdown.
         Node::PageBreak => {}
         // Page markers feed the JSON export only.
@@ -706,7 +1153,7 @@ fn render_one(node: &Node, blocks: &mut Vec<String>, ctx: &mut Ctx) {
         // item (a hand-built document, or a `Located` wrapper around one)
         // still renders as its own one-item list instead of panicking —
         // `nodes` is public API, so every representable tree must serialize.
-        Node::ListItem { .. } => render_list_run(std::slice::from_ref(node), blocks, ctx.strict),
+        Node::ListItem { .. } => render_list_run(std::slice::from_ref(node), blocks, ctx),
     }
 }
 
@@ -725,7 +1172,10 @@ fn humanize_label(label: &str) -> String {
 
 fn picture_marker(image: Option<&crate::PictureImage>, ctx: &mut Ctx) -> String {
     match (ctx.images, image) {
-        (ImageMode::Embedded, Some(img)) => format!("![Image]({})", img.data_uri()),
+        // docling embeds the `ImageRef`'s PNG (a JPEG re-encoded).
+        (ImageMode::Embedded, Some(img)) => {
+            format!("![Image]({})", crate::pixel_digest::docling_data_uri(img).1)
+        }
         (ImageMode::Referenced, Some(img)) => {
             let path = format!(
                 "{}/image_{:06}.{}",
@@ -738,7 +1188,7 @@ fn picture_marker(image: Option<&crate::PictureImage>, ctx: &mut Ctx) -> String 
             format!("![Image]({})", escape_uri_path(&path))
         }
         // Placeholder, or any mode with no extracted image.
-        _ => "<!-- image -->".to_string(),
+        _ => ctx.image_placeholder.clone(),
     }
 }
 
@@ -825,7 +1275,7 @@ fn percent_quote(s: &str, safe: &str) -> String {
     out
 }
 
-fn ext_for(mimetype: &str) -> &str {
+pub(crate) fn ext_for(mimetype: &str) -> &str {
     match mimetype {
         "image/jpeg" => "jpg",
         "image/gif" => "gif",
@@ -1283,13 +1733,16 @@ mod tests {
             caption: None,
             caption_href: None,
             image: Some(PictureImage {
+                dpi: PictureImage::DEFAULT_DPI,
                 mimetype: "image/png".into(),
                 width: 1,
                 height: 1,
                 data: b"x".to_vec(),
             }),
             classification: None,
+            description: None,
             caption_parent: Default::default(),
+            caption_location: None,
         });
         let (md, files) = doc
             .export_to_markdown_with_images(ImageMode::Referenced, "My Report (final)_artifacts");
@@ -1306,16 +1759,18 @@ mod tests {
     /// still a GFM hard line break.
     #[test]
     fn folded_list_item_pictures_keep_plain_newlines() {
+        let doc = DoclingDocument::new("t");
+        let ctx = Ctx::new(&doc, false, &MarkdownExportOptions::default());
         assert_eq!(
-            list_item_text("Step\n<!-- image -->", false),
+            list_item_text("Step\n<!-- image -->", &ctx),
             "Step\n<!-- image -->"
         );
         assert_eq!(
-            list_item_text("Step\nAlt text\n<!-- image -->\n<!-- image -->", false),
+            list_item_text("Step\nAlt text\n<!-- image -->\n<!-- image -->", &ctx),
             "Step\nAlt text\n<!-- image -->\n<!-- image -->"
         );
         assert_eq!(
-            list_item_text("line one\nline two", false),
+            list_item_text("line one\nline two", &ctx),
             "line one  \nline two"
         );
     }
@@ -1457,6 +1912,97 @@ mod tests {
         assert_eq!(render_table(&t, true), "| h |\n| - |\n| d |");
     }
 
+    /// A table with first-class 1×1 cells, `column_header` where `ched` says.
+    fn flagged_table(rows: &[&[&str]], ched: impl Fn(usize, usize) -> bool) -> Table {
+        let mut cells = Vec::new();
+        for (r, row) in rows.iter().enumerate() {
+            for (c, text) in row.iter().enumerate() {
+                cells.push(TableCell {
+                    text: (*text).into(),
+                    bbox: None,
+                    start_row: r,
+                    start_col: c,
+                    row_span: 1,
+                    col_span: 1,
+                    column_header: ched(r, c),
+                    row_header: false,
+                    row_section: false,
+                });
+            }
+        }
+        Table {
+            rows: rows
+                .iter()
+                .map(|row| row.iter().map(|t| (*t).to_string()).collect())
+                .collect(),
+            cells: Some(cells),
+            ..Default::default()
+        }
+    }
+
+    /// #604 (docling-core#766, 2.97): a row whose first-column label is a
+    /// `column_header` but whose other cells carry body text stops the header
+    /// block. Expected outputs are docling-core 2.99's, byte for byte.
+    #[test]
+    fn rows_with_body_text_stop_the_header_block() {
+        // The issue's form: labels flagged on every row, a real header on top.
+        let t = flagged_table(
+            &[
+                &["Item", "Q1", "Q2"],
+                &["Sales", "10", "20"],
+                &["Costs", "5", "7"],
+            ],
+            |r, c| r == 0 || c == 0,
+        );
+        assert_eq!(t.header_row_count(), 1);
+        assert_eq!(
+            render_table(&t, false),
+            "| Item   |   Q1 |   Q2 |\n\
+             |--------|------|------|\n\
+             | Sales  |   10 |   20 |\n\
+             | Costs  |    5 |    7 |"
+        );
+        // Labels on every row and no header row: row 0 stops, later rows are
+        // flagged → nothing promotable, the body keeps every row.
+        let t = flagged_table(&[&["Sales", "10", "20"], &["Costs", "5", "7"]], |_, c| {
+            c == 0
+        });
+        assert_eq!(t.header_row_count(), 0);
+        assert_eq!(
+            render_table(&t, false),
+            "|       |    |    |\n\
+             |-------|----|----|\n\
+             | Sales | 10 | 20 |\n\
+             | Costs |  5 |  7 |"
+        );
+        let t = flagged_table(
+            &[&["a", "1", "2"], &["b", "3", "4"], &["c", "5", "6"]],
+            |r, c| c == 0 && r < 2,
+        );
+        assert_eq!(t.header_row_count(), 0);
+        // Row 0 stops on its body text, but no later row carries a flag:
+        // row 0 is the header anyway, as for an unflagged table.
+        let t = flagged_table(&[&["a", "1", "2"], &["b", "3", "4"]], |r, c| {
+            r == 0 && c == 0
+        });
+        assert_eq!(t.header_row_count(), 1);
+        assert_eq!(
+            render_table(&t, false),
+            "| a   |   1 |   2 |\n\
+             |-----|-----|-----|\n\
+             | b   |   3 |   4 |"
+        );
+        // Blank cells beside a flagged label are not body text.
+        let t = flagged_table(&[&["Item", "", ""], &["x", "1", "2"]], |_, c| c == 0);
+        assert_eq!(t.header_row_count(), 1);
+        assert_eq!(
+            render_table(&t, false),
+            "| Item   |    |    |\n\
+             |--------|----|----|\n\
+             | x      |  1 |  2 |"
+        );
+    }
+
     #[test]
     fn renders_compact_table() {
         let mut doc = DoclingDocument::new("t");
@@ -1471,6 +2017,7 @@ mod tests {
             cells: None,
             caption: None,
             caption_parent: Default::default(),
+            caption_location: None,
         }));
         let md = doc.export_to_markdown();
         assert_eq!(md, "| a | b |\n| - | - |\n| 1 | 2 |\n");
@@ -1487,6 +2034,7 @@ mod tests {
             cells: None,
             caption: None,
             caption_parent: Default::default(),
+            caption_location: None,
         }));
         let md = doc.export_to_markdown();
         // Numeric data columns are right-aligned; columns padded to header+2.
@@ -1608,18 +2156,22 @@ mod tests {
             cells: None,
             caption: None,
             caption_parent: Default::default(),
+            caption_location: None,
         }));
         doc.push(Node::Picture {
             caption: Some("Fig 1".into()),
             caption_href: None,
             image: Some(PictureImage {
+                dpi: PictureImage::DEFAULT_DPI,
                 mimetype: "image/png".into(),
                 width: 2,
                 height: 2,
                 data: b"png-one".to_vec(),
             }),
             classification: None,
+            description: None,
             caption_parent: Default::default(),
+            caption_location: None,
         });
         doc.add_paragraph("Last paragraph.");
         // A second embedded picture, so referenced mode must keep numbering
@@ -1628,13 +2180,16 @@ mod tests {
             caption: None,
             caption_href: None,
             image: Some(PictureImage {
+                dpi: PictureImage::DEFAULT_DPI,
                 mimetype: "image/png".into(),
                 width: 2,
                 height: 2,
                 data: b"png-two".to_vec(),
             }),
             classification: None,
+            description: None,
             caption_parent: Default::default(),
+            caption_location: None,
         });
 
         // A run of list items must never straddle a split, so try splits that fall
@@ -1772,5 +2327,456 @@ mod tests {
         assert_eq!(doc.export_to_markdown(), "see [ 37 , 36 ] and ( x ) .\n");
         // Strict tightens punctuation for readable Markdown.
         assert_eq!(doc.export_to_markdown_with(true), "see [37, 36] and (x).\n");
+    }
+
+    // ----- MarkdownExportOptions (#599) ------------------------------------
+
+    /// A document touching every option: furniture, a comment, a hidden
+    /// sheet group, a picture with nested text, escaped text.
+    fn options_doc() -> DoclingDocument {
+        use crate::document::ContentLayer;
+        let mut doc = DoclingDocument::new("opts");
+        doc.push(Node::PageFurniture {
+            footer: false,
+            location: [0, 0, 0, 0],
+            text: "FAX COVER \\_ R&amp;D".into(),
+        });
+        doc.add_heading(1, "R&amp;D \\_ report");
+        doc.add_paragraph("Body a\\_b &lt;tag&gt;");
+        doc.push(Node::Picture {
+            caption: Some("Figure 1".into()),
+            caption_href: None,
+            image: None,
+            classification: None,
+            description: None,
+            caption_parent: Default::default(),
+            caption_location: None,
+        });
+        doc.push(Node::PictureChildren(vec![
+            Node::Paragraph {
+                text: "Field: Name".into(),
+            },
+            Node::Paragraph {
+                text: "Field: Date".into(),
+            },
+        ]));
+        doc.push(Node::CommentSection {
+            name: "comment-1".into(),
+            text: "[author: A]: note".into(),
+            refs_note_text: false,
+            grouped: true,
+        });
+        doc.push(Node::Group {
+            label: "section".into(),
+            name: Some("sheet: Hidden".into()),
+            layer: Some(ContentLayer::Invisible),
+            children: vec![Node::Paragraph {
+                text: "hidden cell".into(),
+            }],
+        });
+        doc.push(Node::Furniture {
+            layer: ContentLayer::Furniture,
+            inner: Box::new(Node::Paragraph {
+                text: "Page 1 of 2".into(),
+            }),
+        });
+        doc.push(Node::FurnitureText {
+            label: "page_footer".into(),
+            text: "footer line".into(),
+        });
+        doc
+    }
+
+    /// The defaults are docling's: the options export is the plain export,
+    /// byte for byte — and the plain export is unchanged (furniture, notes,
+    /// hidden sheets and picture children out; escaping kept).
+    #[test]
+    fn default_options_are_the_default_export() {
+        let doc = options_doc();
+        let plain = doc.export_to_markdown();
+        assert_eq!(
+            plain,
+            "# R&amp;D \\_ report\n\nBody a\\_b &lt;tag&gt;\n\nFigure 1\n\n<!-- image -->\n"
+        );
+        let (with_default, artifacts) =
+            doc.export_to_markdown_with_options(&MarkdownExportOptions::default());
+        assert_eq!(with_default, plain);
+        assert!(artifacts.is_empty());
+    }
+
+    #[test]
+    fn layers_render_furniture_notes_and_hidden_sheets() {
+        use crate::document::ContentLayer;
+        let doc = options_doc();
+        let md = |layers: ContentLayers| {
+            doc.export_to_markdown_with_options(&MarkdownExportOptions {
+                layers,
+                ..MarkdownExportOptions::default()
+            })
+            .0
+        };
+        assert_eq!(
+            md(ContentLayers::BODY.with(ContentLayer::Furniture)),
+            "FAX COVER \\_ R&amp;D\n\n# R&amp;D \\_ report\n\nBody a\\_b &lt;tag&gt;\n\nFigure 1\n\n<!-- image -->\n\nPage 1 of 2\n\nfooter line\n",
+            "a page header, a furniture-wrapped paragraph and a furniture text item render as paragraphs"
+        );
+        assert_eq!(
+            md(ContentLayers::BODY.with(ContentLayer::Notes)),
+            "# R&amp;D \\_ report\n\nBody a\\_b &lt;tag&gt;\n\nFigure 1\n\n<!-- image -->\n\n[author: A]: note\n"
+        );
+        assert_eq!(
+            md(ContentLayers::BODY.with(ContentLayer::Invisible)),
+            "# R&amp;D \\_ report\n\nBody a\\_b &lt;tag&gt;\n\nFigure 1\n\n<!-- image -->\n\nhidden cell\n",
+            "a hidden sheet's items sit on the sheet's layer"
+        );
+        assert_eq!(
+            md(ContentLayers::NONE.with(ContentLayer::Furniture)),
+            "FAX COVER \\_ R&amp;D\n\nPage 1 of 2\n\nfooter line\n",
+            "without the body layer only the furniture prints"
+        );
+        assert_eq!(md(ContentLayers::NONE), "");
+        assert_eq!(
+            md(ContentLayers::ALL),
+            "FAX COVER \\_ R&amp;D\n\n# R&amp;D \\_ report\n\nBody a\\_b &lt;tag&gt;\n\nFigure 1\n\n<!-- image -->\n\n[author: A]: note\n\nhidden cell\n\nPage 1 of 2\n\nfooter line\n"
+        );
+    }
+
+    /// A list item carries its own layer: a furniture list renders with the
+    /// furniture layer and stays out of the body export.
+    #[test]
+    fn layers_apply_to_list_items() {
+        use crate::document::ContentLayer;
+        let mut doc = DoclingDocument::new("lists");
+        doc.push(Node::ListItem {
+            ordered: false,
+            number: 1,
+            first_in_list: true,
+            text: "nav link".into(),
+            level: 0,
+            marker: None,
+            location: None,
+            dclx: None,
+            href: None,
+            layer: Some(ContentLayer::Furniture),
+        });
+        doc.add_paragraph("body");
+        assert_eq!(doc.export_to_markdown(), "body\n");
+        let (md, _) = doc.export_to_markdown_with_options(&MarkdownExportOptions {
+            layers: ContentLayers::BODY.with(ContentLayer::Furniture),
+            ..MarkdownExportOptions::default()
+        });
+        assert_eq!(md, "- nav link\n\nbody\n");
+    }
+
+    #[test]
+    fn traverse_pictures_prints_the_nested_text_after_the_picture() {
+        let doc = options_doc();
+        let (md, _) = doc.export_to_markdown_with_options(&MarkdownExportOptions {
+            traverse_pictures: true,
+            ..MarkdownExportOptions::default()
+        });
+        assert_eq!(
+            md,
+            "# R&amp;D \\_ report\n\nBody a\\_b &lt;tag&gt;\n\nFigure 1\n\n<!-- image -->\n\nField: Name\n\nField: Date\n"
+        );
+    }
+
+    #[test]
+    fn escaping_can_be_turned_off_per_kind() {
+        let doc = options_doc();
+        let (md, _) = doc.export_to_markdown_with_options(&MarkdownExportOptions {
+            escape_html: false,
+            ..MarkdownExportOptions::default()
+        });
+        assert_eq!(
+            md,
+            "# R&D \\_ report\n\nBody a\\_b <tag>\n\nFigure 1\n\n<!-- image -->\n"
+        );
+        let (md, _) = doc.export_to_markdown_with_options(&MarkdownExportOptions {
+            escape_underscores: false,
+            ..MarkdownExportOptions::default()
+        });
+        assert_eq!(
+            md,
+            "# R&amp;D _ report\n\nBody a_b &lt;tag&gt;\n\nFigure 1\n\n<!-- image -->\n"
+        );
+        // Code and table cells are never touched (upstream leaves them
+        // unescaped too, so nothing was escaped there to undo).
+        let mut doc = DoclingDocument::new("code");
+        doc.push(Node::Code {
+            language: None,
+            text: "a &amp; b \\_ c".into(),
+            orig: None,
+            pretty: None,
+        });
+        let (md, _) = doc.export_to_markdown_with_options(&MarkdownExportOptions {
+            escape_html: false,
+            escape_underscores: false,
+            ..MarkdownExportOptions::default()
+        });
+        assert_eq!(md, "```\na &amp; b \\_ c\n```\n");
+    }
+
+    #[test]
+    fn image_placeholder_is_configurable() {
+        let doc = options_doc();
+        let (md, _) = doc.export_to_markdown_with_options(&MarkdownExportOptions {
+            image_placeholder: "[figure]".into(),
+            ..MarkdownExportOptions::default()
+        });
+        assert!(md.contains("Figure 1\n\n[figure]\n"), "{md}");
+        assert!(!md.contains("<!-- image -->"));
+    }
+
+    /// #605: an empty `image_placeholder` prints nothing — no empty block, so
+    /// no extra blank lines — while the page-break scan still counts the
+    /// picture as an item. Every expectation is docling-core 2.99's own
+    /// `export_to_markdown(image_placeholder="", page_break_placeholder=…)`
+    /// (plus the trailing newline this port always writes).
+    #[test]
+    fn empty_image_placeholder_prints_nothing() {
+        fn picture(caption: Option<&str>) -> Node {
+            Node::Picture {
+                caption: caption.map(Into::into),
+                caption_href: None,
+                image: None,
+                classification: None,
+                description: None,
+                caption_parent: Default::default(),
+                caption_location: None,
+            }
+        }
+        fn page(no: usize) -> Node {
+            Node::PageInfo {
+                page_no: no,
+                width: 100.0,
+                height: 100.0,
+            }
+        }
+        fn para(text: &str) -> Node {
+            Node::Paragraph { text: text.into() }
+        }
+        let options = MarkdownExportOptions {
+            image_placeholder: String::new(),
+            ..MarkdownExportOptions::default()
+        };
+        // (nodes, page-break placeholder, expected)
+        let cases: Vec<(Vec<Node>, Option<&str>, &str)> = vec![
+            (
+                vec![page(1), para("a"), picture(None), para("b")],
+                None,
+                "a\n\nb\n",
+            ),
+            (
+                vec![page(1), para("a"), picture(Some("Figure 1")), para("b")],
+                None,
+                "a\n\nFigure 1\n\nb\n",
+            ),
+            (
+                vec![
+                    page(1),
+                    para("a"),
+                    page(2),
+                    picture(None),
+                    page(3),
+                    para("b"),
+                ],
+                Some("<!-- pb -->"),
+                "a\n\n<!-- pb -->\n\n<!-- pb -->\n\nb\n",
+            ),
+            (
+                vec![
+                    page(1),
+                    para("a"),
+                    page(2),
+                    picture(None),
+                    page(3),
+                    para("b"),
+                ],
+                Some(""),
+                "a\n\n\n\n\n\nb\n",
+            ),
+            (
+                vec![page(1), picture(None), page(2), para("b")],
+                Some("<!-- pb -->"),
+                "<!-- pb -->\n\nb\n",
+            ),
+            (
+                vec![page(1), picture(None), page(2), para("b")],
+                Some(""),
+                "\n\nb\n",
+            ),
+            (
+                vec![page(1), para("a"), page(2), picture(None)],
+                Some("<!-- pb -->"),
+                "a\n\n<!-- pb -->\n",
+            ),
+        ];
+        for (nodes, placeholder, expected) in cases {
+            let mut doc = DoclingDocument::new("t");
+            doc.page_break_placeholder = placeholder.map(Into::into);
+            for node in nodes {
+                doc.push(node);
+            }
+            let (md, _) = doc.export_to_markdown_with_options(&options);
+            assert_eq!(md, expected, "page break {placeholder:?}");
+            // The streamer agrees at every chunking, one node per push
+            // included — an all-empty push still owes the next page break.
+            for size in 1..=doc.nodes.len() {
+                let mut streamer = MarkdownStreamer::new(false, ImageMode::Placeholder, false)
+                    .with_export_options(&options)
+                    .with_page_break_placeholder(placeholder.map(Into::into));
+                let mut out = String::new();
+                for chunk in doc.nodes.chunks(size) {
+                    out.push_str(&streamer.push(chunk, &[]));
+                }
+                out.push_str(&streamer.finish());
+                assert_eq!(
+                    out, expected,
+                    "chunks of {size}, page break {placeholder:?}"
+                );
+            }
+        }
+        // The default placeholder is untouched.
+        let mut doc = DoclingDocument::new("t");
+        doc.push(para("a"));
+        doc.push(picture(None));
+        doc.push(para("b"));
+        assert_eq!(doc.export_to_markdown(), "a\n\n<!-- image -->\n\nb\n");
+    }
+
+    /// The streamer takes the same options and its chunks concatenate to the
+    /// buffered export.
+    #[test]
+    fn streamer_matches_buffered_export_with_options() {
+        let doc = options_doc();
+        let options = MarkdownExportOptions {
+            layers: ContentLayers::ALL,
+            traverse_pictures: true,
+            escape_html: false,
+            escape_underscores: false,
+            image_placeholder: "(img)".into(),
+            ..MarkdownExportOptions::default()
+        };
+        let (buffered, _) = doc.export_to_markdown_with_options(&options);
+        let mut streamer = MarkdownStreamer::new(false, ImageMode::Placeholder, false)
+            .with_export_options(&options);
+        let mut out = String::new();
+        for chunk in doc.nodes.chunks(2) {
+            out.push_str(&streamer.push(chunk, &[]));
+        }
+        out.push_str(&streamer.finish());
+        assert_eq!(out, buffered);
+        assert!(
+            buffered.contains("(img)") && buffered.contains("R&D _ report"),
+            "{buffered}"
+        );
+    }
+
+    /// #613: the plain export of a document holding every decoration the
+    /// Markdown export writes, and the streamer agreeing with it.
+    #[test]
+    fn plain_text_drops_the_markdown_decoration() {
+        let item = |text: &str, ordered: bool, number: u64, level: u8| Node::ListItem {
+            ordered,
+            number,
+            first_in_list: number == 1 && level == 0,
+            text: text.into(),
+            level,
+            marker: None,
+            location: None,
+            dclx: None,
+            href: None,
+            layer: None,
+        };
+        let mut doc = DoclingDocument::new("plain");
+        doc.add_heading(1, "Title with **bold**");
+        doc.add_heading(2, "Section");
+        doc.add_paragraph("Some **bold**, *italic*, ~~gone~~ and `code` with a [link](https://x.org).\nNext line.");
+        doc.push(item("*one*", false, 1, 0));
+        doc.push(item("[two](https://y.org)", false, 2, 0));
+        doc.push(item("nested", true, 1, 1));
+        doc.push(Node::CheckboxItem {
+            checked: true,
+            text: "done".into(),
+        });
+        doc.push(Node::Code {
+            language: Some("rust".into()),
+            text: "let x = **y**;".into(),
+            orig: None,
+            pretty: None,
+        });
+        doc.push(Node::Picture {
+            caption: Some("Figure *1*".into()),
+            caption_href: None,
+            image: None,
+            classification: None,
+            description: None,
+            caption_parent: Default::default(),
+            caption_location: None,
+        });
+        doc.push(Node::Caption {
+            text: "Linked caption".into(),
+            href: Some("https://z.org".into()),
+        });
+        doc.push(Node::Table(Table {
+            rows: vec![
+                vec!["**n**".into(), "rich".into()],
+                vec!["**2**".into(), "a  \nb".into()],
+            ],
+            ..Default::default()
+        }));
+        doc.add_paragraph("R&amp;D \\_ x");
+        let text = doc.export_to_text();
+        assert_eq!(
+            text,
+            "Title with bold\n\n\
+             Section\n\n\
+             Some bold, italic, gone and code with a link.\nNext line.\n\n\
+             - one\n- two\n    1. nested\n\n\
+             - [x] done\n\n\
+             let x = **y**;\n\n\
+             Figure 1\n\n\
+             Linked caption\n\n\
+             |   n | rich   |\n\
+             |-----|--------|\n\
+             |   2 | a b    |\n\n\
+             R&D _ x"
+        );
+
+        let options = MarkdownExportOptions::plain_text();
+        let (buffered, _) = doc.export_to_markdown_with_options(&options);
+        assert_eq!(buffered, format!("{text}\n"));
+        let mut streamer = MarkdownStreamer::new(false, ImageMode::Placeholder, false)
+            .with_export_options(&options);
+        let mut out = String::new();
+        for chunk in doc.nodes.chunks(3) {
+            out.push_str(&streamer.push(chunk, &[]));
+        }
+        out.push_str(&streamer.finish());
+        assert_eq!(out, buffered);
+    }
+
+    /// #613: text that only looks like Markdown stays as it is.
+    #[test]
+    fn plain_inline_keeps_literal_markers() {
+        for (input, want) in [
+            ("**bold** and *it* and ***both***", "bold and it and both"),
+            ("**[label](https://a.b/c_(d))** end", "label end"),
+            (
+                "grant *USE and *OBJMGT authority",
+                "grant *USE and *OBJMGT authority",
+            ),
+            ("2 * 3 * 4", "2 * 3 * 4"),
+            ("a ** b", "a ** b"),
+            ("the `quoted’ and `x` term", "the `quoted’ and x term"),
+            ("see [12] and [docs](u)", "see [12] and docs"),
+            ("formula $[a](b)$ stays", "formula $[a](b)$ stays"),
+            ("price $5 and **bold**", "price $5 and bold"),
+            ("[outer [inner] text](u)", "outer [inner] text"),
+            ("unclosed **bold", "unclosed **bold"),
+        ] {
+            assert_eq!(plain_inline(input), want, "{input}");
+        }
     }
 }

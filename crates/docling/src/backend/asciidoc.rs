@@ -19,7 +19,7 @@
 use docling_core::tree::{Formatting, ItemTree, ListMeta, TreeKind};
 use docling_core::{DoclingDocument, Node, Table, TableCell};
 
-use crate::backend::images::{FsImageResolver, ImageResolver, NoFetch};
+use crate::backend::images::{FsImageResolver, ImagePolicy, ImageResolver, ImageSources, NoFetch};
 use crate::backend::markdown::escape_text;
 use crate::backend::DeclarativeBackend;
 use crate::error::ConversionError;
@@ -33,31 +33,44 @@ use crate::source::SourceDocument;
 /// matching.
 const CELL_SPEC: &str = r"(?:(?:\d+(?:\.\d+)?|\.\d+)[*+])*[<^>]?(?:\.[<^>])?[adehlms]?";
 
-/// docling's `_LIST_ITEM_PATTERN` (docling#4118): besides `*`, `-` and `1.`,
-/// AsciiDoc's dotted (`.`, `..`, `...`) and lettered/roman (`a.`, `i.`) ordered
-/// markers open list items.
-const LIST_ITEM: &str = r"^(\s*)(\*|-|\.+|\d+\.|\w+\.)\s+(.*)";
+/// docling's `_LIST_ITEM_PATTERN` (docling#4118, docling#4403): besides `*`,
+/// `-` and `1.`, AsciiDoc's dotted (`.`, `..`, `...`) and lettered/roman
+/// (`a.`, `i.`) ordered markers open list items, and a run of `*`s nests a
+/// bullet the way a run of `.`s nests a number.
+const LIST_ITEM: &str = r"^(\s*)(\*+|-|\.+|\d+\.|\w+\.)\s+(.*)";
 
 /// The delimiter opening and closing a literal block.
 const LITERAL_FENCE: &str = "....";
+/// The delimiter opening and closing a listing block — a `code` item like the
+/// literal block, optionally labelled by a `[source,lang]` attribute line
+/// right before it (docling#4400).
+const LISTING_FENCE: &str = "----";
+/// Example, sidebar, quote, open and passthrough block delimiters: consumed
+/// (when a matching closer exists) so they do not leak into the text, their
+/// content re-emitted as ordinary lines.
+const CONTENT_BLOCK_DELIMITERS: &[&str] = &["====", "****", "____", "--", "+++"];
+/// `[source]` / `[source,python]` / `[source, java, linenums]`: the optional
+/// language is the first attribute after `source`.
+const SOURCE_ATTR: &str = r"^\[source(?:,\s*([\w+#.-]+))?[^\]]*\]$";
 
 #[derive(Default)]
 pub struct AsciiDocBackend {
-    /// When set, an `image::target[]` target is resolved to the actual image
-    /// bytes — docling's `AsciiDocBackendOptions.fetch_images` together with
+    /// Which `image::target[]` targets resolve to the actual image bytes
+    /// (#646) — docling's `AsciiDocBackendOptions.fetch_images` together with
     /// its `enable_local_fetch`/`enable_remote_fetch` (docling#4156). Off by
     /// default, matching docling: a picture is then emitted with no image at
     /// all (until 2.126 docling fabricated a `file://…` `ImageRef` here).
-    pub fetch_images: bool,
+    pub images: ImagePolicy,
 }
 
 impl DeclarativeBackend for AsciiDocBackend {
     fn convert(&self, source: &SourceDocument) -> Result<DoclingDocument, ConversionError> {
         let text = source.text()?;
-        if self.fetch_images {
+        if self.images.sources != ImageSources::None {
             let resolver = FsImageResolver::new(
                 source.base_dir().map(|p| p.to_path_buf()),
                 source.base_url.clone(),
+                self.images.clone(),
             );
             Ok(parse(&text, &source.name, &resolver))
         } else {
@@ -79,7 +92,7 @@ fn parse(text: &str, name: &str, images: &dyn ImageResolver) -> DoclingDocument 
     for block in blocks(text) {
         match block {
             Block::Line(line) => p.feed(line, &mut doc),
-            Block::Literal(code) => p.feed_literal(code, &mut doc),
+            Block::Literal { code, language } => p.feed_literal(code, language, &mut doc),
         }
     }
     p.finish(&mut doc);
@@ -90,34 +103,79 @@ fn parse(text: &str, name: &str, images: &dyn ImageResolver) -> DoclingDocument 
 /// docling keeps ten section levels (`parents[0..10]`).
 const LEVELS: usize = 10;
 
-/// One unit of input: a raw line, or the body of a `....` literal block.
+/// One unit of input: a raw line, or the body of a `....` literal / `----`
+/// listing block (with the `[source,lang]` language, if any).
 enum Block<'a> {
     Line(&'a str),
-    Literal(String),
+    Literal {
+        code: String,
+        language: Option<String>,
+    },
 }
 
-/// docling's `_iter_blocks`: fold each `....`-delimited run of lines into a
-/// single literal block. An unterminated block still yields its body at EOF.
+/// docling's `_iter_blocks`: fold each `....`- or `----`-delimited run of
+/// lines into a single code block — only the matching closer ends it, and a
+/// `[source,lang]` attribute line consumed right before a `----` labels the
+/// listing's language. An example / sidebar / quote / open / passthrough
+/// block's delimiter lines are dropped (only when a closer follows, so a
+/// stray `--` separator cannot swallow the rest of the document) and its
+/// inner lines pass through unchanged. An unterminated block still yields
+/// its body at EOF.
 fn blocks(text: &str) -> Vec<Block<'_>> {
+    let lines: Vec<&str> = text.lines().collect();
+    let source_attr = cached_regex!(SOURCE_ATTR);
     let mut out = Vec::new();
-    let mut literal: Option<Vec<&str>> = None;
-    for line in text.lines() {
-        if line.trim() == LITERAL_FENCE {
-            match literal.take() {
-                None => literal = Some(Vec::new()),
-                Some(body) => out.push(Block::Literal(body.join("\n"))),
-            }
+    let mut i = 0;
+    while i < lines.len() {
+        let stripped = lines[i].trim();
+        if stripped == LITERAL_FENCE || stripped == LISTING_FENCE {
+            let (body, next) = delimited_body(&lines, i + 1, stripped);
+            out.push(Block::Literal {
+                code: body,
+                language: None,
+            });
+            i = next;
             continue;
         }
-        match &mut literal {
-            Some(body) => body.push(line),
-            None => out.push(Block::Line(line)),
+        if CONTENT_BLOCK_DELIMITERS.contains(&stripped)
+            && lines[i + 1..].iter().any(|l| l.trim() == stripped)
+        {
+            i += 1;
+            while i < lines.len() && lines[i].trim() != stripped {
+                out.push(Block::Line(lines[i]));
+                i += 1;
+            }
+            i += 1;
+            continue;
         }
-    }
-    if let Some(body) = literal {
-        out.push(Block::Literal(body.join("\n")));
+        if let Some(caps) = source_attr.captures(stripped) {
+            if lines.get(i + 1).is_some_and(|l| l.trim() == LISTING_FENCE) {
+                let language = caps.get(1).map(|m| m.as_str().to_string());
+                let (body, next) = delimited_body(&lines, i + 2, LISTING_FENCE);
+                out.push(Block::Literal {
+                    code: body,
+                    language,
+                });
+                i = next;
+                continue;
+            }
+        }
+        out.push(Block::Line(lines[i]));
+        i += 1;
     }
     out
+}
+
+/// The lines from `start` up to the next `delimiter` line (or EOF), joined,
+/// and the index after that closer.
+fn delimited_body(lines: &[&str], start: usize, delimiter: &str) -> (String, usize) {
+    let mut i = start;
+    let mut body: Vec<&str> = Vec::new();
+    while i < lines.len() && lines[i].trim() != delimiter {
+        body.push(lines[i].trim_end_matches(['\r', '\n']));
+        i += 1;
+    }
+    (body.join("\n"), (i + 1).min(lines.len()))
 }
 
 /// One open list level — docling's `parents`/`indents` pair for a `ListGroup`.
@@ -267,9 +325,15 @@ impl Parser<'_> {
         }
     }
 
-    /// A `....` literal block: docling's `add_code`, nested under the open list
-    /// item when a `+` claimed it.
-    fn feed_literal(&mut self, code: String, doc: &mut DoclingDocument) {
+    /// A `....` literal or `----` listing block: docling's `add_code`, nested
+    /// under the open list item when a `+` claimed it. A `[source,lang]`
+    /// hint is trusted over the content (docling's `detect_code_language`);
+    /// without one the language stays unknown, as upstream passes `None`.
+    fn feed_literal(&mut self, code: String, language: Option<String>, doc: &mut DoclingDocument) {
+        let language = language
+            .map(|hint| docling_core::code_language_label(&hint))
+            .filter(|l| *l != "unknown")
+            .map(str::to_string);
         self.close_list_if_needed(Trigger::Literal);
         self.flush_text(doc);
         // A pending block title is the code item's *caption* since docling
@@ -294,7 +358,7 @@ impl Parser<'_> {
             TreeKind::Code {
                 text: code.clone(),
                 orig: None,
-                language: None,
+                language: language.clone(),
                 formatting: None,
                 hyperlink: None,
             },
@@ -306,7 +370,7 @@ impl Parser<'_> {
         }
         if !(self.in_list && self.fold_child(doc, &format!("```\n{code}\n```"))) {
             doc.push(Node::Code {
-                language: None,
+                language,
                 text: code,
                 orig: None,
                 pretty: None,
@@ -338,6 +402,10 @@ impl Parser<'_> {
         // stays where it is read (docling ≤ 2.126 hung it off the body root,
         // which rendered it after the whole section tree).
         if let Some((n, text)) = section_header(line) {
+            // A heading ends the paragraph being accumulated: without this
+            // flush the text before it joined the text after it and landed
+            // in the wrong section (docling#4428).
+            self.flush_text(doc);
             doc.push(Node::Heading {
                 level: n.min(6),
                 text: escape_text(text.trim()),
@@ -550,6 +618,7 @@ impl Parser<'_> {
                 captions,
                 image: image.clone(),
                 classification: None,
+                description: None,
                 confidence: None,
                 chart: None,
                 dpi: None,
@@ -580,7 +649,9 @@ impl Parser<'_> {
             caption_href: None,
             image,
             classification: None,
+            description: None,
             caption_parent: Default::default(),
+            caption_location: None,
         });
         self.list_continuation = false;
     }
@@ -665,6 +736,7 @@ impl Parser<'_> {
                 cells: None,
                 caption: None,
                 caption_parent: Default::default(),
+                caption_location: None,
             };
             // docling's `_populate_table_as_grid` writes a cell only where
             // the source row has one — a short row leaves its tail empty in
@@ -743,13 +815,14 @@ fn list_item(line: &str) -> Option<ListItem<'_>> {
     let caps = cached_regex!(LIST_ITEM).captures(line)?;
     let marker = caps.get(2)?.as_str();
     let mut indent = caps.get(1)?.as_str().len();
-    if marker.starts_with('.') {
+    // A run of `.`s or `*`s nests by its length (docling#4403).
+    if marker.starts_with(['.', '*']) {
         indent += marker.len() - 1;
     }
     Some(ListItem {
         indent,
         marker,
-        numbered: !(marker == "*" || marker == "-"),
+        numbered: !(marker.starts_with('*') || marker == "-"),
         text: caps.get(3)?.as_str(),
     })
 }
@@ -1021,6 +1094,30 @@ mod tests {
         );
     }
 
+    /// docling#4428: the text before a heading is its own paragraph, under
+    /// the section it was written in — not joined to the text after the
+    /// heading and moved to the new section.
+    #[test]
+    fn a_heading_flushes_the_pending_paragraph_into_its_own_section() {
+        let doc = parse(
+            "= T\n\n== S1\n\n=== S1.1\n\nbody\n== S2\n\nbody2\n",
+            "t",
+            &NoFetch,
+        );
+        assert_eq!(
+            doc.export_to_markdown().trim(),
+            "# T\n\n## S1\n\n### S1.1\n\nbody\n\n## S2\n\nbody2"
+        );
+        let json: serde_json::Value = serde_json::from_str(&doc.export_to_json()).unwrap();
+        let texts = json["texts"].as_array().unwrap();
+        let body = texts.iter().find(|t| t["text"] == "body").unwrap();
+        let s11 = texts.iter().find(|t| t["text"] == "S1.1").unwrap();
+        assert_eq!(body["parent"]["$ref"], s11["self_ref"]);
+        let body2 = texts.iter().find(|t| t["text"] == "body2").unwrap();
+        let s2 = texts.iter().find(|t| t["text"] == "S2").unwrap();
+        assert_eq!(body2["parent"]["$ref"], s2["self_ref"]);
+    }
+
     #[test]
     fn a_lone_word_and_period_stays_a_paragraph() {
         // `\w+\.` + `\s+` matches a bare "Intro." only when the line still
@@ -1063,9 +1160,11 @@ mod tests {
         // used to get a fabricated `file://…` ImageRef).
         assert!(picture(AsciiDocBackend::default().convert(&source).unwrap()).is_none());
         let fetched = picture(
-            AsciiDocBackend { fetch_images: true }
-                .convert(&source)
-                .unwrap(),
+            AsciiDocBackend {
+                images: ImagePolicy::new(ImageSources::Local),
+            }
+            .convert(&source)
+            .unwrap(),
         )
         .expect("the local image is read");
         assert_eq!((fetched.width, fetched.height), (2, 3));

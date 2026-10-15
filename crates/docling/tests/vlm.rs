@@ -1,8 +1,8 @@
 //! e2e for issue #77: the remote-VLM pipeline against a local mock of an
 //! OpenAI-compatible `chat/completions` endpoint.
 //!
-//! The PDF test renders real pages (pdfium, no ONNX models) and skips cleanly
-//! when the pdfium library isn't around, like `tests/pages.rs`. The mock
+//! The PDF test renders real pages (the pure-Rust renderer, no ONNX models),
+//! so it runs everywhere. The mock
 //! asserts the wire shape (model name, data-URI page image) and returns
 //! DocLang wrapped the way real models wrap answers (fences, full roots),
 //! exercising the normalization path end to end.
@@ -19,18 +19,6 @@ use docling::{InputFormat, SourceDocument};
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
-fn pdfium_ready() -> bool {
-    let lib = repo_root().join(".pdfium/lib");
-    if lib.join("libpdfium.so").exists()
-        || lib.join("libpdfium.dylib").exists()
-        || lib.join("pdfium.dll").exists()
-    {
-        std::env::set_var("PDFIUM_DYNAMIC_LIB_PATH", &lib);
-        return true;
-    }
-    std::env::var("PDFIUM_DYNAMIC_LIB_PATH").is_ok()
 }
 
 /// Minimal HTTP/1.1 server: for each expected request, read head + body,
@@ -113,10 +101,6 @@ fn opts(endpoint: String) -> VlmOptions {
 
 #[test]
 fn vlm_converts_pdf_pages_through_the_endpoint() {
-    if !pdfium_ready() {
-        eprintln!("skipping: pdfium library not found");
-        return;
-    }
     // Two pages, two differently-wrapped answers — fenced and full-root — so
     // normalization is exercised on real responses, then stitched in order.
     let (endpoint, served, handle) = mock_openai(vec![
@@ -173,38 +157,6 @@ fn vlm_parses_unlimited_ocr_grounding() {
     let md = doc.export_to_markdown();
     assert!(md.contains("# Report 1481"), "markdown: {md:?}");
     assert!(md.contains("First paragraph."), "markdown: {md:?}");
-}
-
-#[test]
-fn vlm_converts_an_image_without_pdfium() {
-    // An image input goes straight to the endpoint — no pdfium, no models —
-    // so this leg runs everywhere, keeping the wire format pinned in CI.
-    let (endpoint, served, handle) = mock_openai(vec!["<text>From an image.</text>".into()]);
-    let source = SourceDocument::from_bytes("page.png", InputFormat::Image, image_bytes());
-    let doc = convert_vlm(&source, &opts(endpoint)).expect("vlm conversion");
-    handle.join().expect("mock server");
-    assert_eq!(served.load(Ordering::SeqCst), 1);
-    assert!(doc.export_to_markdown().contains("From an image."));
-}
-
-/// A granite-style DocTags answer routes through docling-core's DocTags
-/// parser end to end (image leg: no pdfium needed, runs everywhere).
-#[test]
-fn vlm_parses_doctags_answers() {
-    let (endpoint, served, handle) = mock_openai(vec![
-        "<doctag><section_header_level_1><loc_1><loc_2><loc_3><loc_4>Section</section_header_level_1>\
-<text><loc_1><loc_5><loc_3><loc_6>Body text.</text>\
-<otsl><loc_1><loc_7><loc_3><loc_9><ched>H<nl><fcel>v<nl></otsl></doctag>"
-            .into(),
-    ]);
-    let source = SourceDocument::from_bytes("page.png", InputFormat::Image, image_bytes());
-    let doc = convert_vlm(&source, &opts(endpoint)).expect("vlm conversion");
-    handle.join().expect("mock server");
-    assert_eq!(served.load(Ordering::SeqCst), 1);
-    let md = doc.export_to_markdown();
-    assert!(md.contains("## Section"), "md: {md:?}");
-    assert!(md.contains("Body text."), "md: {md:?}");
-    assert!(md.contains("| H"), "md: {md:?}");
 }
 
 /// Conformance lock for #153: the `picture_classification` corpus fixture

@@ -32,10 +32,13 @@ crate-type = ["cdylib"]
 # on top of the crate's defaults — `vlm` is listed explicitly because this
 # binding exposes it as a public option, so it must not silently disappear if
 # the library's default set ever changes.
-docling = { path = "../docling", version = "1.69.1", features = ["chunking", "vlm"] }
+docling = { path = "../docling", version = "2.26.0", features = ["chunking", "vlm"] }
 # Node-API bindings. `napi4` enables threadsafe functions, used for streaming.
 napi = { version = "2", default-features = false, features = ["napi4"] }
 napi-derive = "2"
+# The option objects serialize into the shared `docling::ConvertOptions` (#577).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [build-dependencies]
 napi-build = "2"
@@ -54,3 +57,4 @@ directml = ["docling/directml"]
 coreml = ["docling/coreml"]
 # CPU-class XNNPACK (#324): self-built ONNX Runtime only (ORT_LIB_LOCATION).
 xnnpack = ["docling/xnnpack"]
+ort-load-dynamic = ["docling/ort-load-dynamic"]

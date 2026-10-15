@@ -157,6 +157,7 @@ fn emit_paragraph(
             .map(|(mime, bytes)| {
                 let (width, height) = image_size(mime, bytes).unwrap_or((0, 0));
                 docling_core::PictureImage {
+                    dpi: docling_core::PictureImage::DEFAULT_DPI,
                     mimetype: mime.clone(),
                     width,
                     height,
@@ -168,7 +169,9 @@ fn emit_paragraph(
             caption_href: None,
             image,
             classification: None,
+            description: None,
             caption_parent: Default::default(),
+            caption_location: None,
         });
     }
 

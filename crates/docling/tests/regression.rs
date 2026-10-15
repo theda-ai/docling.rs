@@ -1,7 +1,7 @@
 //! Output regression suite.
 //!
 //! Every source the suite covers is converted to legacy Markdown, strict
-//! Markdown, docling JSON and LaTeX, and compared against the committed
+//! Markdown, docling JSON, LaTeX and HTML, and compared against the committed
 //! fixtures in `tests/data/<format>/expected/`. This pins the Rust converter's
 //! output so any unintended change is caught.
 //!
@@ -19,7 +19,7 @@
 //! The expected files are keyed by the source's file name, whichever place it
 //! came from.
 //!
-//! The ML formats (PDF, images, METS) need pdfium + the ONNX models, so they are
+//! The ML formats (PDF, images, METS) need the ONNX models, so they are
 //! covered by the deterministic snapshot harness (`scripts/conformance/pdf_conformance.sh`)
 //! instead of this pure-Rust test.
 //!
@@ -132,15 +132,54 @@ fn sources() -> Vec<Source> {
     out
 }
 
-/// `<fmt>/expected/<file><suffix>` for a source.
+/// `<fmt>/expected/<file><suffix>` for a source. A mirrored source inside a
+/// directory (`1706.03762/main.tex`) takes upstream's fixture name for it,
+/// the path with `_` for `/` (`1706.03762_main.tex`).
 fn expected_path(src: &Source, suffix: &str) -> PathBuf {
-    let name = src.path.file_name().unwrap().to_string_lossy();
+    let name = src
+        .rel
+        .split_once('/')
+        .map_or(src.rel.as_str(), |(_, name)| name)
+        .replace('/', "_");
     src.fmt_dir.join("expected").join(format!("{name}{suffix}"))
+}
+
+/// A converter for `src`. An XBRL instance is paired with the `*-taxonomy`
+/// directory beside it that holds the schema its `link:schemaRef` names — the
+/// layout upstream's `tests/data/xbrl/sources/` keeps its fixtures in, whose
+/// test passes that directory as the backend's `taxonomy` option.
+fn converter_for(src: &Path) -> DocumentConverter {
+    let mut converter = DocumentConverter::new();
+    if let Some(taxonomy) = xbrl_taxonomy_dir(src) {
+        converter = converter.xbrl_taxonomy(taxonomy);
+    }
+    converter
+}
+
+fn xbrl_taxonomy_dir(src: &Path) -> Option<PathBuf> {
+    let dir = src.parent()?;
+    if dir.parent()?.file_name()? != "xbrl" {
+        return None;
+    }
+    let text = fs::read_to_string(src).ok()?;
+    let href = text
+        .split("schemaRef")
+        .nth(1)?
+        .split("href=\"")
+        .nth(1)?
+        .split('"')
+        .next()?;
+    fs::read_dir(dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.is_dir() && p.to_string_lossy().ends_with("-taxonomy"))
+        .find(|p| p.join(href).is_file())
 }
 
 fn convert(src: &Path, strict: bool) -> Result<docling::DoclingDocument, String> {
     let source = SourceDocument::from_file(src).map_err(|e| e.to_string())?;
-    DocumentConverter::new()
+    converter_for(src)
         .strict(strict)
         .convert(source)
         .map(|r| r.document)
@@ -150,7 +189,7 @@ fn convert(src: &Path, strict: bool) -> Result<docling::DoclingDocument, String>
 /// Convert via the streaming API and concatenate every chunk.
 fn stream_to_string(src: &Path, strict: bool) -> Result<String, String> {
     let source = SourceDocument::from_file(src).map_err(|e| e.to_string())?;
-    let stream = DocumentConverter::new()
+    let stream = converter_for(src)
         .strict(strict)
         .convert_streaming(source)
         .map_err(|e| e.to_string())?;
@@ -196,6 +235,52 @@ fn streaming_matches_buffered_markdown() {
     );
 }
 
+/// `convert_streaming_with_options` with every layer and picture traversal
+/// on — the CLI's streamed `--layers all --traverse-pictures` — matches the
+/// buffered `export_to_markdown_with_options` byte for byte.
+#[test]
+fn streaming_with_options_matches_buffered_markdown() {
+    let options = docling::MarkdownExportOptions {
+        layers: docling::ContentLayers::ALL,
+        traverse_pictures: true,
+        ..Default::default()
+    };
+    let mut failures = Vec::new();
+    for src in &sources() {
+        let rel = &src.rel;
+        let buffered = match convert(&src.path, false) {
+            Ok(d) => d.export_to_markdown_with_options(&options).0,
+            Err(e) => {
+                failures.push(format!("{rel}: convert error: {e}"));
+                continue;
+            }
+        };
+        let streamed = SourceDocument::from_file(&src.path)
+            .map_err(|e| e.to_string())
+            .and_then(|source| {
+                converter_for(&src.path)
+                    .convert_streaming_with_options(source, &options)
+                    .map_err(|e| e.to_string())
+            })
+            .and_then(|stream| {
+                stream
+                    .collect::<Result<String, _>>()
+                    .map_err(|e| e.to_string())
+            });
+        match streamed {
+            Ok(streamed) if streamed == buffered => {}
+            Ok(_) => failures.push(format!("{rel}: streamed Markdown != buffered export")),
+            Err(e) => failures.push(format!("{rel}: stream error: {e}")),
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} streaming mismatch(es):\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
 #[test]
 fn outputs_match_fixtures() {
     let regen = std::env::var_os("DOCLING_RS_REGEN").is_some();
@@ -230,6 +315,12 @@ fn outputs_match_fixtures() {
             (".strict.md", strict.export_to_markdown()),
             (".json", legacy.export_to_json()),
             (".tex", legacy.export_to_latex()),
+            (
+                ".html",
+                legacy
+                    .export_to_html_with_images(docling::ImageMode::Embedded, "artifacts")
+                    .0,
+            ),
         ];
         for (suffix, got) in outputs {
             let path = expected_path(src, suffix);

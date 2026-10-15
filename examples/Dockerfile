@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 #
 # Example deployment image for docling.rs (the Rust docling port) with the full
-# PDF ML pipeline — pdfium rasterization + RT-DETR layout + TableFormer table
+# PDF ML pipeline — the pure-Rust page renderer + RT-DETR layout + TableFormer table
 # structure (hoisted-KV cached decoder, #97) + PP-OCRv3 — plus the picture
 # classifier and the hybrid-chunker tokenizer. Builds a slim runtime with the
 # `docling-rs` CLI, the native libs, and all models baked in, so a container can
@@ -9,9 +9,8 @@
 #
 # Build from the repository root:
 #   docker build -f examples/Dockerfile -t docling-rs .
-# Multi-arch (#281): the pdfium prebuilt is selected by BuildKit's TARGETARCH
-# (amd64 and arm64 are supported; everything else in the image is
-# arch-neutral or built from source), e.g. on/for an ARM64 host:
+# Multi-arch (#281): everything in the image is arch-neutral or built from
+# source (amd64 and arm64 are supported), e.g. on/for an ARM64 host:
 #   docker buildx build --platform linux/arm64 -f examples/Dockerfile -t docling-rs .
 # Convert a document (Markdown to stdout):
 #   docker run --rm -v "$PWD:/data" docling-rs /data/input.pdf
@@ -33,8 +32,8 @@
 #
 # Stages:
 #   models  — export the layout + TableFormer ONNX (torch, one-time), fetch
-#             the OCR model/dict, picture classifier, chunker tokenizer and
-#             pdfium, INT8-quantize the layout model (unless INT8=0)
+#             the OCR model/dict, picture classifier and chunker tokenizer,
+#             INT8-quantize the layout model (unless INT8=0)
 #   builder — compile the CLI (the `ort` crate downloads ONNX Runtime at build)
 #   runtime — slim image with just the binary, native libs and models
 
@@ -62,7 +61,7 @@ COPY tests/data/scanned/sources ./tests/data/scanned/sources
 
 # RT-DETR layout detector -> models/layout_heron.onnx. The trailing cache
 # cleanup keeps the multi-GB HuggingFace downloads out of the layer.
-RUN mkdir -p /opt/models/chunk /opt/pdfium \
+RUN mkdir -p /opt/models/chunk \
     && python scripts/install/export_layout.py /opt/models/layout_heron.onnx \
     && rm -rf /root/.cache/huggingface
 
@@ -72,12 +71,6 @@ RUN pip install --no-cache-dir --extra-index-url https://download.pytorch.org/wh
         docling-ibm-models onnxscript onnxruntime huggingface_hub \
         opencv-python-headless sympy pypdfium2 pillow numpy
 
-# TARGETARCH is set by BuildKit/buildx from --platform (amd64, arm64, …); a
-# classic single-arch build leaves it empty, so fall back to the stage's own
-# dpkg architecture. Maps onto pdfium-binaries' naming (amd64 -> x64), which
-# is the only arch-specific asset in this stage — the ONNX models and
-# tokenizer are architecture-neutral (#281).
-ARG TARGETARCH
 RUN true \
     # TableFormer encoder/decoder/bbox. Exports both decoder generations: the
     # #97 hoisted-KV step graph (decoder_kv.onnx — per-layer cross-attention
@@ -97,16 +90,6 @@ RUN true \
     # all-MiniLM-L6-v2 tokenizer — the hybrid chunker works out of the box
     && curl -fsSL -o /opt/models/chunk/tokenizer.json \
         "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json" \
-    # pdfium prebuilt (page rasterization only), arch-selected (#281)
-    && case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
-        amd64) PDFIUM_ARCH=x64 ;; \
-        arm64) PDFIUM_ARCH=arm64 ;; \
-        *) echo "unsupported TARGETARCH '${TARGETARCH}' (amd64|arm64)" >&2; exit 1 ;; \
-    esac \
-    && curl -fsSL -o /tmp/pdfium.tgz \
-        "https://github.com/bblanchon/pdfium-binaries/releases/latest/download/pdfium-linux-${PDFIUM_ARCH}.tgz" \
-    && tar xzf /tmp/pdfium.tgz -C /opt/pdfium \
-    && rm /tmp/pdfium.tgz \
     && rm -rf /root/.cache/huggingface
 
 # INT8=1 (default): quantize the layout model (static, Conv-only, calibrated on
@@ -166,9 +149,21 @@ RUN mkdir -p /artifacts \
 # ----------------------------------------------------------------------------
 FROM debian:trixie-slim AS runtime
 
+# fonts-liberation + fonts-dejavu-core: the fallback faces the pure-Rust page
+# renderer draws non-embedded (base-14) fonts with; a font-less image would
+# render them as placeholder boxes.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates libstdc++6 libgomp1 \
+       fonts-liberation fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
+# #633: the page render — the layout model's input — depends on the fallback
+# faces, so it is pinned to the two packages above: a derived image's extra
+# fonts or a bind-mounted $HOME cannot change it. Rendering other scripts
+# (a CJK deck) means installing the font and adding its directory to
+# DOCLING_RS_FONT_DIRS, or unsetting DOCLING_RS_SYSTEM_FONTS to search the
+# host again.
+ENV DOCLING_RS_SYSTEM_FONTS=0 \
+    DOCLING_RS_FONT_DIRS=/usr/share/fonts/truetype/liberation:/usr/share/fonts/truetype/dejavu
 
 COPY --from=builder /artifacts/ /tmp/artifacts/
 RUN cp /tmp/artifacts/docling-rs /usr/local/bin/ \
@@ -177,7 +172,6 @@ RUN cp /tmp/artifacts/docling-rs /usr/local/bin/ \
     && ldconfig
 
 COPY --from=models /opt/models /opt/models
-COPY --from=models /opt/pdfium /opt/pdfium
 # The picture classifier has no env override — it resolves models/… relative
 # to the CWD, the binary's dir, or the binary's parent. The binary lives in
 # /usr/local/bin, so this symlink makes /opt/models visible from any CWD.
@@ -192,15 +186,14 @@ RUN ln -s /opt/models /usr/local/models
 #   * The TableFormer decoder is pinned to the hoisted-KV fp32 graph (#97);
 #     `-e DOCLING_TABLEFORMER_DECODER=/opt/models/tableformer/decoder.onnx`
 #     switches to the legacy graph (both are auto-detected by input names).
-ENV PDFIUM_DYNAMIC_LIB_PATH=/opt/pdfium/lib \
-    DOCLING_LAYOUT_ONNX=/opt/models/layout_heron_active.onnx \
+ENV DOCLING_LAYOUT_ONNX=/opt/models/layout_heron_active.onnx \
     DOCLING_OCR_REC_ONNX=/opt/models/ocr_rec.onnx \
     DOCLING_OCR_DICT=/opt/models/ppocr_keys_v1.txt \
     DOCLING_TABLEFORMER_ENCODER=/opt/models/tableformer/encoder.onnx \
     DOCLING_TABLEFORMER_DECODER=/opt/models/tableformer/decoder_kv.onnx \
     DOCLING_TABLEFORMER_BBOX=/opt/models/tableformer/bbox.onnx \
     DOCLING_CHUNK_TOKENIZER=/opt/models/chunk/tokenizer.json \
-    LD_LIBRARY_PATH=/usr/local/lib:/opt/pdfium/lib
+    LD_LIBRARY_PATH=/usr/local/lib
 
 # Default: read a file arg and print Markdown to stdout, e.g.
 #   docker run --rm -v "$PWD:/data" docling-rs /data/input.pdf --to json

@@ -115,11 +115,14 @@ fn mets_pages(bytes: &[u8]) -> Result<Vec<PdfPage>, PdfError> {
             scale: 1.0,
             cells,
             code_cells: Vec::new(),
+            checkboxes: Vec::new(),
             word_cells: Vec::new(),
             image,
             image_layout: None,
             links: Vec::new(),
             rotation: 0,
+            #[cfg(feature = "ml")]
+            pending_image: None,
         });
     }
     if pages.is_empty() {

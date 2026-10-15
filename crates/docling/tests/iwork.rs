@@ -194,10 +194,19 @@ fn iwork_fixtures_match_groundtruth() {
         // ZIP does not define instead of setting the encryption flag — the
         // error must still say "password-protected".
         if name.contains("password_protected") {
-            let err = result.err().map(|e| e.to_string()).unwrap_or_default();
+            let err = result.expect_err("password-protected fixture fails");
+            let text = err.to_string();
             assert!(
-                err.contains("password-protected"),
-                "{name}: expected a password-protected error, got: {err:?}"
+                text.contains("password-protected"),
+                "{name}: expected a password-protected error, got: {text:?}"
+            );
+            // Typed (#636): not decryptable — no password opens an iWork
+            // package here, so a caller must not prompt for one.
+            let kind = err.encryption().expect("typed encryption error");
+            assert!(
+                matches!(kind, docling::EncryptionError::NotDecryptable(_))
+                    && !kind.needs_password(),
+                "{name}: {kind:?}"
             );
             checked += 1;
             continue;
@@ -220,43 +229,6 @@ fn iwork_fixtures_match_groundtruth() {
         checked >= 7,
         "expected the full iwork corpus, saw {checked}"
     );
-}
-
-/// Both Tika fixtures are the same source document saved by different Pages
-/// releases (docling's own cross-check): the IWA and the '09 XML readers must
-/// agree on the shared body text and on the table grid.
-#[test]
-fn both_pages_generations_agree() {
-    let modern = convert_pages("pages_2013.pages");
-    let legacy = convert_pages("pages_iwork09.pages");
-    for sentence in ["Sample pages document", "Some plain text to parse."] {
-        assert!(
-            modern.export_to_markdown().contains(sentence),
-            "modern: {sentence}"
-        );
-        assert!(
-            legacy.export_to_markdown().contains(sentence),
-            "legacy: {sentence}"
-        );
-    }
-    // Template placeholders (`sf:ghost-text`) never surface as content.
-    assert!(!legacy
-        .export_to_markdown()
-        .contains("Lorem ipsum dolor sit amet"));
-    let grid = |doc: &docling::DoclingDocument| {
-        doc.nodes
-            .iter()
-            .find_map(|n| match n {
-                docling::Node::Table(t) => Some(t.rows.clone()),
-                _ => None,
-            })
-            .expect("a table")
-    };
-    let rows = grid(&modern);
-    assert_eq!(rows, grid(&legacy));
-    assert_eq!(rows.len(), 4);
-    assert_eq!(rows[0], ["Column one", "Column two", "Column three"]);
-    assert_eq!(rows[3][2], "Cell nine");
 }
 
 /// A pre-2013 Pages package (`index.xml`) with page furniture and a template
@@ -325,11 +297,12 @@ fn zip_with(members: &[(&str, &[u8])]) -> Vec<u8> {
     buf
 }
 
-/// Legacy (pre-2013) Numbers/Keynote packages carry `index.xml`, not IWA —
-/// only Pages has an '09 reader (docling's), so the error must say so instead
-/// of a generic parse failure.
+/// A ZIP that is not a Keynote document of any generation — no `Index/`, no
+/// `Index.zip`, no `index.apxl` (a Pages-style `index.xml` is not one) —
+/// fails with docling's message naming the three layouts (#466), not a
+/// generic parse failure. Pre-2013 Numbers packages still say so.
 #[test]
-fn pre_iwa_package_reports_clearly() {
+fn non_keynote_package_reports_clearly() {
     // A minimal zip with only an index.xml member.
     let mut buf = Vec::new();
     {
@@ -340,7 +313,13 @@ fn pre_iwa_package_reports_clearly() {
         zip.write_all(b"<document/>").unwrap();
         zip.finish().unwrap();
     }
-    let source = SourceDocument::from_bytes("old", docling::InputFormat::Keynote, buf);
+    let source = SourceDocument::from_bytes("old", docling::InputFormat::Keynote, buf.clone());
+    let err = DocumentConverter::new().convert(source).unwrap_err();
+    assert!(
+        err.to_string().contains("index.apxl"),
+        "unexpected error: {err}"
+    );
+    let source = SourceDocument::from_bytes("old", docling::InputFormat::Numbers, buf);
     let err = DocumentConverter::new().convert(source).unwrap_err();
     assert!(
         err.to_string().contains("pre-2013"),

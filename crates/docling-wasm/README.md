@@ -9,14 +9,16 @@ page. Python docling cannot do this.
 
 The crate is `docling` with `default-features = false` plus `pdf-text`:
 digital PDFs convert through docling-pdf's pure-Rust content-stream parser —
-the exact extraction the native `--no-ocr` flag does (flat, line-grouped
+the exact extraction the native `--text-layer-only` flag does (flat, line-grouped
 paragraphs in reading order; no headings/lists/tables/pictures, since those
 need the layout model). The ML pipelines (pdfium + ONNX Runtime) and the HTTP
 image fetcher are compiled out: scanned/image-only PDFs get a clear "no
 embedded text layer … OCR needs a build with the `pdf` feature" error, and
 images/audio/METS are rejected with a "rebuild with …" message. Remote
 `<img src>` images stay placeholders (no network in the module); embedded
-images work normally.
+images work normally. Native builds are untouched: the feature slices behind
+this (`pdf` / `asr` / `fetch-images`) all stay in the `docling` default set,
+so a plain `cargo build` is unchanged.
 
 **Size: ~11 MB raw, ~3.4 MB gzipped** (measured at 0.49.x — the module now
 also carries the browser ML pipeline's pre/post-processing: layout decode, OCR
@@ -52,10 +54,15 @@ limits).
 convert(
   bytes: Uint8Array,
   filename: string,
-  to?: "md" | "json" | "doclang" | "latex", // default "md"
-  images?: "placeholder" | "embedded",     // default "placeholder", Markdown only
+  to?: "md" | "json" | "doclang" | "latex" | "html" | "pandoc", // default "md"
+  images?: "placeholder" | "embedded",     // default "placeholder"; Markdown, HTML, Pandoc
   max_pages?: number,                      // convert only the first N PDF pages
   page_break_placeholder?: string,         // text between pages in Markdown, e.g. "<!-- page break -->"
+): string
+convert_with_options(            // #577: the same options as the CLI / serve / C ABI, one JSON object
+  bytes: Uint8Array,
+  filename: string,
+  options_json?: string,                   // JSON: { to, images, ...docling ConvertOptions }
 ): string
 supported_extensions(): string   // JSON array, e.g. for <input accept=…>
 version(): string
@@ -70,6 +77,18 @@ The filename's extension drives format detection, same as the CLI. `images`
 mirrors docling-serve's option: `placeholder` emits docling's `<!-- image -->`,
 `embedded` inlines the picture as a `data:` URI so the Markdown is
 self-contained (a page has no filesystem, so there is no `referenced` mode).
+
+`convert_with_options` takes one JSON object instead of positional arguments:
+`to` and `images` as above, plus every key of the shared
+[`docling::ConvertOptions`](../docling/src/options.rs) — `strict`,
+`compact_tables`, `page_break_placeholder`, `pages` (`"A-B"`), `encoding`,
+`skip_empty_cells`, `list_attachments`, `xbrl_taxonomy`, … (the full table is
+[`docs/OPTIONS.md`](../../docs/OPTIONS.md)). The ML-pipeline options are
+accepted and inert in this build; an unknown key is an error.
+
+```js
+const md = convert_with_options(bytes, file.name, JSON.stringify({ strict: true, pages: "1-3" }));
+```
 
 ### Convert a file the user picked
 
@@ -166,13 +185,15 @@ converters and text-layer PDFs work straight away and OCR starts once you give
 the page models (device picker or Hugging Face — see below).
 
 [`www/index.html`](./www/index.html) is the whole thing on one page: drop a
-file, pick the output (Markdown / JSON / DocLang / LaTeX), pick how images render, and
+file, pick the output (Markdown / JSON / DocLang / LaTeX / Pandoc AST), pick how images render, and
 optionally turn on OCR for scanned pages. A **Force OCR** toggle (docling's
 `force_full_page_ocr`) sends a PDF straight to the OCR pipeline, ignoring
 whatever text layer it claims to have — for layers that exist but lie. A
 **Pages** field converts only the first N pages (empty = all), and **Stop**
 aborts a running conversion and clears the output — the OCR worker is
-terminated and boots afresh on the next file. To run it locally, after the
+terminated and boots afresh on the next file. **GPU (WebGPU)** (opt-in,
+#629) runs the heavy models on the GPU where the browser has WebGPU — see
+[Performance & threading](#performance--threading). To run it locally, after the
 `wasm-bindgen` step above:
 
 ```bash
@@ -377,6 +398,45 @@ renderer-only/sandboxed setups.
   encode make a desktop (more cores, more memory) far faster than a phone; the
   geometric table path (stage 2, no TableFormer) already captures all cell text
   and is the light option for mobile.
+- **GPU (WebGPU), opt-in (#629).** The demo's *GPU (WebGPU)* box — or
+  `?webgpu` in the URL — runs the layout model, the text detector and the
+  TableFormer encoder on ONNX Runtime Web's native WebGPU execution provider;
+  recognition and the TableFormer decoder/bbox stay on wasm. No Rust changes:
+  the wasm module only sees the JS session objects, so this is
+  `pipeline.js` choosing an EP per model. What the probe behind it found, in
+  headless Chromium on a software WebGPU adapter, on real pages:
+  - **Same output.** Recognition, detector, TableFormer and the fp32 layout
+    model match the wasm EP (identical text, detection maps, detections and
+    structure tags); the demo's Markdown is byte-identical between the GPU
+    path and the CPU path with the same (fp32) layout model. It is not the
+    default CPU output on every page: that one comes from the int8 layout
+    model, whose detections differ from fp32's here and there (on the QR-bill
+    scan each wins a region — fp32 pulls a closing sentence into the table,
+    int8 merges the e-mail/web lines). Python docling runs the fp32 model.
+  - **fp32 layout only.** The int8 layout graph runs on WebGPU but diverges
+    (max logit diff 5–7, most detections relabelled) — CPU-calibrated QDQ,
+    the same reason the native pipeline uses fp32 on GPU providers (#74). So
+    the GPU path loads `layout_heron.onnx` (~172 MB vs ~69 MB); with only
+    the int8 file present, layout stays on wasm.
+  - **Native EP, not JSEP.** The page now loads a pinned ORT build — the
+    wasm-only `ort.wasm.min.mjs` by default (a 3.5 MB gzipped runtime instead
+    of the 6.3 MB the unpinned JSEP `ort.min.mjs` was; byte-identical output),
+    `ort.webgpu.min.mjs` when WebGPU is on and an adapter exists. JSEP is
+    deprecated since ORT 1.29, and its AveragePool lacks `ceil_mode`, so the
+    heron layout model fails on it outright.
+  - **Fallbacks.** No WebGPU in the browser (Firefox on Linux, say) or no
+    adapter → CPU, said so on the ready line; a model whose WebGPU session
+    will not start → that model on wasm. WebGPU works in the dedicated
+    worker the pipeline runs in.
+  - **Speed: measure it.** A software adapter says nothing about real GPUs,
+    which is why the GPU path is opt-in. After every OCR run the status line
+    lists the inference time per model and where it ran (`layout 1.2 s GPU,
+    rec 0.8 s, …`) — toggle the box and compare on the device. Compare the
+    second conversion after a toggle: the first one also pays the shader
+    compiles. `?webgpu=layout,det,rec,tf_enc,tf_dec,tf_bbox` (or `all`)
+    overrides which models go to the GPU — the defaults keep the small,
+    shape-varying recognition batches and the per-token decoder loop on
+    wasm, where GPU dispatch is expected to cost more than it saves.
 
 ## Host-side tests
 

@@ -17,15 +17,20 @@
 //! upstream module: `pages.rs` (the shared content model and the emission
 //! into `DoclingDocument`), `pages_iwa.rs` (Pages 5+ `Index/*.iwa`) and
 //! `pages_xml.rs` (iWork '09 `index.xml`, optionally gzipped). This module
-//! keeps the container handling, the IWA wire primitives both Pages readers
-//! and the Numbers/Keynote extraction share, and the dispatch.
+//! keeps the container handling, the IWA wire primitives the Pages, Keynote
+//! and Numbers readers share, and the dispatch.
 //!
-//! Numbers and Keynote remain docling.rs extensions (upstream has no reader),
-//! text-level per the original phasing:
-//! - `.key` — slide text boxes as paragraphs, in package order;
-//! - `.numbers` — sheets as headings, each table's name plus its shared
-//!   string-table entries (the cells' text) as a list. Full grid
-//!   reconstruction needs the tile b-tree and is a follow-up.
+//! **Keynote is a conformance format too** (#466): upstream gained a Keynote
+//! reader in docling#4330 (2.130+), so `.key` mirrors
+//! `IWorkKeynoteDocumentBackend` — `keynote.rs` (the presentation model and
+//! its emission), `keynote_iwa.rs` (Keynote 6+ `Index/*.iwa`, and the index
+//! Keynote 2018+ zips a second time) and `keynote_xml.rs` (iWork '09
+//! `index.apxl`), reusing the Pages readers for everything on a slide.
+//!
+//! Numbers remains a docling.rs extension (upstream has no reader),
+//! text-level per the original phasing: sheets as headings, each table's
+//! name plus its shared string-table entries (the cells' text) as a list.
+//! Full grid reconstruction needs the tile b-tree and is a follow-up.
 //!
 //! The wire walk is defensive throughout: unknown fields are skipped, short
 //! buffers end the walk, and a package with no extractable text converts to
@@ -35,7 +40,9 @@
 use std::collections::HashMap;
 
 use crate::backend::ooxml::Package;
-use crate::backend::{pages, pages_iwa, pages_xml, DeclarativeBackend};
+use crate::backend::{
+    keynote, keynote_iwa, keynote_xml, pages, pages_iwa, pages_xml, DeclarativeBackend,
+};
 use crate::error::ConversionError;
 use crate::source::SourceDocument;
 use docling_core::{DoclingDocument, Node, Table, TableCell};
@@ -54,13 +61,6 @@ const TYPE_TST_TABLE_INFO: u32 = 6000;
 const TYPE_TST_TABLE_MODEL: u32 = 6001;
 /// TST.TableDataList — shared per-table value lists (strings, formats, …).
 const TYPE_TST_DATA_LIST: u32 = 6005;
-
-/// `TSWP.StorageArchive.KindType` values this backend distinguishes.
-const KIND_BODY: u64 = 0;
-const KIND_HEADER: u64 = 1;
-const KIND_FOOTNOTE: u64 = 2;
-const KIND_NOTE: u64 = 4;
-const KIND_CELL: u64 = 5;
 
 /// One decoded IWA archive: object identifier, message type of its first
 /// message, and that message's payload.
@@ -82,12 +82,23 @@ impl DeclarativeBackend for IworkBackend {
         // encryption flag on a password-protected document — it writes a
         // compression method outside the ZIP-defined set — so both signals are
         // checked before any member is decompressed.
+        // Typed as not decryptable (#636): no password opens it here, so a
+        // caller must not prompt for one — the wording stays the same.
         if pkg.any_encrypted() {
-            return Err(ConversionError::Parse(
-                "iwork: the document is password-protected; docling.rs cannot read \
-                 encrypted iWork documents. Remove the password in Pages and save again"
-                    .into(),
+            return Err(ConversionError::encrypted_with_message(
+                "iwork",
+                crate::EncryptionError::NotDecryptable("iWork package encryption".into()),
+                "the document is password-protected; docling.rs cannot read encrypted iWork \
+                 documents. Remove the password in Pages and save again",
             ));
+        }
+
+        // Keynote has its own dispatch: three container generations, images
+        // that stay in the outer container when the index is nested (#466).
+        if flavor == Flavor::Keynote {
+            let mut doc = DoclingDocument::new(&source.name);
+            keynote::emit(read_keynote(&mut pkg)?, &mut doc);
+            return Ok(doc);
         }
 
         // A zipped *package* (the pre-single-file "bundle" layout, or a
@@ -177,12 +188,60 @@ impl DeclarativeBackend for IworkBackend {
             counts.sort();
             docling_core::debug_log!("iwork: archive types {counts:?}");
         }
-        match flavor {
-            Flavor::Numbers => convert_numbers(&archives, &mut doc),
-            Flavor::Pages | Flavor::Keynote => convert_textual(flavor, &archives, &mut doc),
-        }
+        convert_numbers(&archives, &mut doc);
         Ok(doc)
     }
+}
+
+/// docling's `IWorkKeynoteDocumentBackend._read_document`: dispatch to the
+/// reader for whichever generation wrote the container. Keynote 6+ keeps
+/// `Index/*.iwa` in the container itself; Keynote 2018+ zips that index a
+/// second time into `<dir>/Index.zip` while the `Data/` members stay unzipped
+/// beside it (so the outer container is what holds the images, under that
+/// directory as a prefix); iWork '09 wrote a plain `index.apxl`, optionally
+/// gzipped.
+fn read_keynote(pkg: &mut Package) -> Result<keynote::Presentation, ConversionError> {
+    let names: Vec<String> = pkg.names().map(str::to_string).collect();
+    if names
+        .iter()
+        .any(|n| n.starts_with("Index/") && n.ends_with(".iwa"))
+    {
+        let archives = pages_iwa::read_archives(pkg)?;
+        return keynote_iwa::read_content(&archives, pkg, "");
+    }
+    // `_is_nested_index`: the `Index.zip` at the root of the one directory
+    // the package was flattened into; anything deeper is something else that
+    // happens to be called that.
+    let nested = names
+        .iter()
+        .filter(|n| {
+            n.strip_suffix("Index.zip").is_some_and(|dir| {
+                dir.is_empty() || (dir.ends_with('/') && dir.matches('/').count() == 1)
+            })
+        })
+        .min()
+        .cloned();
+    if let Some(member) = nested {
+        let bytes = pkg
+            .read_bytes(&member)
+            .ok_or_else(|| ConversionError::Parse(format!("iwork: could not read '{member}'")))?;
+        let mut index = Package::open(&bytes)
+            .ok_or_else(|| ConversionError::Parse("iwork: Index.zip is not a zip".into()))?;
+        let archives = pages_iwa::read_archives(&mut index)?;
+        let prefix = &member[..member.len() - "Index.zip".len()];
+        return keynote_iwa::read_content(&archives, pkg, prefix);
+    }
+    if let Some(member) = ["index.apxl", "index.apxl.gz"]
+        .into_iter()
+        .find(|m| names.iter().any(|n| n == m))
+    {
+        return keynote_xml::read_content(pkg, member);
+    }
+    Err(ConversionError::Parse(
+        "iwork: a ZIP archive, but not a Keynote document — it has neither an Index/ \
+         directory nor an Index.zip nor an index.apxl"
+            .into(),
+    ))
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -437,44 +496,6 @@ fn paragraphs(texts: &[String]) -> Vec<String> {
         }
     }
     out
-}
-
-/// Pages / Keynote: text storages in package order. The Pages body (kind
-/// BODY) leads on its own; text boxes follow, then any tables (their cell
-/// text comes from the same TST string tables Numbers uses). Presenter
-/// notes, headers and footnotes are excluded.
-fn convert_textual(flavor: Flavor, archives: &[Archive], doc: &mut DoclingDocument) {
-    let mut boxes: Vec<String> = Vec::new();
-    for a in archives {
-        if a.ty != TYPE_TEXT_STORAGE {
-            continue;
-        }
-        let (kind, texts) = storage_text(&a.payload);
-        match kind {
-            KIND_CELL | KIND_NOTE | KIND_HEADER | KIND_FOOTNOTE => continue,
-            KIND_BODY if flavor == Flavor::Pages => {
-                for p in paragraphs(&texts) {
-                    doc.push(Node::Paragraph { text: p });
-                }
-            }
-            _ => boxes.extend(paragraphs(&texts)),
-        }
-    }
-    // Keynote packages carry each layout's placeholder text once per master,
-    // per layout and per slide; repeating a paragraph the reader has already
-    // seen adds nothing, so text boxes dedup globally (first occurrence wins,
-    // package order preserved).
-    let mut seen = std::collections::HashSet::new();
-    for p in boxes {
-        if seen.insert(p.clone()) {
-            doc.push(Node::Paragraph { text: p });
-        }
-    }
-    // Tables placed on pages/slides: same TST model + string table as Numbers.
-    let by_id: HashMap<u64, &Archive> = archives.iter().map(|a| (a.id, a)).collect();
-    for model in archives.iter().filter(|a| a.ty == TYPE_TST_TABLE_MODEL) {
-        emit_table(model, &by_id, doc);
-    }
 }
 
 /// Numbers: document → sheets → table drawables → models → shared string

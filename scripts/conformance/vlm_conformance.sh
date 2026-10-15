@@ -16,8 +16,8 @@
 #   VLM_TIMEOUT=1800         per-page timeout, seconds, both sides (default
 #                            600 — too tight for a CPU-served endpoint, #311)
 #
-# Prereqs: the shim serving (see its header for the venv recipe), pdfium for
-# the Rust side, and Python docling with VLM extras for the reference side
+# Prereqs: the shim serving (see its header for the venv recipe), and Python
+# docling with VLM extras for the reference side
 # (scripts/conformance/setup-docling.sh).
 set -euo pipefail
 cd "$(dirname "$0")/../.."   # docling.rs/
@@ -33,7 +33,6 @@ OUT="target/vlm-conformance"
 # setup-docling.sh" hint below a lie (the setup installs into .venv-compare).
 PYBIN="${PYBIN:-.venv-compare/bin/python}"
 [ -x "$PYBIN" ] || PYBIN=python3
-export PDFIUM_DYNAMIC_LIB_PATH="${PDFIUM_DYNAMIC_LIB_PATH:-$(pwd)/.pdfium/lib}"
 # One knob caps a page request on both sides (the Rust client reads the env).
 export DOCLING_RS_VLM_TIMEOUT="${VLM_TIMEOUT:-600}"
 

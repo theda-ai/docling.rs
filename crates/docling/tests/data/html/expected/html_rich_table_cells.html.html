@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8"/>
+<title>html_rich_table_cells</title>
+<meta name="generator" content="Docling HTML Serializer"/>
+<style>
+    html {
+        background-color: #f5f5f5;
+        font-family: Arial, sans-serif;
+        line-height: 1.6;
+    }
+    body {
+        max-width: 800px;
+        margin: 0 auto;
+        padding: 2rem;
+        background-color: white;
+        box-shadow: 0 0 10px rgba(0,0,0,0.1);
+    }
+    h1, h2, h3, h4, h5, h6 {
+        color: #333;
+        margin-top: 1.5em;
+        margin-bottom: 0.5em;
+    }
+    h1 {
+        font-size: 2em;
+        border-bottom: 1px solid #eee;
+        padding-bottom: 0.3em;
+    }
+    table {
+        border-collapse: collapse;
+        margin: 1em 0;
+        width: 100%;
+    }
+    th, td {
+        border: 1px solid #ddd;
+        padding: 8px;
+        text-align: left;
+    }
+    th {
+        background-color: #f2f2f2;
+        font-weight: bold;
+    }
+    figure {
+        margin: 1.5em 0;
+        text-align: center;
+    }
+    figcaption {
+        color: #666;
+        font-style: italic;
+        margin-top: 0.5em;
+    }
+    img {
+        max-width: 100%;
+        height: auto;
+    }
+    pre {
+        background-color: #f6f8fa;
+        border-radius: 3px;
+        padding: 1em;
+        overflow: auto;
+    }
+    code {
+        font-family: monospace;
+        background-color: #f6f8fa;
+        padding: 0.2em 0.4em;
+        border-radius: 3px;
+    }
+    pre code {
+        background-color: transparent;
+        padding: 0;
+    }
+    .formula {
+        text-align: center;
+        padding: 0.5em;
+        margin: 1em 0;
+        background-color: #f9f9f9;
+    }
+    .formula-not-decoded {
+        text-align: center;
+        padding: 0.5em;
+        margin: 1em 0;
+        background: repeating-linear-gradient(
+            45deg,
+            #f0f0f0,
+            #f0f0f0 10px,
+            #f9f9f9 10px,
+            #f9f9f9 20px
+        );
+    }
+    .page-break {
+        page-break-after: always;
+        border-top: 1px dashed #ccc;
+        margin: 2em 0;
+    }
+    .key-value-region {
+        background-color: #f9f9f9;
+        padding: 1em;
+        border-radius: 4px;
+        margin: 1em 0;
+    }
+    .key-value-region dt {
+        font-weight: bold;
+    }
+    .key-value-region dd {
+        margin-left: 1em;
+        margin-bottom: 0.5em;
+    }
+    .form-container {
+        border: 1px solid #ddd;
+        padding: 1em;
+        border-radius: 4px;
+        margin: 1em 0;
+    }
+    .form-item {
+        margin-bottom: 0.5em;
+    }
+    .image-classification {
+        font-size: 0.9em;
+        color: #666;
+        margin-top: 0.5em;
+    }
+    details.docling-meta {
+        margin: 0.5em 0;
+        font-size: 0.9em;
+        text-align: left;
+    }
+    figure details.docling-meta {
+        text-align: left;
+    }
+    details.docling-meta > summary {
+        cursor: pointer;
+        color: #555;
+        font-style: italic;
+        padding: 2px 6px;
+    }
+    .docling-meta-field {
+        background-color: #f0f0f0;
+        border-left: 3px solid #ccc;
+        padding: 6px 10px;
+        margin: 4px 0 4px 1em;
+        border-radius: 3px;
+        text-align: left;
+    }
+    .docling-meta-field-label {
+        font-weight: bold;
+        color: #444;
+    }
+    pre.docling-meta-code {
+        background-color: #1e1e1e;
+        color: #d4d4d4;
+        border-radius: 4px;
+        padding: 10px 12px;
+        margin: 6px 0;
+        overflow-x: auto;
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+        font-size: 0.85em;
+        line-height: 1.45;
+        white-space: pre;
+        tab-size: 4;
+    }
+    pre.docling-meta-code code {
+        background: transparent;
+        border: none;
+        padding: 0;
+        color: inherit;
+        font-family: inherit;
+        font-size: inherit;
+        display: block;
+        white-space: pre;
+    }
+</style>
+</head>
+<body>
+<div class='page'>
+<h1>Rich Table Cells in HTML</h1>
+<table><caption><div class="caption">Basic duck facts</div></caption><tbody><tr><th>Name</th><th>Habitat</th><th>Comment</th></tr><tr><td>Wood Duck</td><td></td><td>Often seen near ponds.</td></tr><tr><td>Mallard</td><td>Ponds, lakes, rivers</td><td>Quack</td></tr><tr><td>Goose (not a duck!)</td><td>Water &amp; wetlands</td><td><span class='inline-group'><strong>Large</strong> , <em>loud</em> , <u>noisy</u> , <del>small</del></span></td></tr><tr><td>Teal</td><td><ul>
+<li>Pond</li>
+<li>Marsh</li>
+<li>Riverbank</li>
+</ul></td><td><ol>
+<li>Fly south in winter</li>
+<li>Build nest on ground</li>
+</ol></td></tr></tbody></table>
+<table><caption><div class="caption">Duck family tree (simplified)</div></caption><tbody><tr><th>Genus</th><th>Species</th></tr><tr><td><p>Aythya<br>(Diving ducks)</p></td><td>Hawser, Common Pochard</td></tr><tr><td><p>Lophonetta<br>(Pintail group)</p></td><td>Fulvous Whistling Duck</td></tr><tr><td><p>Oxyura<br>(Benthic ducks)</p></td><td>Wigee, Banded Water-screw</td></tr></tbody></table>
+<table><caption><div class="caption">Duck-related actions</div></caption><tbody><tr><th colspan="2">Action</th></tr><tr><td><strong><p>Swim</p></strong></td><td><span class='inline-group'>Gracefully glide on H <sub>2</sub> O surfaces.</span></td></tr><tr><td><em><p>Fly</p></em></td><td></td></tr><tr><td><u><p>Quack</p></u></td><td><table><tbody><tr><th>Type</th><th>Sound</th></tr><tr><td>Short</td><td>&quot;quak&quot;</td></tr><tr><td>Long</td><td>&quot;quaaaaaack&quot;</td></tr></tbody></table></td></tr></tbody></table>
+<table><caption><div class="caption">Famous Ducks with Images</div></caption><tbody><tr><th>Name</th><th>Description</th><th>Image</th></tr><tr><td>Donald Duck</td><td>Cartoon character.</td><td><a href="https://en.wikipedia.org/wiki/Donald_Duck#/media/File:Donald_Duck_angry_transparent_background.png"><p>View PNG</p></a></td></tr><tr><td>White-headed duck</td><td>A small diving duck some 45 cm (18 in) long.</td><td><figure><figcaption><div class="caption">White-headed duck thumbnail</div></figcaption></figure></td></tr><tr><td>Mandarin Duck</td><td>Known for its striking plumage.</td><td><a href="https://upload.wikimedia.org/wikipedia/commons/thumb/7/75/Mandarin_duck_%28Aix_galericulata%29.jpg/250px-Mandarin_duck_%28Aix_galericulata%29.jpg"><p>View Full-Size Image</p></a></td></tr><tr><td>Unknown Duck</td><td>No photo available.</td><td></td></tr></tbody></table>
+</div>
+</body>
+</html>

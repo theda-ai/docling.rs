@@ -1,0 +1,10 @@
+# Smithery (https://smithery.ai) — the docling.rs MCP server (#669). Smithery
+# publishes a server as an HTTPS URL or as an MCP bundle (.mcpb); this one
+# is local, so it ships as the bundle `crates/docling-py/mcp/mcpb/` packs —
+# `uvx docling-rs-mcp@<version>` with the folder, URL fetching and OCR
+# language as settings — built and published by mcp-registry.yml. The
+# Smithery CLI (`smithery mcp publish`) reads only the server id below from
+# this file; the old `startCommand` keys are no longer read.
+# docs/MCP_REGISTRIES.md covers publishing.
+name: docling-rs
+target: local

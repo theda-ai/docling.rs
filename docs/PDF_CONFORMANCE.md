@@ -2,11 +2,19 @@
 
 How close the Rust PDF pipeline gets to docling's **default** Markdown, measured
 byte-for-byte against the committed groundtruth (`tests/data/pdf/groundtruth/*.md`).
-The groundtruth is regenerated from **live published docling**. The numbers in
-this document are measured with `scripts/conformance/pdf_groundtruth.sh`,
-which pins the conformance model set (fp32 layout/OCR env overrides below);
-`scripts/conformance/conformance.sh pdf` runs the *default* (int8, English-OCR)
-models over every source PDF, so its totals differ from this table.
+The groundtruth **mirrors upstream docling's own `tests/data/pdf/groundtruth`**
+(taken at docling v2.130.0-26; upstream last regenerated it on 2026-09-10 for
+docling-ibm-models 4.0.1 — docling#4122/#4200/#4213), which docling writes with
+its default backend since 2.123 (threaded docling-parse, its own page renderer)
+and `do_ocr=False` (`tests/test_e2e_conversion.py`: layout + TableFormer with
+cell matching, CPU). The numbers in this document are measured with
+`scripts/conformance/pdf_groundtruth.sh`, which runs the pipeline the same way —
+`--skip-ocr`, the model inputs rendered by docling-parse's renderer
+(`DOCLING_RS_RENDERER=docling-parse`, #478) — and pins the conformance model
+set (fp32 layout/OCR env overrides below); `scripts/conformance/conformance.sh
+pdf` runs the *default* (int8, English-OCR) models over every source PDF, so
+its totals differ from this table. Before this refresh the groundtruth was an
+older, pypdfium2-era docling's and the pipeline was scored with OCR on.
 
 > Measure locally with `scripts/conformance/pdf_groundtruth.sh` (diffs the checked-in
 > reference; no docling install needed) or `scripts/conformance/conformance.sh pdf` (installs
@@ -16,9 +24,16 @@ models over every source PDF, so its totals differ from this table.
 
 ## Current state
 
-**9 / 17 strict** · **10 / 17 whitespace-normalized.** (The two Korean
-image-only pages `skipped_1page`/`skipped_2pages` carry no text groundtruth and
-are no longer scored.)
+**9 / 18 strict** · **10 / 18 whitespace-normalized** against upstream's
+current groundtruth (docling ≥ 2.123: docling-parse render, `do_ocr=False`,
+`compact_tables=True`; 18 fixtures — `table_misidentified_as_form`
+(docling#4064) joined the corpus with this refresh). Total 342 diff lines with
+the docling-parse renderer the baselines are measured with (374 before #528
+recovered redp5110's rotated table headers, 346 before #609 kept glyphs stacked
+at one x apart); the default build's pure-Rust
+renderer scored 454 on the same files before that change ("The PDF stack"
+below). (The two Korean image-only pages `skipped_1page` /
+`skipped_2pages` carry no text groundtruth and are not scored.)
 
 | PDF | diff | dominant remaining blocker |
 |---|---:|---|
@@ -27,368 +42,271 @@ are no longer scored.)
 | 2305.03393v1-pg9 | **exact** | — (TableFormer table, cell-for-cell) |
 | right_to_left_01 | **exact** | — (RTL period attachment) |
 | right_to_left_02 | **exact** | — (kashida dedup + page-number layout) |
-| base14_fonts_rot90 / _rot180 / _rot270 | **exact** | — (`/Rotate` display-frame normalization, docling#4008) |
-| amt_handbook_sample | 2 *(ws-ok)* | docling's spurious fraction double space — ours is more faithful |
+| base14_fonts_rot90 / _rot180 / _rot270 | **exact** | — (`/Rotate` display-frame normalization, docling#4008; our own fixtures, groundtruth = the unrotated upstream file) |
 | code_and_formula | **exact** | — (flat legacy code, line-preserving `pretty` in strict) |
-| normal_4pages | 16 | two-column line interleave + section-1 numeral claim |
-| 2305.03393v1 | 18 | author-block cluster split + in-figure label clusters (model-level) |
-| table_mislabeled_as_picture | 48 | layout over-detects tables (survey rendered as tables) |
-| 2203.01017v2 | 51 | reference-accent spacing + author-block splits (in-picture table recovered: same grid as docling, different OCR engine noise) |
-| 2206.01062 | 56 | author-block cluster splits (model-borderline) + one int8-borderline header rowspan; 4 of the lines are the #424 same-row author order, which docling 2.127 produces too — the committed groundtruth is an older docling's |
-| right_to_left_03 | 58 | RTL bidi + wrapper (form) children order |
-| redp5110_sampled | 70 | TOC row structure tails + cover-page ordering |
+| amt_handbook_sample | 2 *(ws-ok)* | docling's spurious fraction double space — ours is more faithful |
+| right_to_left_03 | 2 | one RTL heading line (bidi run order) |
+| 2305.03393v1 | 4 | one author-block cluster (model-borderline) |
+| normal_4pages | 12 | docling folds the page-number glyph into the heading cluster (`## 들어가며 1`) where we emit it as its own item, and the `※` footnotes order |
+| 2203.01017v2 | 19 | caption vs enumerated-list order around Figure 1, accent spacing in the references (`Herv´e D´ejean`) |
+| 2206.01062 | 14 | author-block cluster splits (model-borderline) |
+| table_misidentified_as_form | 48 | the form container's nested table / picture (docling#4064): docling nests them inside the form region and keeps the heading, we flatten the region |
+| table_mislabeled_as_picture | 85 | the survey over-detected as tables; docling keeps a cell's leading indentation (`\|   They work in parallel…`) |
+| redp5110_sampled | 152 | TOC: docling's cell matching puts the dot leaders into the page-number column (`. . . . . . . vii`), ours keeps them with the title (`. vii`); cover-page ordering |
 
-Measured on the current tree with `scripts/conformance/pdf_groundtruth.sh`.
-The earlier revision of this table predated docling 2.118's reading-order
-dehyphenation (docling#3888, ported in #250) — both sides now join a
-hard-hyphenated lowercase continuation across a column/page break without the
-`word- continuation` artifact — and the groundtruth refresh below.
+Measured on the current tree with `scripts/conformance/pdf_groundtruth.sh`
+(`--skip-ocr --compact-tables`, docling-parse renderer). Two ports landed with
+this refresh because the new groundtruth surfaced them: docling's
+`ListItemMarkerProcessor` (a leading `-`/bullet/`N.`/`a)` marker is split off
+the item text — 2305's OTSL list reads `- "C" cell`, not `- - "C" cell`; a
+compound `3.a.` marker rides in the text, `- 3.a. If all…`), and
+`--compact-tables` on the streaming Markdown path (it reached only
+`--no-stream` before). Against the previous, pypdfium2-era groundtruth this
+tree scored 9/17 strict.
 
-### docling-core 2.96 table headers: PDF baselines refreshed
+## The PDF stack: what the models see, and what renders it
 
-The table-header rule ported in #362 (docling-core#723/#756 — the header block
-is the leading rows on which a `column_header` cell *starts*, flattened per
-column with ` - `) changed the Markdown of every multi-row-header table, the
-PDF pipeline's included. The declarative corpora were regenerated with it; the
-PDF snapshots and the docling groundtruth were not, because neither runs in CI
-(both need pdfium + the models). Five snapshots and four groundtruth files
-therefore read as "drift" that was really a stale baseline:
+docling ≥ 2.123 converts through `ThreadedDoclingParseDocumentBackend`:
+every page image its layout, TableFormer, OCR and enrichment stages consume
+comes out of docling-parse's **own renderer** (`blend2d_renderer.h`: glyph
+outlines from FreeType, filled by Blend2D's analytic anti-aliasing, embedded
+programs first and its bundled fallback faces otherwise, no supersampling).
+pdfium — the `PyPdfiumDocumentBackend` chain this pipeline used to reproduce,
+1.5× render + PIL-BICUBIC — is a backend docling still ships but no longer
+runs by default, and the two renders differ on ~10 % of a text page's pixels
+(the anti-aliasing of every glyph edge and hairline, not the content): on a
+borderline region heron labels a whole table the other way (#478).
 
-* `2206.01062`, `2305.03393v1`, `2305.03393v1-pg9`, `2203.01017v2` and the
-  rendered `text_document_02.odt` — every drifting line was a table line;
-* re-serializing **docling's own committed JSON** (`tests/data/pdf/groundtruth/*.json`)
-  with docling-core 2.96 reproduces our new tables exactly, and changes those
-  four groundtruth files and no others (the remaining ten re-render
-  byte-identical, which is also what makes this refresh auditable: the
-  committed `.md` really is the serialization of the committed `.json`);
-* the groundtruth refresh is not quite table-only — it carries every
-  docling-core change since that groundtruth was taken, which here means six
-  further lines: a picture's **non-caption** text children (`HTML`, `OTSL`,
-  `PDF Cells`, in `2305.03393v1` and `2203.01017v2`) are no longer serialized,
-  while its caption still is. Our pipeline never emitted those fragments, so
-  that part moves toward us as well;
-* so the groundtruth `.md` was refreshed from that JSON rather than from a new
-  docling run — the document model did not change, only its serializer — and
-  the snapshots were regenerated.
+The pipeline is therefore built around docling-parse's frame, and nothing in
+the default build is a native PDF library:
 
-A later pass (#382) took `2206.01062` from 113 to 82: docling#4216's header
-flags let `header_row_count` drop the pivot-table deviation this port carried,
-so a table whose first row is a lone spanning label now promotes that row to
-the header exactly as docling does. Its snapshot was regenerated with it.
+| need | answered by |
+|---|---|
+| page count, geometry, `/Rotate`, link annotations | `pdf_meta.rs` — the lopdf object model, `CropBox ∩ MediaBox` with pdfium's fallbacks, rotation normalized as `CPDF_Page::GetPageRotation` does; checked identical to pdfium on every corpus page (`pdfium_backend::tests::pdf_meta_matches_pdfium_on_the_corpus`, `--features pdfium`) |
+| the text layer | `textparse.rs` — the only source since the pdfium text fallback was measured to add nothing on any page of the corpus and removed (the parser and pdfium were empty on exactly the same 38 pages) |
+| an image-only page's bitmap (scans) | `raster/` — pdfium's rendering of such a page **byte for byte** (`CStretchEngine`, libjpeg-exact `DCTDecode` incl. the reduced IDCTs, `FaxDecoder`, stencil masks, `LoadPalette`): 22/22 fixture renders and 165/165 synthesized pages identical to `FPDF_RenderPageBitmap`. It declines (and the page renderer below draws) JPX/JBIG2 (JPX decoded there, #598), CMYK/Lab/Separation/DeviceN and non-sRGB ICC images, `/SMask` and colour-key masks, 16-bit samples, non-axis-aligned placements, transparency groups, pages with drawn paths or visible text |
+| the model inputs of every other page | `render/` — the pure-Rust page renderer, docling-parse's twin (below); `DOCLING_RS_RENDERER=docling-parse` takes them from docling-parse's renderer itself through the `dlopen`ed shim |
+| a file lopdf cannot read; `DOCLING_RS_RENDERER=pdfium` | pdfium, only in a build with the opt-in `pdfium` cargo feature (`docling-pdf`, forwarded by `docling`, `docling-cli`, `docling-serve`); without it the choice warns once and renders in Rust, and an unreadable object model fails with the install hint |
 
-Both baselines improve as a result: the snapshot corpus is back to 97/97 exact,
-`2305.03393v1-pg9` is byte-exact against the groundtruth again, and the three
-remaining table-heavy fixtures drop from 203 → 113 (`2206.01062`), 48 → 20
-(`2305.03393v1`) and 65 → 55 (`2203.01017v2`) diff lines.
+**Encrypted PDFs** open through lopdf: the empty user password most
+"protected" files carry is tried silently, the document's password
+(`--password`, also docling's `--pdf-password` — the `password` option on
+every surface since #611/#625, `PdfMeta::open_with_password`) decrypts at load,
+and a missing one is the error docling raises (`pdf: the PDF is encrypted: a
+password is required` — the `pdf_password` snapshot records it; a wrong one
+says `… and the password is wrong`).
 
-### docling 2.118–2.123 assembly / post-processing parity (#321)
+### The renderer (`crates/docling-pdf/src/render/`)
 
-Upstream refined several PDF post-processing rules between 2.118 and 2.123;
-all of them are ported, each as a deterministic snapshot update:
+≈9,000 lines reproducing docling-parse's drawing rules in its frame:
 
-| upstream | rule | where it lives here |
+* **Canvas and frame** (`render/mod.rs`): `ceil(extent − 1e-6)` pixels per
+  side, the crop box stretched onto the whole canvas, drawn unrotated and
+  `/Rotate` applied to the finished pixels, premultiplied RGBA over white →
+  RGB. A `Renderer` owns one document's caches (parsed fonts, the CMYK table,
+  decoded image samples under a 256 MB budget) across the two scales the
+  pipeline renders every page at.
+* **Content streams** (`render/content.rs`): the graphics state, paths and
+  their painting operators, clipping (a rectangle clip is a box
+  intersection; any other path a coverage mask over the shape's box, cached
+  by path hash), ExtGState alpha / blend modes / line parameters, colour
+  operators over DeviceGray/RGB/CMYK, Indexed, Lab, ICCBased (by `/N`),
+  Separation / DeviceN (PDF functions of types 0/2/3/4 in
+  `render/function.rs`) and Pattern spaces; text objects with every
+  `Tf`/`Td`/`TJ`/`Tz`/`Ts`/`Tr` rule; Form XObjects; transparency groups
+  flattened the way `enter_transparency_group` does (no soft masks);
+  shadings of all seven types and tiling patterns; Widget annotation
+  appearances (the only annotations docling-parse draws); and the details a
+  byte oracle exposed — minimum stroke width one pixel, line width scaled by
+  √|det CTM|, dashes drawn, CMYK through docling-parse's Yule–Nielsen
+  Neugebauer model (`render/color.rs`; pure K is (35, 31, 32)), an
+  unresolvable glyph as its thin blue box.
+* **Fonts** (`render/font/`): TrueType/OpenType and bare CFF through
+  `ttf-parser` — with the Type 2 `dotsection` operator (`12 0`, a Type 1
+  hint Adobe's converters leave in front of every dot) stripped from the
+  charstrings first (`dotsection.rs`, #531): the spec says to ignore it, but
+  ttf-parser abandons the glyph there, which drew no period and dot-less
+  `i`s, so FrameMaker index pages lost their dot leaders and heron read
+  them as one page-wide `table` instead of `document_index` columns —,
+  Type 1 through an own charstring interpreter (`type1.rs`),
+  Type 3 through the glyph procedures, selected per ISO 32000-1 9.6.6 /
+  9.7.4 (`/Differences`, base encodings, `cmap` subtable rules, `post`
+  names, predefined and embedded CMaps, `/CIDToGIDMap`); fonts without a
+  program draw from a host face (`fallback.rs`: `.models/fonts`, then the
+  Liberation / DejaVu / URW / Noto directories, `DOCLING_RS_FONT_DIRS` adds
+  more, `DOCLING_RS_SYSTEM_FONTS=0` leaves the host directories out so the
+  render is the deployment's alone, #633; a host without fonts draws each glyph's box — `download_dependencies.sh
+  --with-fonts` fetches Liberation + DejaVu, the Docker images install the
+  same two packages).
+* **Images** (`render/image.rs`): the raster's decoders behind a general
+  sample reader (1–16 bpc, every colour space above, `/Decode`, `/SMask`,
+  stencil and colour-key masks, `/ImageMask` stencils in the fill colour),
+  a JPEG decoded no larger than the page needs — docling-parse's
+  `codec_reduction_shift` against its `bitmap_target_pixels_per_unit` (1.0,
+  docling's `render_scale`): a 300 dpi scan is decoded at a quarter through
+  libjpeg's reduced IDCT and blitted *up* onto the scale-2 canvas — then
+  reduced by its integer factor `fx = sw / dst_w` with premultiplied box
+  averaging before the bilinear blit; a JPEG 2000 image (`JPXDecode`) is
+  decoded by `hayro-jpeg2000` (`render/jpx.rs`, #598 — within ±1 of OpenJPEG
+  on the NASA scans; the reduction hint becomes its target resolution, the
+  codestream's colour space stands in for a missing `/ColorSpace`, its alpha
+  channel is the soft mask under `/SMaskInData`), where it used to be a
+  mid-gray placeholder that left the layout model a blank rectangle: the
+  picture box lost its confidence, ran over the caption below, and two
+  stacked photos fused — docling-parse decodes JPX, so the shim run never
+  showed it. JBIG2 stays a placeholder. The one bitmap that does not follow the hint is
+  a text-less page's, which goes to OCR: it decodes at full size
+  (`Renderer::render_with_hint(…, 0.0)`) so the recognizer reads the scan's
+  resolution, not a quarter of it blitted up — the same deliberate deviation
+  the pdfium-exact raster of a scan makes under the shim.
+* **A content pre-pass** (`render/prepass.rs`) for what lopdf's content
+  lexer does not hand over: inline images with abbreviated or filtered
+  parameters, and the Type 3 operators `d0`/`d1`.
+
+**Measured against the shim** (`render::tests::against_the_docling_parse_shim`,
+run when `.docling-parse/lib` is present — every PDF the snapshot corpus is
+generated from, at scales 1.0 and 2.0; `examples/render_compare.rs` for one
+page with a diff image): **334 renders, mean |Δ| 0.84 / 255 per channel,
+worst 3.30** (`otsl_proof_v3`, a dense LaTeX figure: glyph edges). Before
+the reduced JPEG decode the pdf fixtures alone measured 1.05 / 5.89, the
+worst page a scan drawn from its full-size decode. The renderer is *not*
+byte-identical to Blend2D — its analytic rasterizer, FreeType's hinting-free
+outlines and its JIT compositor round differently from tiny-skia, and
+Blend2D's bilinear weights are 8-bit — so the shim stays the reference the
+baselines are pinned to and the test gates a regression (worst < 10,
+mean < 2), not identity. What that gap does to the models, scored against
+the docling-parse-rendered baselines with the two conformance scripts:
+
+| model inputs rendered by | snapshots exact (98) | groundtruth (18 files) |
 |---|---|---|
-| docling#3888 (2.118) | reading-order merge: a hard hyphen before a lowercase continuation is a split word — join without the hyphen | `assemble::merge_continuations` (ported earlier, #250) |
-| docling#4052 (2.122) | line join: a line-final dash fuses the wrapped word only when *attached* to it (the character before it is alphanumeric); a detached dash — a separator, a bullet, the bare `-` cell an ORCID superscript splits off — is kept and the lines join with a space (`[0000 - 0002 - 3723`, previously `[0000 -0002 -3723`) | `assemble::cells_text` (the `sanitize_text` port) |
-| docling#4059 (2.122) | cross-type coincident pairs: a region the layout model proposes under two labels at a near-identical box (IoU > 0.8) with confidences within 0.1 keeps the richer label — `document_index` over `table`, a table-like over `picture`, a surviving structured element over a `form`/`key_value_region` container. The earlier port dropped every coincident picture regardless of confidence | `assemble::handle_cross_type_overlaps` |
-| docling 2.127 `_init_l2r_map` (#424) | same-row links in the reading-order graph: two elements consecutive in the postprocessor's assembly order (source-cell order, docling's `cid`), the left strictly left of the right and sharing a row (vertical IoU > 0.8), are linked left→right — the link is an up/down edge, and a vertical edge onto the left partner is redirected to the row's right-most element, so a row is read through before the paragraph below it | `reading_order::init_l2r` / `init_ud`, `assemble::cluster_cids` |
-| docling#4064 (2.123) | `form` / `key_value_region` are containers: everything > 80 % inside (text, list items, and now tables and pictures) is a child, reading-ordered among itself and emitted as one block where the container sits in the page order; the container shrinks to its children's union for that ordering | `assemble::order_with_containers` |
-| docling#3906 (2.118.1) | a picture ≥ 80 % inside a TableFormer table is nested in the cell covering it (grid position inferred from median row/column centers when cell boxes overlap): the cell's Markdown reads `text  <!-- image -->` like docling's `RichTableCell`, the JSON `table_cells`/`grid` keep the plain text, DocLang gets the blocks (`Table::cell_blocks`), and the picture is no longer a standalone figure | `assemble::match_table_pictures` |
-| docling#4061 (2.122) | forced full-page OCR (`--force-full-page-ocr`, `ocr_mode=full_page|layout_regions`) skips the text-layer decode outright — the cells were cleared unread; on vector-dense pages the decode was most of the page cost | `pdfium_backend::for_each_page(extract_text = false)` |
-| docling OCR engines' text detection (#429) | docling's OCR engines (RapidOCR/EasyOCR/Tesseract) *detect* text lines over the bitmap and every line becomes a cell — the ones no layout cluster claims turn into orphan text clusters (confidence 1.0). This engine was recognition-only (PP-OCRv3 rec on the lines inside layout regions), so text the layout model scored below threshold was lost: on `ModalNet-19.png` layout gives `SoftMax` 0.54 and the other labels 0.48–0.49 (docling's own layout run yields zero clusters), yet docling 2.127 reads `MatMul`, `SoftMax`, `Mask (opt.)`, `Scale`, `Q`, `K`. Ported RapidOCR's DB detector (`PP-OCRv6_det_small.onnx`, the model its default resolves to; pre/post-processing per `rapidocr/ch_ppocr_det` — short side to 736, /32, BGR, `(x/255−0.5)/0.5`, thresh 0.3, 2×2 dilation, min-area rect, `box_score_fast` ≥ 0.5, unclip 1.6, row/column order). Boxes match RapidOCR's to the pixel on that image (six lines, `MatMul … K`; `Q` is missed by both at 1×). Region-scoped recognition stays the source inside layout regions; the detector only adds lines no recognized cell covers (> 30 % overlap = covered), the orphan pass places them and `drop_contained_regulars` silences those inside kept pictures/tables like upstream. "Covered" is cumulative — a line mostly inside a text-like/table region, or with recognized cells summing to > 30 % of it, or overlapping an already accepted detection — because DB spans two adjacent columns in one box and, judged cell by cell, such a box re-read a whole paragraph of `old_newspaper`. Snapshot fallout: 16 files — the 14 whole-page figure/image inputs now carry their labels and tick marks (the same per-label soup docling emits; `230927_effective_sizes.png` alone gains ~390 lines of chart ticks), `2206.01062.tif` gains its KDD footer block (copyright, DOI — lines the layout model never boxed), `old_newspaper.png` gains one stray `A` from a decorative glyph (docling's detector-fed runs carry the same kind of noise, `1` for arrows on `ModalNet-19`); every scanned-page line that existed before is unchanged, groundtruth 9/17 strict unchanged. **Cost** (release, 4 vCPU): digital pages never run it; on a bitmap page the DB net is the costliest OCR stage — ~0.7 s at RapidOCR's input size (1216 × 1600 for a Letter page at the 2.0 px/pt render, two intra threads), so a single scanned page goes 1.2 → 1.9 s, the whole snapshot corpus (bitmap-heavy) 256 → 327 s (+28 %); the detector runs on its own thread alongside layout (`Worker::detect_alongside`), which helps where cores are free, and its resize is the SIMD bilinear path (112 → 23 ms). The input's longer side is therefore capped at **960 by default** (PaddleOCR's own `det_limit_side_len`; `DOCLING_RS_OCR_DET_MAX_SIDE`, `0` = RapidOCR's uncapped rule): detection drops to ~⅓ (corpus 267 s, +4 %) and 9 bitmap snapshots move by noise-level amounts in both directions (gains `Q`/`V` on `ModalNet-19`, loses tiny chart ticks on `fp8-v.s.-bf16`, doubles one `Tom Hill` on `old_newspaper` where the shifted box escapes the coverage test) — the committed snapshots are the capped ones. The browser pipeline runs the same detector through onnxruntime-web (`ScannedConverter.setDetector`, `www/pipeline.js` fetches `ocr_det.onnx` from `./.models/` or the model mirror in the background from boot, a document waits for it at most 3 s and otherwise runs without it — a third-party fallback host stalled the demo for minutes, so there is none) and shares the ONNX-free pre/post-processing and coverage rule (`ocr_det` compiles under `ocr-prep`). Without the model: recognition-only, as before | `ocr_det.rs`, `Worker::det_model` / `detect_alongside`, `lib.rs` OCR'd-page block |
-| docling `LayoutPostprocessor` full-page picture filter (upstream since 2.15, missing here) | a `picture` detection covering > 90 % of the page is dropped from the thresholded detections before overlap resolution — the box is the page, not a figure on it. The port kept it, and since a picture absorbs every text cell inside it, a whole-page diagram (the LaTeX figure PDFs cropped to their drawing) emitted a lone `<!-- image -->` where docling reads the diagram's labels and captions out as text. Verified on docling 2.127: for `fp8-128accumulatorv4.pdf` it emits the labels and both `(a)`/`(b)` captions and no picture, for `dualpipe.pdf` the same per-label soup ours now produces, and for a whole-page figure without text — `DeepSeek.pdf`, `fp8-v.s.-bf16.pdf`, and every PNG/JPEG *image input* (`header.jpeg`, `ModalNet-19.png`) — an **empty document** (`pictures=0, texts=0`), which is what these snapshots now hold instead of a lone `<!-- image -->`. Snapshot fallout: 35 files, all LaTeX figure PDFs and images (the groundtruth fixtures have no full-page picture; 9/17 strict unchanged) | `assemble::drop_full_page_pictures`, wired in `lib.rs` and `scanned::refine_regions` |
-| pdfium `CPDF_Page` frame | pages whose `/CropBox` (or `/MediaBox`) does not start at the origin: pdfium sizes, renders and reports text from the CropBox ∩ MediaBox box with its lower-left corner as `(0, 0)` (`m_PageMatrix`), and docling's backends inherit that frame; the pure-Rust parser flipped glyphs with the MediaBox *height* and no translation, so a trimmed book page (`MediaBox [-56 -58 576 723]`, `CropBox [1 -0.6 519 666]`) had every cell 58 pt below the rendered text, the bottom lines pushed off the page (`prov` clamped to `t = b`), and the layout regions matching the wrong lines — a copyright page's row of ISBNs read as a scrambled key-value block. Glyphs now start from a `Mat` translated by the box corner, the page size is the box's, and outline/link destinations flip against the box's top edge; MediaBox/CropBox are inherited through the page tree with pdfium's fallbacks (no MediaBox → Letter, CropBox clipped to the MediaBox, empty → MediaBox). Snapshot fallout: the LaTeX figure PDFs cropped to a non-zero origin (`fp8-128accumulatorv4`, `fp8-frameworkv3`) had emitted their diagram labels only *because* the misaligned cells fell outside the whole-page picture; with the cells aligned the labels first vanished into it, which is what surfaced the missing full-page picture filter above — they now read out as text in drawing order; groundtruth unchanged (9/17 strict) | `textparse::page_box` / `page_glyphs_cached`, `outline.rs` |
-| docling#4008 (2.121) | digital pages with `/Rotate`: pdfium's text rects, the pure-Rust parser's glyphs and link annotation rects live in the unrotated frame while the page size and render are display-frame — every rect is now rotated into the display frame, so layout regions and cells line up again (a `/Rotate 90` copy of `base14_fonts.pdf` used to lose its heading to orphan text; it now yields docling's exact Markdown and matching geometry) | `pdfium_backend::to_display_frame` |
+| docling-parse shim (`DOCLING_RS_RENDERER=docling-parse`, the reference) | 98 | 374 diff lines, 9 strict |
+| **Rust renderer** (the default) | 60 | 429 diff lines, 9 strict |
 
-Snapshot fallout of this batch (all reviewed against docling 2.124 output):
-the detached-dash joins (2203, 2206, 2305, redp5110, the METS/GBS book), the
-`right_to_left_03` form pages — whose key/value table now survives next to
-its form container (upstream keeps that table too; the older baseline had the
-form win the shared wrapper bucket and dissolve it into paragraphs) — and the
-container-grouped ordering on the QR-bill scan. The three rotated-scan
-baselines (`ocr_test_rotated_*`, `nemotron_multipage`) had been stale since
-July: they predate the `/Rotate` normalization and still carried the sideways
-OCR garbage; regenerated, they read the upright text like the groundtruth.
+Heron's borderline labels move with ±1/255 of anti-aliasing, so the
+snapshots that drift are the ML-borderline ones: the matplotlib heat-map
+figures of `2412.19437`, whose tick-label soup TableFormer reads as
+differently shaped grids (131–139 lines each), `redp5110`'s TOC (103),
+`html_v_otsl_intro_v2` (76), `2203.01017v2` (45). (Re-measured with #531,
+which made the Rust render draw the TOC's dot leaders — the CFF
+`dotsection` fix in "Fonts" above. That moved `redp5110`'s render closer
+to the shim on every page — the TOC's mean |Δ| 1.92 → 1.07 — and left the
+counts where they were: 60/98 either way, the TOC table a borderline read
+for TableFormer under both renders (98 → 103 snapshot lines, 158 → 161
+groundtruth lines). The 72/98 and 454 lines recorded before came from an
+older tree; the drop happened between that run and this one, not in #531.) What separates the two
+renders there is the anti-aliasing of text, not its placement: the ink per
+glyph is the same (17.94 vs 17.71 mean levels on `2206.01062` p2) and there
+is no sub-pixel offset (the best-aligned shift is zero), but tiny-skia puts
+it on fewer, darker edge pixels — 6.6 % vs 5.5 % of the page below mid-gray
+— and heron's borderline scores follow that. What would close the rest:
+Blend2D's analytic coverage accumulation and its 8-bit bilinear weights,
+FreeType's outline flattening, and docling-parse's font-similarity resolver
+with its bundled faces where a PDF embeds no program — each a measurable
+step on the same test.
 
-Deliberate deviations: a picture inside a table that *pairs with a caption*
-stays a standalone figure (upstream nests it and the caption is lost); the
-form/key-value grouping affects ordering only — the children are emitted as
-top-level items, not wrapped in a `form_area` / `key_value_area` group node,
-so the JSON has no such group (the Markdown is identical either way).
+Synthetic pages (`render::synthetic`, 18 tests) pin the frame mapping, the
+crop box, `/Rotate`, strokes, alpha, clips, images with a stencil, shadings,
+tiling patterns, form `/Matrix` + `/BBox`, group alpha, widget flags,
+fallback-face text, Type 3 procedures, the CMYK model and cache reuse. Cost
+in release (scale 2.0): a plain text page 50–60 ms (the shim 70–80),
+`2206.01062` p1 with its 10k glyphs and six images 200 ms (shim 470), the
+clip-heavy `amt_handbook_sample` p1 190 ms (shim 220); `DOCLING_RS_TIMING=1`
+breaks it down (`render.content`, `render.glyph_fill`, `render.apply_clip`,
+`render.clip_mask`, `render.sh`, `render.pattern_fill`, `render.image`,
+`render.image_decode`).
 
-`amt` is the 7th under the whitespace-normalized metric: its only diff is
-docling's spurious double space before the `1⁄4` fraction, where our single-spaced
-output is the more faithful rendering. The remaining non-exact PDFs are heavy
-multi-column / table docs whose gaps are model-level (TableFormer structure,
-layout classification, title-page reading order), not text-layer.
+### Development oracles
 
-The heavy table docs improved with the docling-parse **word-cell** grouping
-feeding TableFormer and the #61 layout/reading-order postprocessor
-(2305.03393v1 93→30, 2203.01017v2 209→161, 2206.01062 198→92): the parser's
-per-word cells reproduced docling-parse's `word_cells` closely enough that
-cell-to-grid matching tracked docling much better (the word grouping was later
-replaced wholesale by the `create_word_cells` port described below). See
-"Text reconstruction" below. The #60 matching work (docling's `MatchingPostProcessor` ported to
-`tf_match.rs`, plus docling's exact table-crop rounding chain) took
-2203 157→150 and redp5110 204→202 with every other fixture unchanged; the
-#62 text fixes (docling-parse's quote-normalization table — every curly
-quote → `'` — and joining region cells in docling-parse index order
-instead of geometric bands) then took 2203 →130, 2206 92→80, 2305 28→26,
-normal_4pages 56→44, redp5110 →194, and table_mislabeled 88→86.
+* **The docling-parse shim** (`.docling-parse/lib/libdparse_render.so` +
+  `pdf_resources/`): docling-parse v7.22.1 built with one extra target, a C
+  ABI over `pdf_decoder<DOCUMENT>` + `renderer<BLEND2D>`
+  (`crates/docling-pdf/ffi/docling-parse-render/dparse_render.cpp`,
+  reproducing `docling_threaded_renderer::worker_loop`). `download_dependencies.sh
+  --with-docling-parse` fetches it from the models release
+  (`docling-parse-render.yml` builds it per platform),
+  `scripts/install/build_docling_parse_render.sh` builds it locally.
+  `scripts/conformance/dparse_render_check.py` compared it with the Python
+  package's `PageParseResult.get_image`: 176/176 corpus renders
+  byte-identical, so what the conformance scripts score is exactly docling's
+  input. The pipeline loads it only under `DOCLING_RS_RENDERER=docling-parse`,
+  which `pdf_conformance.sh` and `pdf_groundtruth.sh` set because the
+  baselines are its renders. One deliberate deviation inside that path: a
+  page without a text layer keeps the Rust raster's (pdfium's) bitmap for
+  OCR — Blend2D's blit of a scan reads `JsON` where pdfium's reads `JSON` —
+  while its layout image is docling-parse's.
+* **pdfium** (`.pdfium/lib/libpdfium.so`, `libpdfium.dylib` on macOS): only a
+  build with the `pdfium` feature loads it — for `DOCLING_RS_RENDERER=pdfium`
+  (docling's pypdfium2 chain), for a file lopdf cannot read, and for the
+  raster / object-model oracle tests (`raster::tests::matches_pdfium_on_the_scanned_fixtures`,
+  `synthesized_pages_match_pdfium`, `pdf_meta_matches_pdfium_on_the_corpus`).
+  `publish-models.yml` keeps re-hosting it for those tests.
 
-The #157 **text-panel recovery** deliberately trades a few diff lines for
-recovered content: an *uncaptioned* `picture` that is really a text panel —
-dense, wide, multi-line words, whether from the digital text layer or from
-OCR of the crop (docling's `bitmap_area_threshold`: bitmap areas ≥ 5 % of
-the page get OCR'd on every page kind) — is demoted into per-paragraph text
-regions instead of shipping as pixels. docling drops that text entirely
-(cells assigned to a picture cluster are never serialized), so the +2/+6/+2
-on 2203/normal_4pages/redp5110 are real recovered words (e.g.
-normal_4pages' cover publisher block), not regressions; captioned figures
-(the corpus' document screenshots) and sparse-label charts keep their crops
-and their byte-exact output — `picture_classification` stays **exact**.
+## Layout post-processing and assembly: what is ported, and where
 
-The #165 orphan-claimer fix mirrors docling's regular/special cluster split:
-only regular clusters claim cells (`_find_unassigned_cells` walks
-`regular_clusters` alone), so a line that merely *straddles* a figure border
-no longer loses its cells to the picture's 0.2 claim — it becomes an orphan
-text region and is emitted, as docling does. Orphans that end up fully inside
-a picture or table are still re-dropped, matching docling's Markdown (a
-picture's children never reach `MarkdownPictureSerializer` output; a table's
-text renders through the grid). Took 2206 80→76 and table_mislabeled 86→80
-with every other fixture byte-identical.
+docling's `LayoutPostprocessor`, `ReadingOrderPredictor` and
+`PageAssembleModel` are ported rule by rule; each landed as a deterministic
+snapshot update and is measured against the groundtruth table above. The
+table maps the upstream rule to the code that carries it (the per-fixture
+diff history of each port lives in the git log of these files).
 
-The #200 fix closes the scanned-page gap in that same rule: on OCR'd pages
-the speculative in-picture OCR (the pass that feeds text-panel demotion)
-emitted *all* of its recognized lines beside a kept picture, so a chart's
-axis-tick strings spliced into the body text right next to the image — where
-docling's postprocess "Remove regular clusters that are included in wrappers"
-walks `SPECIAL_TYPES` (picture included) and silently absorbs any orphan
-> 80 % contained in the picture as its child. The same containment drop that
-already handled the first orphan wave now re-runs after the in-picture wave,
-so only border-straddlers (≤ 80 % containment) surface as text, on scanned
-pages exactly as on digital ones. The digital corpus is untouched (6/14
-strict, same per-file diffs); 17 scanned/image snapshots shed their leaked
-figure-internal text (axis ticks, diagram labels — net −59 lines).
+| upstream rule | what it does here | where |
+|---|---|---|
+| per-label confidence thresholds, bucketed overlap resolution (regular / picture / wrapper), `_handle_cross_type_overlaps` (docling#4059: a coincident pair within 0.1 confidence keeps the richer label) | the raw RT-DETR detections are thresholded, then one survivor per overlapping group per bucket; a regular region absorbed by a table / index / picture is dropped so it isn't emitted twice | `layout::label_threshold`, `assemble::resolve`, `handle_cross_type_overlaps`, `drop_contained_regulars` |
+| full-page picture filter (upstream since 2.15) | a `picture` covering > 90 % of the page is the page, not a figure: dropped before overlap resolution so a whole-page diagram's labels read out as text (an image input without text is an empty document, as docling's is) | `assemble::drop_full_page_pictures` |
+| same-label picture dedup, `_remove_overlapping_clusters(tables, "wrapper")` | a figure detected whole and as sub-panels collapses to the whole box; tables whose boxes overlap (IoU > 0.8 or 80 % containment) keep one survivor (`area_threshold` 2.0, `conf_threshold` 0.2) | `assemble::dedup_pictures`, `remove_overlapping_specials` |
+| `_assign_cells_to_clusters`, `_find_unassigned_cells` | exclusive cell assignment: each non-empty cell goes to the single best-overlapping regular region at > 0.2 intersection-over-self; cells no regular claims become orphan text regions; orphans > 80 % inside a picture or table are that special's children (a picture's are nested under it in the JSON — `Node::PictureChildren` — and left out of the reading order, like upstream's `_set_cluster_children`) | `assemble::add_orphan_regions`, `picture_parents` |
+| `_adjust_cluster_bboxes`, `keep_empty_clusters=False`, the three merge rounds (#419) | once cells are final, every regular region is fitted to its cells' union, an empty regular region is dropped, and orphans inside a fitted box fold in — before TableFormer and the reading order, which never see the raw model boxes | `assemble::fit_regions_to_cells` |
+| OCR'd pages: `_should_prefer_cluster` / `_select_best_cluster_from_group` (union-find over IoU > 0.8 or 80 % containment) | region-scoped OCR recognizes each region's crop, so a paragraph box over its own line boxes would read the ink twice: such groups collapse to one survivor on the group's union box | `assemble::merge_overlapping_regulars` |
+| RapidOCR's crops: the recognizer reads the detector's boxes (#570) | inside each text/table region the DB detector's boxes (center in the region, taken whole) are the recognizer's line crops; a region the detector saw nothing in, or every region without the model, is split into ink-projection strips (the pre-#570 line source, `DOCLING_RS_OCR_LINES=projection`); RapidOCR's `text_score` (0.5) drops low-confidence lines. FUNSD word recall 0.57 → 0.86 on 30 forms, 0.61 → 0.90 on all 199 (Python docling 2.133: 0.85) with the PP-OCRv6 recognizer (`.models/ocr_rec_v6.onnx`, preferred when present) | `ocr_prep::prep_region_lines_det`, `prep_table_words_det`, `ocr_prep::text_score`, `ocr::resolve_rec_pair` |
+| `_sort_cells` (docling-parse index order), `PageAssembleModel.sanitize_text` (docling#4052) | a region's cells serialize in source order; lines join with a space except after an *attached* dash, which fuses the wrapped word; a detached dash is kept | `assemble::cells_text` |
+| `predict_merges` (docling#3888) | cross-column / cross-page paragraph continuations (a hard hyphen before a lowercase continuation joins without it; the head test accepts a trailing comma; tables are in the skip set) | `assemble::merge_continuations` |
+| `_init_l2r_map` / `_init_ud_map` (docling#4093, 2.124) | two elements consecutive in assembly order, left strictly of right on one row (vertical IoU > 0.8), are linked left→right and a row is read through before the paragraph below it; the assembly rank is the region's first source cell (a table's or picture's first *interior* cell) | `reading_order::init_l2r` / `init_ud`, `assemble::cluster_cids` |
+| `_find_to_captions` (table arm, #265) | a `caption` binds to the table / `document_index` immediately adjacent in reading order, never across intervening text; caption text is markdown-escaped on every arm | `assemble` caption attachment |
+| `form` / `key_value_region` containers (docling#4064) | everything > 80 % inside is a child, ordered among itself and emitted as one block where the container sits (ordering only — the children stay top-level items, no `form_area` group node) | `assemble::order_with_containers` |
+| a picture ≥ 80 % inside a TableFormer table (docling#3906) | nested in the cell covering it: the cell reads `text  <!-- image -->`, the JSON grid keeps the text | `assemble::match_table_pictures` |
+| `ListItemMarkerProcessor` | a leading `-` / bullet / `N.` / `a)` marker is split off the item text; a compound `3.a.` rides in the text | `docling-core` list-item processing |
+| `_match_hyperlink` | the URI whose annotation rects cover ≥ 0.5 of the region, accumulated per URI, on **footnote** items only — both committed groundtruth generations carry the link into the document only there. The item is a `footnote` text whose JSON carries the raw text plus `hyperlink` (the Markdown wraps it as `[text](uri)`); a footnote is a merge skip-label, so a paragraph continuing across one is merged past it | `assemble` footnote items (`Node::LabeledText`) |
+| forced OCR (docling#4061) | `--force-full-page-ocr` / `ocr_mode=full_page\|layout_regions` skip the text-layer decode outright | `pdfium_backend::for_each_page(extract_text = false)` |
+| RapidOCR's text detection (#429) | the `PP-OCRv6_det_small` DB detector runs over a bitmap page alongside layout (or ahead of the orientation probe, which reuses its boxes, #571) and adds the lines no recognized cell covers (> 30 % overlap = covered, cumulatively) as orphan cells (confidence 1.0); boxes are ordered by RapidOCR's exact `sorted_boxes` (top edge, then adjacent swaps within 10 px — the first port chained rows transitively and scrambled a two-column newspaper's lines once the boxes became the crops, #570); input capped at RapidOCR's `max_side_len`, 2000 px (`DOCLING_RS_OCR_DET_MAX_SIDE`; 960 was the pre-#570 budget, ~⅓ the time, −0.02 FUNSD recall); without the model OCR stays region-scoped on projection strips | `ocr_det.rs`, `Worker::detect_alongside` |
+| `OcrOptions.scale` = 3 + RapidOCR's `max_side_len` = 2000 on image inputs | a standalone image (its own scale-1.0 page) is read by OCR at 3 px/pt shrunk to a 2000 px longer side — docling's effective resolution (#570; a 754 × 1000 form at 2.0); rendered PDF pages keep the 2.0 px/pt render the baselines are pinned to (docling would read them at 2.52 on Letter — a deliberate divergence, kept for the baselines; `--ocr-scale` overrides either) | `page_ocr_scale` |
+| pdfium's `CPDF_Page` frame, docling#4008 | glyphs, link rects and the page size live in the `CropBox ∩ MediaBox` frame with `/Rotate` applied to the display frame, so a trimmed book page or a rotated digital page lines its cells up with the render | `textparse::page_box`, `pdfium_backend::to_display_frame` |
+| docling-parse's page-box filter (#529) | a glyph is kept only when its whole char box (advance × the font's ascent / descent) lies inside the display box — the CropBox, else the MediaBox — edges included: a FrameMaker print slug beside the CropBox or a tiled page's neighbouring text beyond the MediaBox never becomes a cell (it used to be clamped onto the page edge, often to zero width), and a line crossing the edge is cut at the last glyph that fits, as docling-parse cuts it; no corpus page changes | `textparse::on_page` |
+| docling-parse's char rect (`page_cell.h`, #528) | a glyph drawn with a non-upright text matrix — the `0 s -s 0 tx ty Tm` runs landscape `/Rotate 90` pages are built from, 180°/270°, or tilted — keeps its rotated quad, so the corner-distance contraction reads the line in its own reading order and the cell box is the quad's extent (before: zero-width boxes, every such run dropped; 180° read backwards). Upright glyphs keep the plain loose rectangle, so upright output is byte-identical. redp5110's 90° column headers (`*JOBCTL`, `QIBM_DB_SECADM`, …) now reach TableFormer and the table matches the groundtruth cell for cell (180 → 152 diff lines); the ODF-exported presentations — landscape slides drawn onto a portrait page through a 90° `cm` — get their text layer instead of OCR | `textparse::show_text`, `dp_lines::build_cells` |
+| docling-parse `create_word_cells`, the TeX math encodings, the quote-normalization table | word cells are docling-parse's second contraction over the char cells (space glyphs as barriers, erased after); `CMSY*`/`CMMI*` without an `/Encoding` decode by the TeXbook tables; every curly quote → `'` | `dp_lines.rs`, `textparse.rs` |
 
-The #419 **cell refit** closes a gap that sat *before* the reading order.
-docling's `LayoutPostprocessor` never hands the model's boxes to the
-reading-order predictor: once cells are assigned, every regular cluster's
-bbox becomes the union of its cells (`_adjust_cluster_bboxes`), a regular
-cluster left with no cells is dropped (`keep_empty_clusters=False`, formulas
-excepted), and a cluster > 0.8 contained in another is merged into it
-(`_remove_overlapping_clusters`, three rounds). The port assigned cells and
-made orphans but ordered the raw model boxes. That mattered whenever a box
-ended partway through a line: the line missed the 0.2 claim and became an
-orphan (fine), but the *next* paragraph's model box still overlapped that
-line by a few points, so the strictly-above graph had no edge between them
-and emitted the paragraph first — the orphan came out stranded after the
-paragraph it belonged in, and `predict_merges` had already spliced the
-paragraph across the gap (a 460-page book showed 1540 of 6050 text blocks
-starting mid-sentence). `assemble::fit_regions_to_cells` is the refit —
-regular boxes fitted to their cells, empty regular boxes dropped, orphans
-inside a fitted box folded in — run once the page's cells are final, before
-TableFormer and the reading order; cell assignment is unchanged, since a
-fitted box contains every cell it claimed. Groundtruth moved only toward
-docling: 2206 82→52 (its author block now reads exactly as docling's),
-2305 20→18, normal_4pages 20→16, everything else identical; snapshots
-changed on 2206/2305/normal_4pages and on four fixtures with no groundtruth
-(llncsdoc's theorem-environment lines rejoin their paragraphs, nextn's
-figure digits sit beside their subscript bases, old_newspaper and qr_bill
-reorder a few OCR blocks). The same refresh took in the four blank-line
-drifts #385 had left in the PDF baselines (its list-boundary rule reached
-the PDF serializer, and the snapshots were not re-run then).
+**Deliberate deviations** (completeness over the metric; each costs a few
+diff lines and recovers content docling drops):
 
-The #424 **same-row links** port a reading-order rule that the predictor had
-kept disabled for years and docling switched on when it moved the model in
-house (docling#4093, 2.124): `_init_l2r_map` pairs two elements that are
-*consecutive in assembly order* — the postprocessor's `_sort_clusters(mode=
-"id")`, i.e. source-cell order, which docling numbers as `cid` — when the
-first is strictly left of the second and the two share a row (vertical IoU
-> 0.8). The pair is an up/down edge of its own, and a vertical edge whose
-upper end has a right partner is redirected along the row to its right-most
-element, so a row is read through before anything below it. The trigger
-was a Pearson copyright page: the LCCN sits right of the Dewey number on one
-line, the layout model gave it no box, and the orphan it became had no
-horizontal neighbour below it without an interruption in between — a head of
-its own, emitted after the copyright paragraph, and spliced into the middle
-of it by `predict_merges`. `assemble::cluster_cids` computes the assembly
-ranks and `reading_order::init_l2r` / `init_ud` carry the rule; container
-children get it among themselves. The rank is the region's first source
-cell, then top edge, then left edge — and for a table, picture or container
-the first cell *inside* it: upstream every unclaimed cell is an orphan
-cluster, and the ones > 0.8 inside a table become its children, so a table
-sorts where its interior text sits in the stream. Without that, tables sort
-last, two side-by-side tables become consecutive and row-linked, and the
-right table's caption is read ahead of the left column's headings (2206
-page 8) — which docling does not do. Verified against docling 2.127 itself:
-on `2206.01062` page 1 its author row reads Pfitzmann, Auer, Dolfi on one
-line, exactly as ours now does (the committed groundtruth predates the rule
-— its last real docling run was June 2026 — hence the 2206 diff moves 52→56
-against it, all in that author row); on the reported Pearson page it reads
-the LCCN right after the Dewey number. Every other groundtruth fixture is
-unchanged, 9/17 strict as before. Snapshots refreshed for 2206 and for four
-fixtures without groundtruth — three LaTeX figure PDFs whose diagram labels
-now read row-wise (`swa`, `fp8-128accumulatorv4`, `overlap`) and
-`old_newspaper`, whose OCR columns reorder two blocks.
+* **Text panels** (#157): an *uncaptioned* `picture` that is really a dense,
+  wide, multi-line text panel is demoted to per-paragraph `text` regions
+  instead of shipping as pixels (`assemble::recover_text_panels`); a
+  captioned figure keeps its crop.
+* **Tables inside pictures**: a text-less `table` cluster > 50 % under a
+  picture on a digital page (a screenshot of a table) has its word crops
+  OCR'd so TableFormer's grid serializes with text.
+* **A heading's body labelled `page_footer`**: a one-line paragraph in the
+  bottom margin directly under a `section_header` that has no other body
+  (within 2.5 line heights, same column, ≥ 40 % of the page width) is that
+  heading's text, not furniture — the layout model labels the bottom margin
+  by position (a CV's `Languages` line: `page_footer` 0.88 vs `text` 0.49,
+  fp32 and int8 alike), and Markdown drops furniture, so docling loses the
+  line (`assemble::reclaim_heading_body_footers`).
+* **Runaway TableFormer rows**: a decode that emits `lcel` until `MAX_STEPS`
+  without a row break is rejected once a row passes 256 tags and the region
+  takes the geometric table path (docling ends at a 1 × 1 table there).
+* **Picture-in-table captions**: a picture inside a table that pairs with a
+  caption stays a standalone figure (upstream nests it and loses the
+  caption).
+* **DocLang picture children** are not printed (upstream's DocLang picture
+  serializer prints them).
 
-The #265 **table-caption attachment** ports the table arm of docling's
-`ReadingOrderPredictor._find_to_captions`: a `caption` region binds to the
-table (or `document_index`) **immediately adjacent to it in reading order** —
-above-caption and below-caption both, but only when exactly one side holds a
-table/picture/code element, and never across intervening text. Adjacency, not
-geometry, is the load-bearing choice: a flush-left `Table N:` label pairs with
-a centered grid it doesn't horizontally overlap, while a geometrically-nearby
-caption in the other column of a two-column page never pairs across the
-gutter (a distance-based draft did exactly that mispairing on 2203's page 7).
-The paired caption is consumed from its own reading-order slot and rides on
-the table node — Markdown prints it above the grid, JSON emits docling's
-`TableItem.captions` `$ref`, DocLang its `<caption>`. Caption text is now
-also markdown-escaped on all three arms (table/picture/code), matching
-docling's `export_to_markdown` post-process — redp5110's `TAX\_ID` and
-2203's `&lt; td &gt;` figure caption were silently unescaped before. Took
-2203 80→66 and redp5110 75→73, nothing worse; picture pairing (below-caption,
-h-overlap-gated) is untouched.
-
-The **cell order & join** are now docling's own, end to end. Serialization
-order is pure docling-parse index (`_sort_cells`) — the geometric line
-re-sort it replaces measured strictly worse on the corpus: normal_4pages'
-big section numerals paint *after* their heading text, so only index order
-yields docling's `## 들어가며 1`. The join is `PageAssembleModel.sanitize_text`
-ported verbatim: a space after every line except one ending in `-`, which
-fuses a wrapped word (alnum on both sides — the dash is dropped) or glues
-verbatim when the dash stands alone — 2305's superscript ORCIDs render as
-docling's `[0000 -0002 -3723 -6960]`, and its OTSL list keeps the raw en-dash
-bullet in the text (`- -"C" cell a new table cell …`; the assembler no longer
-strips a leading dash, only the symbol-font bullets docling-parse itself
-drops). On top of that, cell assignment is exclusive (`_assign_cells_to_clusters`):
-each non-empty cell goes to the single best-overlapping regular region at
-> 0.2 intersection-over-self, so a cell under two overlapping boxes emits
-once ("Hours Hours" duplicates gone), the orphan pass claims at the same
-threshold (the old > 0.5 mirror and its (0.2, 0.5] completeness hole are
-structurally closed), and normal_4pages' cover publisher block now lands in
-its furniture cluster exactly as docling files it. Together: 2305 24→14,
-normal_4pages 44→32, 2203 84→80, 2206 92→90, redp5110 166→164,
-table_mislabeled 76→72 — −48 lines, nothing worse.
-
-**Word cells are docling-parse's own `create_word_cells`** — a second
-contraction over the shared char cells under the word factors
-(`word_space_width_factor_for_merge` 0.33 for the adjacency gate, 2 × 0.33
-for the never-firing space threshold), with space glyphs acting as pure
-word-boundary barriers dropped from the run up front. The words TableFormer
-matches against therefore tokenize exactly as docling's: a thin CJK space
-whose neighbors overlap contracts into one spaceless word (docling's
-`1군감염병`, where splitting at every line-space manufactured `1군 감염병`),
-while a full Latin space's gap exceeds the gate and keeps words apart.
-Table-heavy fixtures moved wholesale: redp5110 164→73 (the TOC "OTSL
-model-level blocker" was largely tokenization), table_mislabeled 72→54,
-normal_4pages 32→20, everything else byte-identical.
-
-**Tables inside pictures serialize now.** 2203's Figure 10 is a *screenshot*
-of a table: layout detects a `table` cluster inside the `picture`, TableFormer
-reads its grid — but the region had no text layer, its speculative in-picture
-OCR lines were discarded on digital pages, and the empty-text gate dropped the
-whole element. docling OCRs bitmap-covered areas on every page kind and its
-table cluster collects those cells. Mirroring the scanned path for exactly
-these tables (text-less, >50 % under a picture, on a digital page): the table
-region's word crops are recognized and feed the TableFormer matcher and the
-cell set, so the grid serializes with text. The recovered ANOVA grid matches
-docling's structure cell-for-cell; the cell *strings* differ where both
-engines read noise (PP-OCR vs EasyOCR), which costs 2203 +6 diff lines —
-a deliberate completeness-over-metric trade (an ODF presentation fixture's
-table screenshot also gains its grid). The remaining 2206 table diff is a
-single top-left header rowspan the int8 TableFormer resolves as two cells
-where docling's fp32 run predicts one 2-row span — span decoding itself is
-exercised by neighboring tables; that one token is quantization-borderline.
-
-**TeX math glyphs decode by their built-in encodings.** The standard TeX
-math fonts (`CMSY*`, `CMMI*`) ship no PDF `/Encoding`, no ToUnicode, and a
-CFF program this parser does not read — their codes fell through to
-StandardEncoding and rendered as the wrong ASCII: 2203's `{ahn,…}` author
-line read `f ahn,… g`, `→` read `!`, `∈` read `2`, `|T|` read `jTj`.
-A static table of the fixed TeX layouts (TeXbook Appendix F), keyed off the
-base font name and applied only when the font dict has no `/Encoding` at
-all, restores docling-parse's decode (it reads the same mapping out of the
-font program). Took 2203 86→74. Cross-page **paragraph continuations** also
-align with docling's `predict_merges`: the head test now accepts a trailing
-comma (`.+[a-z,\-\u00AD]`, ASCII-lowercase only — a lone `μ` or an
-uppercase OCR fragment no longer stitches), and tables joined the skip
-set (docling's skip-labels), so 2206's "…In phase four," resumes across a
-caption+table+figure page break. Took 2206 90→82; the remaining author-block
-chain differences trace to model-borderline cluster splits (docling's run
-splits a name block ours detects whole), not the merge rules.
-
-The **footnote-hyperlink** port (docling's `PageAssembleModel._match_hyperlink`:
-the URI whose annotation rects cover ≥ 0.5 of the region box, accumulated per
-URI, pydantic-`AnyUrl` trailing-slash normalization) renders 2206's footnote
-URLs as docling's `[1 https://…](https://…)` whole-item links. Scope is
-footnote-labeled regions only: upstream's assemble stage matches every text
-label, but both committed groundtruth generations observably carry the
-hyperlink into the document **only for footnote items** (2206 page 1's fully
-covered plain-text DOI line has `hyperlink: null` in docling's own JSON while
-the equally covered footnotes keep theirs), and the corpus is the reference.
-Took 2206 76→72.
-
-**Code blocks flattened in legacy** (docling parity): docling's parser has no
-line-preserving code path — its code items carry the lines joined by single
-spaces — so `text` now holds that flat form on every byte-conformance surface
-(legacy Markdown, JSON, DocLang, chunks) and the line-preserving extraction
-moved to the new `pretty` field, which **strict** Markdown prefers. Took
-code_and_formula 5→**exact** and redp5110 196→172 (its SQL listings); the
-strict output is unchanged.
-
-A **word-completeness audit** (character-level diff of normalized output vs
-groundtruth, reorderings filtered out) confirms the extraction itself is
-whole: 10 / 14 fixtures lose *zero* groundtruth words; the remaining gaps are
-table-cell structure (2203's ANOVA grid, redp5110's authority-matrix rows —
-TableFormer), picture-child divergence (2305's HTML/OTSL figure axis labels),
-RTL/checkbox forms (right_to_left_03), and docling-parse artifacts we
-deliberately don't reproduce (`/tildelow`, `/.notdef` glyph-name leaks).
-
-The audit exposed one systematic hole, closed at the time by raising the
-orphan claim to mirror the then-> 0.5 serializer (and later closed
-*structurally* by the exclusive > 0.2 assignment above): docling assigns each
-cell to its best cluster at > 0.2 overlap and serializes the assigned cells,
-while our serializer took cells at > 0.5 — a cell whose best overlap fell in
-(0.2, 0.5] was "claimed" but emitted by nobody (right_to_left_03's standalone
-`20300`, several Korean labels on the skipped_1/2page scans). The orphan
-pass's claim test now mirrors the serializer's criterion, so **every
-non-empty text cell either serializes inside a region or becomes an orphan**
-— completeness by construction. Checkbox regions
-(`checkbox_selected`/`unselected`) are also no longer skipped: they assemble
-as docling's task-list items (`- [x] بلی`). right_to_left_03's remaining diff
-is ordering, not content — docling wraps that page's fields in `form`
-containers whose children serialize in docling-parse cell order, while we
-emit the same items in geometric reading order; the full wrapper-children
-port (and the bidi run order of `-2-5`-style headings) stays on the
-model-level blocker list, together with the title-page cluster splits of
-2305/2206 (residual heron score noise — see the docling-exact layout input
-below).
-
-The **docling-exact layout input** closed most of the preprocessing gap: the
-layout model now runs on the same image docling's stage feeds it — a
-dedicated `get_page_image(scale=1.0)` render (pdfium at 1.5×, sized with
-pypdfium2's `ceil`, then PIL-BICUBIC down to point size) stretched to
-640×640 with **PIL BILINEAR**, both kernels ported byte-exactly from
-Pillow's fixed-point `Resample.c` (`resample.rs::pil_resize`, verified
-against genuine Pillow reference hashes; `preprocessor_config.json` says
-`do_pad: false` — the heron processor stretches, it does not letterbox).
-Previously the model saw a Triangle stretch of the 2× OCR bitmap —
-resampling 1224→640 and 612→640 are different regimes, and heron's
-borderline scores follow the pixels. Riding along: docling's same-label
-**picture dedup** (`_remove_overlapping_clusters`, IoU/containment > 0.8
-groups, larger box wins within 0.3 confidence), which collapses a figure
-detected both whole and as sub-panels into the whole-figure box (2206's
-four-thumbnail Figure 1). Net −48 diff lines corpus-wide: 2203 132→84,
-normal_4pages 50→44, redp5110 172→166, table_mislabeled 80→76, 2305 26→24,
-rtl_03 62→60; 2206 went 72→92 — its author-block clusters shifted at the
-model's noise floor (ort-vs-torch fp32 numerics) and the reading-order
-merge chains land differently. Every exact fixture stayed exact. The
-browser (canvas) and METS/TIFF paths keep the legacy stretch (no pdfium
-renderer there); the int8 default graph was calibrated on the old input
-distribution — the fp32 low-coverage guard absorbs the borderline pages,
-and the quant can be recalibrated with `scripts/install/quantize_models.py`
-at the next model release.
+**Baseline refreshes to know about.** The PDF baselines run outside CI (they
+need the models and the shim), so a `docling-core` serializer change reaches
+them late: the docling-core 2.96 table-header rule (#362) and docling#4216's
+header flags were applied by re-serializing docling's own committed JSON
+(`tests/data/pdf/groundtruth/*.json`) — the committed `.md` is exactly that
+serialization, which is what keeps the refresh auditable — and regenerating
+the snapshots.
 
 ## DocLang (`.dclx`) conformance
 
@@ -508,12 +426,10 @@ Reading the numbers:
 - The long dense-table papers (2206.01062, 2305.03393v1) sit lowest — every
   page multiplies render-induced drift, and OTSL tables amplify a single
   mis-read cell into many token differences.
-- Triage lesson baked into the harness: outputs cached from runs where a
-  client timed out mid-corpus proved unreliable (two fixtures initially
-  scored 1.3%/0.0% from stale artifacts and re-measured at 100.0/69.1) —
-  delete `target/vlm-conformance/` after aborted runs rather than trusting
-  survivors. A handful of table entries above (2203.01017v2, 2305.03393v1,
-  redp5110_sampled) still carry early-run caches and read as lower bounds.
+- Outputs cached from runs where a client timed out mid-corpus are
+  unreliable — delete `target/vlm-conformance/` after an aborted run. A few
+  entries above (2203.01017v2, 2305.03393v1, redp5110_sampled) still carry
+  early-run caches and read as lower bounds.
 
 ## Bedrock LLM comparison (speed + fuzzy conformance)
 
@@ -572,16 +488,17 @@ fp32-lm_head variants flip it identically, so the smaller per-tensor file is
 kept. The conformance script gates fp32 byte-exact and allows the int8 leg
 whitespace-only drift. The residual confidence drift on
 the classifier comes from the crops: docling re-renders each region through
-pdfium at the enrichment scale, while docling.rs resizes from the existing
+its backend at the enrichment scale, while docling.rs resizes from the existing
 scale-2 page render — sub-pixel differences the classifier's softmax sees in
 the third decimal, and that the VLM's argmax decoding absorbs entirely on the
 fixtures.
 
 ## How the pipeline works
 
-pdfium extracts the glyph layer and renders each page to a bitmap; an ONNX stack
-(layout detection, TableFormer, PaddleOCR) interprets it; regions are assembled in
-reading order into a `DoclingDocument`. Note on OCR models: everything in this
+A pure-Rust parser (lopdf) reads the glyph layer and the page metadata, the
+pure-Rust renderer draws each page to a bitmap ("The PDF stack" above); an
+ONNX stack (layout detection, TableFormer, PaddleOCR) interprets it; regions
+are assembled in reading order into a `DoclingDocument`. Note on OCR models: everything in this
 document — snapshots, groundtruth, the conformance numbers — is measured with the
 multilingual `ch_PP-OCRv3` recognition model (docling parity), which
 `scripts/conformance/pdf_*.sh` pin via `DOCLING_OCR_REC_ONNX`/`DOCLING_OCR_DICT`.
@@ -591,6 +508,20 @@ Latin words together); `DOCLING_RS_OCR_LANG=ch` restores the conformance model. 
 to ONNX in `tableformer.rs`) on a cv2-exact preprocessed crop (`resample.rs`); the
 structure + matched cell text reproduce docling's padded GitHub tables (2305-pg9
 is cell-for-cell exact).
+
+**Runaway rows (a deliberate deviation).** On dense tables under a multi-level
+header (a 10 × 28 adjustment grid below three header rows) the decoder emits
+`ched ched`, then `lcel` until `MAX_STEPS`, and never a row break. docling
+2.129 (docling-ibm-models 4.0.3) decodes the same 1,025-tag sequence and ends
+at a 1 × 1 table only because `html_to_otsl` knows colspans 2–20 and drops the
+1022-wide span, after which its matcher loses 53 % of the words; the port kept
+the span and emitted 1 × 1023 cells repeating the header (3 of 272 words
+kept). `BboxBook` now stops once a row reaches `MAX_ROW_TAGS` (256; a 448-px
+input cannot resolve that many columns, and real tables stay far below it) and
+the structure is rejected, so the region takes the geometric table path: 12 ×
+17 with all 272 words, and 2.8 s of decoding instead of 14.3 s. A long table
+that fills `MAX_STEPS` with ordinary rows is unaffected. Snapshots 97/97
+byte-identical; groundtruth unchanged.
 
 **Heading levels (#302, opt-in).** With `--heading-hierarchy` (off by default —
 everything in this document is measured with it off), a post-assembly stage
@@ -606,19 +537,25 @@ levels, so the default-off output — and every snapshot below — is untouched.
 on pages with no text layer (exactly the OCR set), both mapped back to
 display-space geometry at assembly via `PdfPage::rotation`:
 
-1. **`/Rotate` metadata** (`pdfium_backend::extract_page`): pdfium renders the
-   page as displayed, so a declared rotation is un-rotated losslessly and
+1. **`/Rotate` metadata** (`pdfium_backend::extract_page`): the page renders
+   as displayed, so a declared rotation is un-rotated losslessly and
    `width`/`height` swap. Pinned by `crates/docling/tests/scanned.rs` — all
    four `/Rotate` orientations of `ocr_test.pdf` OCR byte-identically.
 2. **Content-based orientation** (`orient.rs`, #225): a physically rotated
    raster (`/Rotate 0` — sideways phone photo, landscape-fed sheet) is probed
-   with the recognizer itself, the classic OSD trick: segment the page with
-   the same projection segmentation OCR uses, recognize up to 6 of the widest
-   line crops under each 90° hypothesis, score by Σ(confidence × chars). An
-   upright page early-exits after one probe round (≥20 chars at ≥0.90 mean
-   confidence); a rotated hypothesis must read real text (≥8 chars at ≥0.55)
-   *and* beat upright by 1.2× to win — thin evidence (blank/line-art pages)
-   is a no-op, and any probe failure degrades to "assume upright". Scores are
+   with the recognizer itself, the classic OSD trick: take the text
+   detector's boxes (#571; the projection strips without the model), rotate
+   them with the page into each 90° hypothesis, recognize up to 6 of the
+   widest, score by Σ(confidence × chars). An upright page early-exits after
+   one probe round (≥20 chars at ≥0.90 mean confidence); a rotated hypothesis
+   must read real text (≥8 chars at ≥0.55), beat upright by 1.2× *and* read
+   more confidently by 0.10 to win — thin evidence (blank/line-art pages) is
+   a no-op, and any probe failure degrades to "assume upright". The margin
+   is what #571 needed: on projection strips a sparse form read at the same
+   poor confidence every way round and the character count sent 9 of
+   FUNSD's 199 upright forms sideways; on detector boxes all 199 read upright
+   at ≥ 0.97 and take the early exit. The detector's boxes are kept for the
+   OCR pass of an upright page, so detection still runs once. Scores are
    deterministic (single-threaded rec, fixed probe selection), so snapshots
    hold. `DOCLING_RS_OCR_ORIENTATION=off` disables the pass;
    `DOCLING_RS_DEBUG=1` prints per-hypothesis scores. Pinned by the
@@ -630,8 +567,9 @@ display-space geometry at assembly via `PdfPage::rotation`:
 Profiling a 14-page document (`DOCLING_RS_TIMING=1` prints an env-gated per-stage
 wall-clock breakdown) shows ~80 % of the time is the two ONNX models (layout ~58 %,
 TableFormer ~22 %) and ~16 % the page-image downsample — all per-page work that is
-independent across pages. A multi-page PDF therefore renders on one thread (pdfium
-is not thread-safe) and fans the pages out across a **pool of page-workers**, each
+independent across pages. A multi-page PDF therefore renders on one thread (one
+`Renderer` per document, its font and image caches shared across the pages)
+and fans the pages out across a **pool of page-workers**, each
 owning its own model set (`ort`'s `Session::run` is `&mut self`, so sessions can't
 be shared), reassembled in page order. A bounded channel keeps only a handful of
 page bitmaps resident, so the streaming memory profile is preserved; the output is
@@ -648,7 +586,9 @@ The speed-up scales with cores and memory bandwidth. Tune per machine with
 `DOCLING_RS_PDF_WORKERS` (pool size) and `DOCLING_RS_PDF_INTRA` (intra-op threads
 per worker). Each worker layout-detects up to `DOCLING_RS_PDF_LAYOUT_BATCH`
 already-rendered pages per inference call (issue #73; default: per-page on
-the CPU provider, 4 when a GPU provider is selected — #338: every CPU
+the CPU provider and under CoreML, 4 under CUDA/TensorRT/DirectML — CoreML
+only takes static-shaped graphs and only the per-page graph is static,
+#602; #338: every CPU
 measurement favors per-page, 8.5 vs 9.3 s/conv on a 4-core x86 box and ~2×
 on a 16-core M4 Max, while GPU dispatch overhead still amortizes). In
 per-page mode the model's dynamic `batch` axis is pinned to 1 at session
@@ -664,12 +604,10 @@ that drive conformance (generated spaces, combining marks, ligature/fraction
 positioning). The pipeline now ships a **pure-Rust text parser** (`textparse.rs`,
 on `lopdf`) that reconstructs each glyph's box from the *font's own advance
 widths* and the PDF text/graphics matrices — the same information docling-parse
-uses. It is the **default** text layer; set `DOCLING_PDFIUM_TEXT=1` to fall back
-to pdfium. Pages without a parseable text layer fall back to pdfium
-automatically, so scanned/OCR pages are unaffected. The parser supplies **all**
-text — prose, the **word cells** TableFormer matches against, and **code cells**
-(`DOCLING_PDFIUM_WORDS` reverts words+code to pdfium; `DOCLING_PDFIUM_TEXT`
-reverts everything). pdfium now does only page rasterisation + link annotations.
+uses. It is the **only** text layer (the pdfium fallback it once had was measured
+to add nothing on any corpus page and removed): a page it reads no text from
+is a scanned page for the OCR path. The parser supplies **all** text — prose, the **word cells**
+TableFormer matches against, and **code cells**.
 
 The parser handles Type0/CID + Identity-H and simple Type1/TrueType fonts,
 ToUnicode CMaps (`bfchar`/`bfrange`), WinAnsi/MacRoman + `/Differences`
@@ -684,23 +622,20 @@ Its cells feed the ported **docling-parse line sanitizer** (`dp_lines.rs`, from
 `src/parse/page_item_sanitators/cells.h`): a 3-pass corner-distance contraction
 (LTR → RTL → LTR-reverse) with `merge_with` space insertion (one space when the
 gap exceeds 0.33×avg-char-width, plus literal space glyphs), `enforce_same_font`,
-ligature recomposition, and loose-box geometry. On the clean parser boxes it uses
-the Euclidean corner gap (matching docling); on pdfium's loose boxes it keeps the
-signed horizontal gap.
+ligature recomposition, and loose-box geometry, with the Euclidean corner gap on the
+parser's boxes (matching docling).
 
 **Word cells** come from a second contraction over the same char cells
-(`create_word_cells`, see the word-cell section above): the word factors
-(adjacency gate 0.33, space threshold 2 × 0.33) with space glyphs dropped up
-front as pure word-boundary barriers — verified against the installed
+(`create_word_cells`, the parity table above): the word factors
+(adjacency gate 0.33, space threshold 2 × 0.33) with space glyphs as hard
+word-boundary barriers erased after the contraction — verified against the installed
 docling-parse oracle (redp5110 pages byte-exact). These are the per-word
-tokens TableFormer matches against table-grid cells, replacing pdfium's word
-cells (roadmap item 6). **Code cells** come from the parser too,
+tokens TableFormer matches against table-grid cells. **Code cells** come from the parser too,
 via a gap-based grouping (`Grouping::CodeGap`): the parser emits no space glyphs
 (a source space is a positioning gap), so a word breaks wherever the inter-glyph
 gap exceeds ~0.25× the line height, with no punctuation glue — `et al. 2000`
 keeps its space while `add(a,` / `b)` stay joined. `code_and_formula` is byte-exact
-(`function add(a, b) { return a + b; }`). With this, pdfium's text path is fully
-retired (rasters + links only).
+(`function add(a, b) { return a + b; }`).
 
 Other text/serializer/layout fixes matching docling: markdown escaping (`_`→`\_`,
 then HTML-escape `&`/`<`/`>`), typographic-punctuation normalization
@@ -779,6 +714,16 @@ model-level (or by-design) residual each issue closed with:
    `MIGRATION.md` §4. **Resolved as by-design:** our single space is the correct
    rendering, so #63 is closed without matching docling's spurious extra space —
    forcing a byte-match would degrade output and risk the RTL geometry.
+5. **The model-input renderer**
+   ([#478](https://github.com/docling-project/docling.rs/issues/478)). docling
+   2.123+ renders the page images its models consume with docling-parse's
+   Blend2D/FreeType renderer; the pure-Rust renderer reproduces its frame and
+   drawing rules with tiny-skia's coverage values (mean |Δ| ≈ 1 / 255 against
+   the shim — "The PDF stack" above), so the default build's model inputs are
+   close to, not identical with, docling's, and heron's borderline labels
+   move on the ML-borderline fixtures (60/98 snapshots exact
+   against baselines pinned to the shim). Closing that gap means the 8-bit
+   coverage values themselves.
 
 ---
 
@@ -801,7 +746,7 @@ better, byte-identical where the change is structural:
 | SIMD page downscale (`fast_image_resize`, same kernel; **default**) | `image.resize` stage **17×** faster (2607 → 152 ms / 16 pages) |
 | TableFormer KV cache fed back as `ort` values (no per-step copy) | ~9% faster table-structure decode, byte-identical |
 | One shared lazy TableFormer across the worker pool | peak RSS **3.8 → 1.9 GB** (4 workers); table-free docs 682 → 331 MB |
-| Single shared line/word contraction pass | `--no-ocr` conversion ~1.25× faster, identical output |
+| Single shared line/word contraction pass | `--text-layer-only` (then `--no-ocr`) conversion ~1.25× faster, identical output |
 | Per-document font + form caches in the text parser | 3–10% off `textparse` here; far more on CJK/form-heavy PDFs |
 | True-KV-cache decoder export (`decoder_kv.onnx`, optional) | parity at corpus table sizes; O(past)/step for very large tables |
 | Dynamic-batch `decoder_kv.onnx`: a page's tables decode in one lockstep loop | decode steps shared across tables; byte-identical (see round four below) |
@@ -834,7 +779,7 @@ Per-stage wall-clock share (summed across workers):
 | `layout.predict` (RT-DETR ONNX) | **80.3%** | 55.4% | 64.9% |
 | `image.resize` (3×→2× CatmullRom) | 14.9% | 7.9% | 18.5% |
 | `tableformer` | 2.8% | 32.1% | — |
-| `pdfium.render` | 1.8% | 3.7% | 16.5% |
+| page render (then pdfium; the Rust renderer's share is of the same order, 50–200 ms a page) | 1.8% | 3.7% | 16.5% |
 | `textparse` + assembly | ~0.2% | ~0.3% | ~0.1% |
 
 ¹ `tests/data/pdf/large/dotnet-csharp-language-reference.pdf` — 936 s wall, ~0.49 s/page.
@@ -1075,9 +1020,9 @@ and the 640×640 layout input in each worker) went through
 Both passes now run over raw rows with one i32 accumulator row for the
 vertical pass. The arithmetic is unchanged and purely integer, so the bytes
 are identical (the Pillow reference hashes pin that); `image.resize_layout`
-is 11–12 ms per page. The render thread's remaining per-page work — two
-pdfium renders plus the two downscales, ~110 ms — is not the bottleneck at
-4 cores but caps a many-core pool at roughly 9 pages/s.
+is 11–12 ms per page. The render thread's remaining per-page work — the two
+renders plus the two downscales — is not the bottleneck at 4 cores but caps a
+many-core pool at roughly 9 pages/s.
 
 ##### Round two (Sep 2026): the fixed costs
 
@@ -1088,8 +1033,8 @@ the 60-page slice is byte-identical with and without them, on the serial path
 (single-thread ORT) and on a 2-worker pool.
 
 - **The page window loaded every page.** `for_each_page` walked
-  `pages.iter()` from page 0 and skipped to `first`, so pdfium loaded and
-  closed every page before the window — ~0.7 ms each. A one-page `--no-ocr`
+  `pages.iter()` from page 0 and skipped to `first`, so every page before the
+  window was loaded and closed — ~0.7 ms each. A one-page `--text-layer-only`
   window over the 1913-page .NET reference took 3.1 s, of which the parser
   accounted for 0.4 s; indexing the window with `pages.get(i)` brings it to
   **0.85 s** (the full pipeline on that page: 4.1 → 2.1 s, `--pages 1-60`
@@ -1287,16 +1232,27 @@ provider in; `DOCLING_RS_EP` selects one at runtime:
 
 | `DOCLING_RS_EP` | behavior |
 |---|---|
-| unset | `auto` in a build with any GPU feature compiled in (a GPU build should use the GPU); CPU in a default build |
+| unset | `auto` in a build with a CUDA-class (or XNNPACK) feature compiled in (a GPU build should use the GPU); CPU in a default build. CoreML is opt-in (#602): a `coreml` build stays on CPU, and the implicit `auto` leaves CoreML out |
 | `cpu` | CPU, byte-for-byte the pre-#74 code path (no EP registered) |
 | `cuda` \| `tensorrt` \| `directml` \| `coreml` | that provider, **error-on-failure**: an explicitly requested accelerator that can't initialize fails the conversion instead of silently degrading to a 10×-slower CPU run; requesting one that isn't compiled in warns once and stays on CPU |
-| `auto` | every compiled-in provider registered in order TensorRT → CUDA → CoreML → DirectML; ONNX Runtime falls back down the list to CPU at session creation (for images deployed on mixed fleets) |
+| `auto` | every compiled-in provider registered in order TensorRT → CUDA → CoreML → DirectML; ONNX Runtime falls back down the list to CPU at session creation (for images deployed on mixed fleets). CoreML only when `auto` is set by name |
 
 When a GPU provider is selected the model resolution skips the int8 defaults
 in favor of fp32 (`decoder_kv.onnx` stays preferred): the int8 exports are
 QDQ graphs calibrated for CPU kernels — on GPU they add de-quantize traffic
 and their conformance was only ever validated on CPU. An explicit
-`DOCLING_*_ONNX` path override still wins over this policy.
+`DOCLING_*_ONNX` path override still wins over this policy. (Until #602 the
+Python bindings set `DOCLING_LAYOUT_ONNX` to the cached int8 graph
+themselves, so a source-built GPU wheel ran int8 layout; they now hand the
+cache over as `DOCLING_RS_MODELS_DIR` only.)
+
+CoreML specifics (#602, M4 Max, 25-page manual): the `NeuralNetwork` model
+format is the default — byte-identical to the CPU provider (3.5 s vs 3.7 s,
+~41% GPU) — while `MLProgram` (`DOCLING_RS_COREML_FORMAT=mlprogram`, 2.05 s)
+changes the layout detections on 14 of 25 pages and is an opt-in with a
+notice; the layout batch stays per-page, since CoreML takes static-shaped
+partitions only and a batched session leaves the batch axis free (the old
+batch-4 default ran 0% on the GPU, 8.4 s).
 
 Verified without GPU hardware (this is what CI's `ep-features` matrix
 covers): default/`cpu`/`auto`/unknown/uncompiled-request configurations all
@@ -1334,7 +1290,7 @@ aggregate hides a clean size split:
 | multi-page digital (9–39 pages: arXiv papers, redp5110) | **1.5–2.1×** (`2305.03393v1`: 13.6 s → 7.0 s) |
 | mid-size digital (4–5 pages) | 1.1–1.3× |
 | 1–2-page digital | 0.75–1.0× — CUDA EP init + host↔device traffic never amortizes |
-| scanned/OCR-heavy | 0.65–0.85× — dominated by pdfium render + OCR pre/post on CPU |
+| scanned/OCR-heavy | 0.65–0.85× — dominated by the page render + OCR pre/post on CPU |
 
 The corpus is small-document-biased; on a genuinely large document the
 init noise vanishes and the ONNX stages dominate — that is the regime the
@@ -1385,116 +1341,34 @@ wall-clock `date` proved able to step backwards under NTP mid-benchmark.)
 
 </details>
 
-### Ranked backlog of further ideas
+### Backlog
 
-Ordered by expected impact ÷ risk. Items 1–3 attack the 85–95%.
+Landed from the earlier ranked list (each measured above): the int8 layout
+model as the CPU default, the KV-cache TableFormer decoder with hoisted
+cross-attention (#97) and the dynamic-batch decode of a page's tables, layout
+batching in the pool (#73 — dynamic-batch export with the position embedding
+folded offline, bit-identical at every batch size; default per-page on CPU,
+4 on GPU, #338), the SIMD page downscale (`fast_image_resize`, same
+Catmull-Rom kernel, ±1/255 — `DOCLING_RS_SLOW_RESIZE=1` and the conformance
+scripts pin the scalar path the snapshots were generated with), per-document
+font / form caches and one shared line/word contraction in the text parser,
+same-width OCR batching and single-thread OCR lanes.
 
-1. ~~**Ship/document the INT8 layout model as the default CPU
-   configuration**~~ **Done on this branch:** the pipeline prefers the int8
-   models when present (`DOCLING_RS_FP32=1` opts out),
-   `download_dependencies.sh` fetches them by default, and
-   `publish-models.yml` builds them. Biggest single validated win: ~1.4–2×
-   end-to-end.
-2. **TableFormer decode-loop overhead** (~800 ms/table, ~60–500 steps):
-   - ~~`decode_step` copies the whole KV cache out (`ocache.to_vec()`) and back
-     in every step — O(steps²·6·512) float traffic.~~ **Done on this branch:**
-     the cache and the encoder's cross-K/V + `enc_out` stay owned `ort` values
-     fed straight back into the next run (~9% faster structure decode,
-     byte-identical output).
-   - ~~The exported graph still re-embeds the **full tag sequence** every
-     step.~~ **Built and measured:** `scripts/install/export_tableformer.py` now also
-     exports `decoder_kv.onnx`, a true-KV-cache step (one tag in, projected
-     K/V cached per layer), verified argmax-identical over a 64-step rollout
-     and byte-identical on corpus output. Measured result: **parity** with
-     the legacy graph on corpus-sized tables (~100–300 tokens) — ONNX Runtime
-     executes the legacy graph's full-prefix re-projection as one efficient
-     batched GEMM, so the O(n²) FLOPs don't become O(n²) wall time until
-     tables get much larger. The Rust loop auto-detects the graph generation
-     (input names) and prefers `decoder_kv(_int8).onnx` by default; point
-     `DOCLING_TABLEFORMER_DECODER` at the legacy `decoder(_int8).onnx` to
-     trade speed back for the smaller file. **#97** rebuilt the KV step
-     graph around hoisted cross-attention: the stacked `cross_k`/`cross_v`
-     inputs made every decode step re-`Split` and re-`Transpose` 2×9.6 MB of
-     constants (~5 ms of a ~7.5 ms step, measured with the ORT node
-     profiler); the encoder now emits each layer's `cross_kt_i` (pre-transposed
-     for q·Kᵀ) and `cross_v_i` once per table and the step graph consumes
-     them in place. Per-step decode fell 17 → 10 ms and `tableformer.structure`
-     1.40 → 0.91 s on the huge-table page (2305.03393v1-pg9, fp32); the
-     remaining step cost is real compute (28 small projection/FFN GEMMs).
-     Output stays byte-identical (the full snapshot corpus, 94 outputs; the export
-     self-verifies a 64-step argmax-identical rollout vs the legacy graph).
-     Export subtlety: the example inputs must carry `past>0` or
-     `torch.export` specializes `pe[cache.shape[3]]` to `pe[0]` and decode
-     never terminates. Old stacked-KV and legacy graphs keep working (three
-     generations auto-detected); a hoisted decoder with a pre-#97 encoder
-     falls back to geometric tables with a re-export hint.
-3. ~~**Layout batching for the parallel path**: the pool currently runs batch-1
-   inference per page.~~ **Done (issue #73)**: each pool worker drains the work
-   channel opportunistically (whatever is already rendered, up to
-   `DOCLING_RS_PDF_LAYOUT_BATCH` — default per-page on CPU, 4 on GPU, #338) and
-   layout-detects the batch with one inference call — batching never *waits* for pages, so it adds no
-   latency when rendering is the bottleneck. Needs the dynamic-batch ONNX
-   export (`scripts/install/export_layout.py`); an old fixed-batch graph
-   triggers a warn-once per-page fallback. Two export subtleties keep numerics
-   identical to the historical static export: a plain `dynamic_axes` export
-   leaves the AIFI sincos position embedding as runtime ops that drift ~1e-6
-   from the torch-folded constant (enough to flip borderline detections
-   corpus-wide — groundtruth exact matches dropped 5/14 → 0/14 before the
-   fix), so the exporter folds the static graph's position-embedding subgraph
-   offline and splices the constant into the dynamic graph. Verified at the
-   time: groundtruth parity restored (then 5/14 exact, 6/14 normalized), and
-   batch=1 == batch=4 **bit-identical** across the whole corpus.
-4. **The 3×→2× page downscale** (~15% of a text-heavy conversion, ~25% after
-   INT8): ~~replace the scalar `image`-crate CatmullRom with a SIMD
-   convolution.~~ **Done on this branch:** `fast_image_resize` with the same
-   a=-0.5 Catmull-Rom kernel — `image.resize` drops **2607 → 152 ms (17×)**
-   on the 16-page doc. The SIMD fixed-point path differs from the scalar one
-   by ±1/255 on some pixels, which can flip borderline table cells, so it was
-   gated like INT8: groundtruth distance over the corpus is **817 (SIMD) vs
-   818 (scalar)** — conformance-neutral. `DOCLING_RS_SLOW_RESIZE=1` restores
-   the scalar path, and `pdf_conformance.sh`/`pdf_groundtruth.sh` pin it so
-   the committed snapshot baselines stay valid. (The render-side `as_image()`
-   copy turned out to be a non-issue: pdfium already renders with reversed
-   byte order, so it is one memcpy + one 4→3-channel pass, ~1% of total.)
-5. **textparse font caching** (marginal for PDFs — textparse is ≤1% — but
-   real for `no_ocr` mode where it becomes the bottleneck):
-   - ~~fonts are fully re-parsed for **every page** and every Form-XObject
-     invocation; decoded form content re-inflated per `Do`.~~ **Done on this
-     branch:** per-document caches keyed by object id (fonts also by resource
-     name, which feeds the docling-parse font hash). Identical output across
-     the corpus; 3–10% off the `textparse` stage on the test fixtures (their
-     ToUnicode CMaps are small — CJK/form-heavy documents benefit far more).
-   - ~~`line_cells` + `word_cells` re-built the char cells twice per page.~~
-     **Done** (`dp_lines::line_and_word_cells`): the glyph build is shared;
-     the line and word views each run their own contraction (docling-parse's
-     `create_line_cells` / `create_word_cells` pair — deliberately two
-     passes, since the factors differ).
-   - `decode_code`/`decompose_ligatures` allocate a `String` per glyph
-     (`textparse.rs`); decompose once at font-parse time and return
-     borrowed `&str`.
-   - RTL merge is O(n²) (string prepend in `merge_with`, `dp_lines.rs`);
-     accumulate reversed and flip once per line.
-6. ~~**OCR line batching** (`ocr.rs::recognize`): lines are recognized one at
-   a time on one thread (deliberately, for CTC determinism). Batching
-   same-width buckets keeps determinism per line.~~ **Done on this branch**
-   (`ocr.rs::recognize_batch`): each page's line crops are gathered first and
-   equal-width lines share one recognition run (page order, batches capped at
-   16). Same-width batching is **bit-identical** to sequential runs (verified:
-   max output diff 0.0 over the scanned corpus's crops); the snapshot corpus
-   is unchanged. Measured `ocr.page`: 195 → 176 ms on `ocr_test.pdf`, 682 →
-   587 ms over `nemotron_multipage.pdf`'s 4 pages (−10–14%). The
-   "several-fold" hope required *padded* batches (PaddleOCR-style, pad to
-   bucket max): measured on the real crops, padding perturbs the valid
-   region's probabilities by up to 0.34 through the model's global-attention
-   blocks and changes the decoded text on 16/20 lines — off the table for a
-   byte-stable pipeline. The remaining lever is running same-width buckets
-   across the page-worker pool's idle threads (needs one extra session per
-   worker: `ort`'s `Session::run` takes `&mut self`).
-7. **ort session options**: checked — ONNX Runtime's C-API default is already
-   `ORT_ENABLE_ALL`, so an explicit optimization level gains nothing.
-   `with_optimized_model_path` (caching the optimized graph on disk) could
-   still shave per-worker model-load latency; only worth it if pool spin-up
-   shows up in a real deployment.
+Still open, none of them large:
+
+* `decode_code` / `decompose_ligatures` allocate a `String` per glyph
+  (`textparse.rs`); decompose once at font-parse time and return borrowed
+  `&str`.
+* The RTL merge is O(n²) (string prepend in `merge_with`, `dp_lines.rs`);
+  accumulate reversed and flip once per line.
+* Same-width OCR buckets could run across the page-worker pool's idle
+  threads (one extra session per worker).
+* The orientation probe reads the six widest lines — most of a small scan's
+  text; a smaller budget would halve it again but changes the evidence the
+  decision is made on.
+* Padded OCR batches (PaddleOCR-style) were measured and rejected: padding
+  perturbs the valid region's probabilities through the model's
+  global-attention blocks and changes the decoded text on 16/20 lines.
 
 ### Memory
 
@@ -1527,19 +1401,6 @@ deterministic and byte-stable); multi-threaded corpus diffs of a few lines on
 table-dense fixtures are thread-scheduling jitter, not necessarily a real
 change.
 
-### Correctness notes found during review (quality, not speed)
-
-- `textparse.rs` `"` operator: the `aw ac string "` form must set word/char
-  spacing (`tw`/`tc`) from its first two operands before showing the string;
-  they are currently ignored (`Tj | ' | "` share one arm), so documents using
-  `"` get wrong inter-word advances. **Fixed in this branch.**
-- `textparse.rs::page_size` ignored a non-zero MediaBox origin (and the
-  CropBox altogether); a page with e.g. `[9 9 621 801]` offset all parser
-  cells relative to pdfium's raster. **Fixed** — glyphs are now translated
-  into pdfium's display-box frame (`textparse::page_box`, see the rule table).
-- OCR recognition ran un-instrumented; `ocr.page` is now a timed stage (this
-  branch), so scanned-corpus profiles attribute it correctly.
-
 ### Reproducing
 
 ```bash
@@ -1565,3 +1426,103 @@ pre-quantized assets by default (`--no-int8` skips; published by
 `scripts/test/performance.sh` benchmarks whatever the pipeline default resolves to
 (int8 when present, `DOCLING_RS_FP32=1` for fp32); `examples/Dockerfile`
 bakes both precisions and defaults to int8 (`--build-arg INT8=0` for fp32).
+### Where the time goes
+
+For the declarative formats (everything but PDF/images), `cargo run --release
+-p docling --example profile_declarative` times parse, Markdown export and
+JSON export separately for every file in the corpus and lists the slowest.
+Parsing is milliseconds per document and Markdown export is negligible; JSON
+export dominates on table-heavy documents because docling's schema repeats
+every table cell in the `grid`, and it builds a `serde_json::Value` tree
+before printing. The table builder now fills that grid from an index instead
+of a hash map of cloned cells: on the corpus's heaviest JSON (a 13 MB patent
+export) the export went from 256 ms to 179 ms, on an EBCDIC table dump from
+123 ms to 66 ms, byte-identical output. Printing the tree is ~10 % of the
+remaining cost; the rest is the `Value` allocation itself, so a further
+step would be serializing straight from the document.
+
+For the PDF/image ML pipeline, `scripts/test/profile_pdf.sh` runs the release
+binary over the PDF corpus with `DOCLING_RS_TIMING=1` and sums the pipeline's
+per-stage wall-clock (`crates/docling-pdf/src/timing.rs`) into one table. On
+the 88-page corpus the cost is almost entirely model inference: TableFormer
+structure recognition (the autoregressive OTSL decode — ~1400 decode steps
+across the corpus's tables) and the per-page layout model together account for
+~85 % of it, with a one-time ONNX session/graph init paid on the first table
+page. Everything outside the models — both page renders, the two resamples,
+text-layer parsing and assembly — was under ~6 % combined on the pdfium
+chain; the pure-Rust renderer that replaced it costs more (on the 18-file
+corpus of the MarkItDown comparison, 80 pages, the two renders of every page
+sum to a third of the CPU time the models take), so since #682 the renders
+are scheduled off the model's path rather than before it: a page's 2× bitmap
+draws on a helper thread while layout reads its 1× image, the serial path
+renders the next page while the worker processes the current one, and the
+worker pool — two-thread workers, which the layout model's weak intra-op
+scaling makes faster than one four-thread worker — takes every document of
+four pages or more. Output is byte-identical; the model cost itself is bounded
+by the layout and TableFormer models, so the levers there stay the INT8
+models, the KV-cached decoder and GPU execution providers.
+
+What a TableFormer decode step costs, measured on the same box with
+`DOCLING_RS_ORT_PROFILE` (ORT's per-operator profile; see
+`scripts/dev/ort_profile_summary.py`) and a per-step timer: 4.4 ms with an
+empty cache, 5.7 ms once 100–150 tokens are cached, 6.2 ms past 150 — about
+10 µs per cached token — and 6.0 ms for two tables batched. The floor is
+memory traffic, not arithmetic: a step streams the decoder's ~90 MB of fp32
+weights through 49 single-token GEMMs (40–50 % of kernel time) plus 19 MB of
+per-table cross-attention K/V (about a quarter); the cache-dependent part is
+the `Split`/`Concat`/`Transpose` copies the exported graph makes of the
+growing cache (≈10 % at 85 cached tokens), and the rest is ~330 nodes of
+shape plumbing and per-node executor overhead. Three things were measured
+not to pay and are not in the tree: ONNX Runtime IO binding for the step
+(cross tensors bound once, outputs pre-bound: 5.41 vs 5.34 ms per step,
+byte-identical output — the copies are inside the graph, not in the
+`Run()` call); a decoder session per pool worker instead of the shared slot
+(wall time unchanged on 9-, 18- and 60-page documents, +0.5 GB RSS — two
+weight-streaming decodes share one memory bus); and more intra-op threads
+(the step does not scale). What would: re-exporting the decoder with
+per-layer caches that need no `Split`/`Concat`/`Transpose` (bit-exact in
+principle, new model files), narrower weights (INT8/fp16 — a numerics
+change), or a GPU execution provider.
+
+
+## ONNX Runtime 1.31 (#523)
+
+Since ort 2.0.0-rc.14 the default builds — CLI, wheels, npm, containers,
+crates — statically link ONNX Runtime **1.31** (pyke's `ms@1.31.0`
+binaries; `docling-rs --version` prints the linked version). Measured
+against the 1.28 build of the same commit on a 4-vCPU x86-64 box (release,
+INT8 layout, `--jobs 1`, same models, same graph cache rebuilt per runtime):
+
+| | ORT 1.28 | ORT 1.31 |
+|---|---:|---:|
+| 18-PDF corpus (80 pages), wall | 38.9 s | 40.0 s |
+| `2206.01062.pdf` (9 pages, 5 tables), wall | 6.9–7.5 s | 8.4 s |
+| `redp5110_sampled.pdf` (18 pages, scans + tables), wall | 10.0–10.9 s | 10.1 s |
+| `layout.predict`, 9 pages (2 threads) | 3.98 s | 3.80–3.97 s |
+| `tf.encoder`, 5 tables | 1.25 s | 1.17 s |
+| `tf.bbox`, 5 tables | 1.48 s | 0.47 s |
+| `tf.decode_step`, 458 steps | 2.34 s (5.1 ms/step) | 3.0–3.4 s (6.5–7.5 ms/step) |
+
+The one regression is the TableFormer decode step: its 49 single-token
+fp32 GEMMs run at ~100 µs each on 1.31 against ~56 µs on 1.28 (ORT's own
+per-operator profile, `DOCLING_RS_ORT_PROFILE`; the same 331-node graph,
+the same 1-thread session), so a table-heavy page is ~10–15 % slower and
+the corpus ~3 %. 2 intra-op threads recover about half of it at the
+price of run-to-run determinism, so the session stays single-threaded.
+The bbox head got three times faster and layout, the encoder and OCR are
+unchanged.
+
+Output: the 18-PDF corpus converts to byte-identical Markdown on both
+runtimes; `--to json` differs in one file (`redp5110_sampled`): two table
+cells' box edges move by 0.01 pt, two table regions' edges by 1.2–1.5 pt,
+and one picture crop is 1 px wider — the float-accumulation noise of a
+different GEMM kernel, below every tolerance the DocLang comparison uses.
+`scripts/conformance/pdf_groundtruth.sh` and `pdf_conformance.sh` report
+the same files with the same line counts on both runtimes (9/18 strict and
+74/98 snapshots exact with the pure-Rust renderer — the committed
+snapshots are pinned to the docling-parse renderer, that drift predates
+the bump and is not the runtime's). The picture classifier runs fully
+optimized (the #517 cap only fires under `ort-load-dynamic` with an older
+library) and matches docling on the enrichment fixtures; the ASR tests
+pass on the Whisper tiny fixtures (the Parakeet int8 preset was not
+re-measured here).

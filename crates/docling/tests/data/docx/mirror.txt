@@ -34,3 +34,5 @@ unit_test_headers_numbered.docx
 word_image_anchors.docx
 word_sample.docx
 word_tables.docx
+docx_list_east_asian_num_fmt.docx
+docx_list_resumed_after_table.docx

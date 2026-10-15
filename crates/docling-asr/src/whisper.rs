@@ -24,10 +24,11 @@ const TRANSCRIBE: u32 = 50_359;
 const NO_SPEECH: u32 = 50_362;
 const TS_BEGIN: u32 = 50_364;
 
-/// The model presets the loader accepts (docling PR #3741's English-only and
-/// Distil-Whisper additions, limited to the variants with public ONNX
-/// exports). Each maps to a `.models/asr/<preset>/` directory; the unnamed
-/// default (Whisper tiny multilingual) stays at `.models/asr/` itself.
+/// The Whisper model presets the loader accepts (docling PR #3741's
+/// English-only and Distil-Whisper additions, limited to the variants with
+/// public ONNX exports). Each maps to a `.models/asr/<preset>/` directory; the
+/// unnamed default (Whisper tiny multilingual) stays at `.models/asr/` itself.
+/// [`crate::PRESETS`] adds the Parakeet ones.
 pub const PRESETS: &[&str] = &[
     "whisper_tiny",
     "whisper_tiny_en",
@@ -189,28 +190,12 @@ impl Transcriber {
             if !p.is_empty() && !PRESETS.contains(&p) {
                 return Err(format!(
                     "asr: unknown model preset '{p}' (available: {})",
-                    PRESETS.join(", ")
+                    crate::PRESETS.join(", ")
                 ));
             }
         }
         let dir = preset_dir(preset);
-        let session = |path: std::path::PathBuf| -> Result<Session, String> {
-            let builder = Session::builder()
-                .map_err(|e| format!("asr: builder: {e}"))?
-                .with_intra_threads(
-                    // Quota-aware (#262): a cgroup CPU limit clamps the pool.
-                    docling_core::env::cpu_budget(),
-                )
-                .map_err(|e| format!("asr: threads: {e}"))?;
-            // Same DOCLING_RS_EP switch as the PDF pipeline - a GPU
-            // build runs both Whisper sessions on the accelerator.
-            let builder = docling_onnx::apply(builder)
-                .map_err(|e| format!("asr: execution providers: {e}"))?;
-            // Under the GPU creation lock (#452): the encoder and decoder
-            // sessions must not initialize concurrently with the PDF pool's.
-            docling_onnx::commit_uncached(builder, &path)
-                .map_err(|e| format!("asr: loading {}: {e}", path.display()))
-        };
+        let session = |path: std::path::PathBuf| crate::session(&path);
         let encoder = session(model_path(
             "DOCLING_ASR_ENCODER",
             &format!("{dir}/encoder_model.onnx"),

@@ -3,7 +3,7 @@
   "version": "1.10.0",
   "name": "powerpoint_malformed_pictures",
   "origin": {
-    "mimetype": "application/vnd.ms-powerpoint",
+    "mimetype": "application/vnd.openxmlformats-officedocument.presentationml.template",
     "binary_hash": 15701281443170991356,
     "filename": "powerpoint_malformed_pictures.pptx"
   },
@@ -89,10 +89,10 @@
           "page_no": 1,
           "bbox": {
             "l": 914400.0,
-            "t": 1188720.0,
+            "t": 274320.0,
             "r": 8229600.0,
-            "b": 274320.0,
-            "coord_origin": "BOTTOMLEFT"
+            "b": 1188720.0,
+            "coord_origin": "TOPLEFT"
           },
           "charspan": [
             0,
@@ -116,10 +116,10 @@
           "page_no": 2,
           "bbox": {
             "l": 914400.0,
-            "t": 1188720.0,
+            "t": 274320.0,
             "r": 8229600.0,
-            "b": 274320.0,
-            "coord_origin": "BOTTOMLEFT"
+            "b": 1188720.0,
+            "coord_origin": "TOPLEFT"
           },
           "charspan": [
             0,
@@ -143,10 +143,10 @@
           "page_no": 3,
           "bbox": {
             "l": 914400.0,
-            "t": 1188720.0,
+            "t": 274320.0,
             "r": 8229600.0,
-            "b": 274320.0,
-            "coord_origin": "BOTTOMLEFT"
+            "b": 1188720.0,
+            "coord_origin": "TOPLEFT"
           },
           "charspan": [
             0,

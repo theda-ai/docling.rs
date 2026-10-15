@@ -1,9 +1,12 @@
 //! OCR for scanned pages, via the PP-OCRv3 recognition model (CRNN/SVTR) run
-//! with `ort`. The layout model already locates text regions on the page image
-//! (it works without a text layer), so OCR only needs *recognition*: each text
-//! region is cropped, split into lines by horizontal projection, and each line
-//! is recognised and decoded with CTC — producing [`TextCell`]s the normal
-//! layout assembly then consumes. This avoids a separate text-detection model.
+//! with `ort`. The layout model locates the text regions on the page image
+//! (it works without a text layer); inside them the recognizer reads the
+//! lines the PP-OCR text detector found (`ocr_det`, #429/#570 — RapidOCR's
+//! own crops, each one text run with the detector's margin), falling back to
+//! a horizontal-projection split of the region crop where the detector saw
+//! nothing or is not installed; each line is recognised and decoded with CTC
+//! — producing [`TextCell`]s the normal layout assembly then consumes. A line
+//! under RapidOCR's `text_score` confidence is dropped (`ocr_prep::text_score`).
 
 use image::RgbImage;
 use ort::session::Session;
@@ -13,8 +16,8 @@ use crate::layout::Region;
 // The ONNX-free half (line prep, batching, CTC decode) lives in `ocr_prep`
 // so the wasm build shares it verbatim (#79 phase 2).
 use crate::ocr_prep::{
-    batch_input, decode_row_scored, dict_chars, prep_region_lines, prep_table_words, width_batches,
-    PrepLine, REC_HEIGHT,
+    batch_input, decode_row_scored, dict_chars, prep_region_lines, prep_region_lines_det,
+    prep_table_words, prep_table_words_det, width_batches, PrepLine, REC_HEIGHT,
 };
 use crate::pdfium_backend::TextCell;
 
@@ -22,19 +25,40 @@ pub struct OcrModel {
     /// Single-threaded recognition sessions, one per parallel lane (see
     /// [`Self::load_with`]); lines are dealt across them by batch index.
     recs: Vec<Session>,
-    /// CTC classes: index 0 = blank, 1..=6623 = dictionary, 6624 = space.
+    /// CTC classes: index 0 = blank, then the dictionary, then space.
     chars: Vec<String>,
+    /// RapidOCR's line orientation handling (#666). See
+    /// [`crate::Pipeline::ocr_textline_orientation`].
+    orient: bool,
+    /// The text-line orientation classifier, loaded on the first oriented
+    /// page.
+    cls: ClsSlot,
 }
 
-/// OCR recognition language: which PP-OCRv3 model + dictionary pair runs.
+/// [`OcrModel::cls`]: `Missing` records a failed load (warned once per
+/// process), so it is not retried per page.
+enum ClsSlot {
+    Unloaded,
+    Ready(crate::ocr_cls::TextlineCls),
+    Missing,
+}
+
+/// OCR recognition language: which PP-OCRv3 model + dictionary pair runs
+/// when the PP-OCRv6 recognizer is not installed.
 ///
-/// The default is **English** (`.models/ocr_rec_en.onnx` + `.models/en_dict.txt`):
-/// the multilingual `ch_` model reads Latin scripts with badly degraded word
-/// spacing (glued words on ordinary English scans), which is the common
-/// real-world case. `Ch` selects the `ch_` pair (`.models/ocr_rec.onnx` +
-/// `.models/ppocr_keys_v1.txt`) — that is what upstream docling conformance is
-/// measured with, and `scripts/conformance/pdf_*.sh` pin it explicitly (by
-/// path, which wins over this selector).
+/// With `.models/ocr_rec_v6.onnx` + `.models/ocr_rec_v6_dict.txt` on disk
+/// (#570; `download_dependencies.sh` fetches them) both languages run that
+/// one multilingual model — RapidOCR's `PP-OCRv6_rec_small`, the recognizer
+/// docling runs for English and Chinese alike, and the single largest factor
+/// in the FUNSD word-recall gap once the detector's lines are the crops
+/// (0.70 → 0.77 on 30 forms). Without it, the PP-OCRv3 pairs: the default is
+/// **English** (`.models/ocr_rec_en.onnx` + `.models/en_dict.txt`) — the
+/// multilingual `ch_` v3 model reads Latin scripts with badly degraded word
+/// spacing (glued words on ordinary English scans) — and `Ch` selects the
+/// `ch_` pair (`.models/ocr_rec.onnx` + `.models/ppocr_keys_v1.txt`), what
+/// the PDF conformance baselines were pinned against;
+/// `scripts/conformance/pdf_*.sh` pin it explicitly by path, which wins over
+/// this selector and over the v6 preference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OcrLang {
     /// en_PP-OCRv3 — English-only, proper Latin word spacing.
@@ -234,16 +258,54 @@ impl OcrEngine {
 /// the recognizer. Unset/empty → `None` (OCR reads the pipeline's own page
 /// render, 2.0 px/pt); non-positive or unparsable values warn and are ignored.
 pub fn scale_from_env() -> Option<f32> {
-    let raw = docling_core::env::nonempty("DOCLING_RS_OCR_SCALE")?;
+    positive_scale_env("DOCLING_RS_OCR_SCALE")
+}
+
+/// The process-level picture OCR scale from `DOCLING_RS_PICTURE_OCR_SCALE`
+/// (#666): pixels per picture pixel for the picture-OCR enrichment, before
+/// RapidOCR's 2000 px cap — see [`crate::Pipeline::picture_ocr_scale`].
+/// Unset/empty → `None`; non-positive or unparsable values warn and are
+/// ignored.
+pub fn picture_scale_from_env() -> Option<f32> {
+    positive_scale_env("DOCLING_RS_PICTURE_OCR_SCALE")
+}
+
+fn positive_scale_env(name: &str) -> Option<f32> {
+    let raw = docling_core::env::nonempty(name)?;
     match raw.parse::<f32>() {
         Ok(s) if s > 0.0 && s.is_finite() => Some(s),
         _ => {
-            eprintln!(
-                "docling-pdf: DOCLING_RS_OCR_SCALE={raw:?} is not a positive number; ignored"
-            );
+            eprintln!("docling-pdf: {name}={raw:?} is not a positive number; ignored");
             None
         }
     }
+}
+
+/// The process-level default of [`crate::Pipeline::ocr_textline_orientation`]
+/// from `DOCLING_RS_OCR_TEXTLINE_ORIENTATION` (#666; a `docling_core::env`
+/// flag). Off when unset.
+pub fn textline_orientation_from_env() -> bool {
+    docling_core::env::flag("DOCLING_RS_OCR_TEXTLINE_ORIENTATION")
+}
+
+/// Whether the text detector's boxes are the recognizer's line source inside
+/// layout regions (#570; `DOCLING_RS_OCR_LINES`: `det` default, `projection`
+/// = the ink-projection strips alone, the pre-#570 behavior). Cached.
+pub fn det_lines() -> bool {
+    static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| {
+        let raw = docling_core::env::nonempty("DOCLING_RS_OCR_LINES").unwrap_or_default();
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "det" | "detector" | "auto" => true,
+            "projection" | "proj" | "off" => false,
+            _ => {
+                eprintln!(
+                    "docling-pdf: DOCLING_RS_OCR_LINES={raw:?} is not det|projection; using det"
+                );
+                true
+            }
+        }
+    })
 }
 
 /// Resolve the recognition model + dictionary pair for `lang`. An English
@@ -254,10 +316,19 @@ pub fn scale_from_env() -> Option<f32> {
 pub(crate) fn resolve_rec_pair(lang: OcrLang) -> (String, String) {
     const CH: (&str, &str) = (".models/ocr_rec.onnx", ".models/ppocr_keys_v1.txt");
     const EN: (&str, &str) = (".models/ocr_rec_en.onnx", ".models/en_dict.txt");
+    const V6: (&str, &str) = (".models/ocr_rec_v6.onnx", ".models/ocr_rec_v6_dict.txt");
+    let exists = |p: &str| std::path::Path::new(p).exists();
+    // The multilingual PP-OCRv6 recognizer, when installed, serves both
+    // languages (see `OcrLang`); explicit paths below still win.
+    let (v6_rec, v6_dict) = (crate::resolve_asset(V6.0), crate::resolve_asset(V6.1));
+    let (mut rec, mut dict) = if exists(&v6_rec) && exists(&v6_dict) {
+        (v6_rec, v6_dict)
+    } else {
+        let pick = if lang == OcrLang::Ch { CH } else { EN };
+        (crate::resolve_asset(pick.0), crate::resolve_asset(pick.1))
+    };
     let want_ch = lang == OcrLang::Ch;
-    let pick = if want_ch { CH } else { EN };
-    let (mut rec, mut dict) = (crate::resolve_asset(pick.0), crate::resolve_asset(pick.1));
-    if !want_ch && (!std::path::Path::new(&rec).exists() || !std::path::Path::new(&dict).exists()) {
+    if !want_ch && (!exists(&rec) || !exists(&dict)) {
         let (ch_rec, ch_dict) = (crate::resolve_asset(CH.0), crate::resolve_asset(CH.1));
         if std::path::Path::new(&ch_rec).exists() && std::path::Path::new(&ch_dict).exists() {
             eprintln!(
@@ -301,7 +372,7 @@ impl OcrModel {
             .unwrap_or(lanes)
             .clamp(1, 8);
         let open = || -> Result<Session, String> {
-            let builder = Session::builder()
+            let builder = docling_onnx::session_builder()
                 .map_err(|e| format!("ocr: builder: {e}"))?
                 .with_intra_threads(1)
                 .map_err(|e| format!("ocr: intra_threads: {e}"))?;
@@ -326,7 +397,87 @@ impl OcrModel {
         Ok(Self {
             recs,
             chars: dict_chars(&dict),
+            orient: false,
+            cls: ClsSlot::Unloaded,
         })
+    }
+
+    /// Turn RapidOCR's line orientation handling on or off (#666): oriented
+    /// crops, the 90° turn, and the 0/180 classifier on detector lines.
+    pub fn set_textline_orientation(&mut self, enable: bool) {
+        self.orient = enable;
+    }
+
+    /// The orientation classifier, loading it on first use; `None` (warned
+    /// once) when the model is not installed or fails to load.
+    fn cls(&mut self) -> Option<&mut crate::ocr_cls::TextlineCls> {
+        if matches!(self.cls, ClsSlot::Unloaded) {
+            self.cls = match crate::ocr_cls::TextlineCls::load() {
+                Ok(m) => ClsSlot::Ready(m),
+                Err(e) => {
+                    static WARNED: std::sync::Once = std::sync::Once::new();
+                    WARNED.call_once(|| {
+                        eprintln!(
+                            "warning: {e}; text lines are cropped and turned upright but not \
+                             checked for 180° (run scripts/install/download_dependencies.sh)"
+                        );
+                    });
+                    ClsSlot::Missing
+                }
+            };
+        }
+        match &mut self.cls {
+            ClsSlot::Ready(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// The oriented line prep (#666): RapidOCR's crops, the upside-down ones
+    /// turned 180° by the classifier when it is installed, then prepared
+    /// for recognition like any other line.
+    fn oriented_lines(
+        &mut self,
+        img: &RgbImage,
+        regions: &[Region],
+        scale: f32,
+        detected: &[crate::ocr_det::DetBox],
+    ) -> Result<(Vec<crate::ocr_prep::LineBox>, Vec<PrepLine>), String> {
+        use crate::ocr_prep::LineSrc;
+        let (bboxes, mut srcs) =
+            crate::ocr_prep::region_line_crops_det(img, regions, scale, detected);
+        let crop_idx: Vec<usize> = (0..srcs.len())
+            .filter(|&i| matches!(srcs[i], LineSrc::Crop(_)))
+            .collect();
+        if !crop_idx.is_empty() {
+            if let Some(cls) = self.cls() {
+                let crops: Vec<&RgbImage> = crop_idx
+                    .iter()
+                    .map(|&i| match &srcs[i] {
+                        LineSrc::Crop(c) => c,
+                        LineSrc::Prepared(_) => unreachable!("filtered to crops"),
+                    })
+                    .collect();
+                let flip = crate::timing::timed("ocr.cls", || cls.upside_down(&crops))?;
+                for (&i, flip) in crop_idx.iter().zip(flip) {
+                    if let (true, LineSrc::Crop(c)) = (flip, &mut srcs[i]) {
+                        image::imageops::rotate180_in_place(c);
+                    }
+                }
+            }
+        }
+        let mut boxes = Vec::with_capacity(bboxes.len());
+        let mut lines = Vec::with_capacity(bboxes.len());
+        for (bb, src) in bboxes.into_iter().zip(srcs) {
+            let line = match src {
+                LineSrc::Crop(c) => crate::ocr_prep::prep_line(&c),
+                LineSrc::Prepared(p) => Some(p),
+            };
+            if let Some(line) = line {
+                boxes.push(bb);
+                lines.push(line);
+            }
+        }
+        Ok((boxes, lines))
     }
 
     /// Recognise every width batch of `lines`, dealt round-robin across the
@@ -407,18 +558,27 @@ impl OcrModel {
     /// OCR a page: produce text cells (page points) for every line found inside
     /// the text regions, each paired with its recognition confidence (mean
     /// emitted-character probability — feeds the page `ocr_score`, #183).
-    /// `scale` is image-px per page-point.
-    pub fn ocr_page(
+    /// `scale` is image-px per page-point. `detected` — the text detector's
+    /// boxes, in image pixels of `img` — makes them the line source inside
+    /// the regions (#570, see [`prep_region_lines_det`]); `None` keeps the
+    /// projection segmentation.
+    pub fn ocr_page_with(
         &mut self,
         img: &RgbImage,
         regions: &[Region],
         scale: f32,
+        detected: Option<&[crate::ocr_det::DetBox]>,
     ) -> Result<Vec<(TextCell, f32)>, String> {
         // Gather every line crop on the page first (shared with the browser
         // path), so equal-width lines can share a recognition run regardless
         // of which region they came from.
-        let (bboxes, lines) =
-            crate::timing::timed("ocr.prep", || prep_region_lines(img, regions, scale));
+        let (bboxes, lines) = match detected {
+            Some(det) if self.orient => self.oriented_lines(img, regions, scale, det)?,
+            _ => crate::timing::timed("ocr.prep", || match detected {
+                Some(det) => prep_region_lines_det(img, regions, scale, det),
+                None => prep_region_lines(img, regions, scale),
+            }),
+        };
 
         // Deterministic width-batching (shared with the wasm path), dealt
         // across the recognition lanes.
@@ -431,15 +591,7 @@ impl OcrModel {
         })?;
 
         // Emit cells in page order, exactly as the sequential walk did.
-        let mut cells = Vec::new();
-        for ((l, t, r, b), (text, conf)) in bboxes.into_iter().zip(texts) {
-            let text = text.trim().to_string();
-            if text.is_empty() {
-                continue;
-            }
-            cells.push((TextCell { text, l, t, r, b }, conf));
-        }
-        Ok(cells)
+        Ok(collect_cells(bboxes, texts))
     }
 
     /// Recognize the *word* crops inside the page's table regions (mirroring
@@ -452,22 +604,36 @@ impl OcrModel {
         img: &RgbImage,
         regions: &[Region],
         scale: f32,
+        detected: Option<&[crate::ocr_det::DetBox]>,
     ) -> Result<Vec<(TextCell, f32)>, String> {
-        let (bboxes, lines) = prep_table_words(img, regions, scale);
+        let (bboxes, lines) = match detected {
+            Some(det) => prep_table_words_det(img, regions, scale, det),
+            None => prep_table_words(img, regions, scale),
+        };
         let mut texts = vec![(String::new(), 0.0f32); lines.len()];
         for (i, text) in self.recognize_all(&lines)? {
             texts[i] = text;
         }
-        let mut cells = Vec::new();
-        for ((l, t, r, b), (text, conf)) in bboxes.into_iter().zip(texts) {
-            let text = text.trim().to_string();
-            if text.is_empty() {
-                continue;
-            }
-            cells.push((TextCell { text, l, t, r, b }, conf));
-        }
-        Ok(cells)
+        Ok(collect_cells(bboxes, texts))
     }
+}
+
+/// Pair recognized texts with their line boxes into page-point cells, in page
+/// order, dropping empty lines and those under [`text_score`].
+fn collect_cells(
+    bboxes: Vec<crate::ocr_prep::LineBox>,
+    texts: Vec<Recognized>,
+) -> Vec<(TextCell, f32)> {
+    let min_conf = crate::ocr_prep::text_score();
+    let mut cells = Vec::new();
+    for ((l, t, r, b), (text, conf)) in bboxes.into_iter().zip(texts) {
+        let text = text.trim().to_string();
+        if text.is_empty() || conf < min_conf {
+            continue;
+        }
+        cells.push((TextCell { text, l, t, r, b }, conf));
+    }
+    cells
 }
 
 /// Recognise a batch of prepared *same-width* lines in one run of `rec`.

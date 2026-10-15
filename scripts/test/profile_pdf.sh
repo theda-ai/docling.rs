@@ -14,8 +14,8 @@
 #   DOCLING_RS_FP32=1 scripts/test/profile_pdf.sh        # full-precision models
 #   PROFILE_TO=json scripts/test/profile_pdf.sh          # export format (md default)
 #
-# Honours the same model/pdfium env wiring as performance.sh; set the DOCLING_*
-# ONNX/pdfium paths yourself to point at a non-default model set.
+# Honours the same model env wiring as performance.sh; set the DOCLING_*
+# ONNX paths yourself to point at a non-default model set.
 set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../_common.sh"
@@ -25,7 +25,6 @@ TO="${PROFILE_TO:-md}"
 # Point the pipeline at the fetched libs/models with absolute paths (mirrors
 # performance.sh) so it runs the full stack regardless of CWD. Default stack is
 # INT8 layout + KV-cached TableFormer decoder; DOCLING_RS_FP32=1 selects fp32.
-[[ -e "$WORKSPACE_DIR/.pdfium/lib/libpdfium.so" ]] && export PDFIUM_DYNAMIC_LIB_PATH="${PDFIUM_DYNAMIC_LIB_PATH:-$WORKSPACE_DIR/.pdfium/lib}"
 if [[ "${DOCLING_RS_FP32:-0}" != "1" && -e "$WORKSPACE_DIR/.models/layout_heron_int8.onnx" ]]; then
   export DOCLING_LAYOUT_ONNX="${DOCLING_LAYOUT_ONNX:-$WORKSPACE_DIR/.models/layout_heron_int8.onnx}"
   [[ -e "$WORKSPACE_DIR/.models/tableformer/decoder_int8.onnx" ]] && export DOCLING_TABLEFORMER_DECODER="${DOCLING_TABLEFORMER_DECODER:-$WORKSPACE_DIR/.models/tableformer/decoder_int8.onnx}"

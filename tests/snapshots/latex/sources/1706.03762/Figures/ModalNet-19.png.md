@@ -1,4 +1,4 @@
-MatMu
+MatMul
 
 SoftMax
 
@@ -6,14 +6,6 @@ Mask (opt.)
 
 Scale
 
-MatMu
-
-T
-
-Q
-
-个
+MatMul
 
 K
-
-V

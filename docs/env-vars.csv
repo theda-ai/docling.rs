@@ -1,0 +1,105 @@
+name,category,source
+DOCLING_RS_DJVU_RENDER_PX,limit,crates/docling/src/backend/djvu.rs
+DOCLING_RS_MAX_FETCH_BYTES,limit,crates/docling/src/fetch.rs
+DOCLING_RS_MAX_HTML_DEPTH,limit,crates/docling/src/backend/html.rs
+DOCLING_RS_MAX_IMAGE_PIXELS,limit,crates/docling-pdf/src/lib.rs
+DOCLING_RS_MAX_MEMORY_MB,limit,crates/docling-serve/src/lib.rs
+DOCLING_RS_MAX_PART_BYTES,limit,crates/docling/src/backend/ooxml.rs
+DOCLING_RS_MAX_RASTER_PAGES,limit,crates/docling-serve/src/lib.rs
+DOCLING_RS_MAX_RENDER_PIXELS,limit,crates/docling-pdf/src/pdfium_backend.rs
+DOCLING_RS_MAX_XML_DEPTH,limit,crates/docling/src/backend/xml_depth.rs
+DOCLING_RS_MEMORY_WATERMARK_PCT,limit,crates/docling-serve/src/lib.rs
+DOCLING_RS_SHEET_MAX_CELLS,limit,crates/docling/src/backend/xlsx.rs
+DOCLING_RS_VLM_TIMEOUT,limit,crates/docling/src/vlm.rs
+DOCLING_RS_ZIP_MAX_ENTRIES,limit,crates/docling/src/archive.rs
+DOCLING_RS_ZIP_MAX_ENTRY_MB,limit,crates/docling/src/archive.rs
+DOCLING_RS_ZIP_MAX_RATIO,limit,crates/docling/src/archive.rs
+DOCLING_RS_ZIP_MAX_TOTAL_MB,limit,crates/docling/src/archive.rs
+DOCLING_FFMPEG,subprocess,crates/docling/src/video.rs
+DOCLING_RS_CHROME,subprocess,crates/docling/src/backend/browser.rs
+DOCLING_TESSERACT,subprocess,crates/docling-pdf/src/tesseract.rs
+DOCLING_RS_VLM_API_KEY,secret,crates/docling/src/vlm.rs
+DOCLING_SERVE_API_KEY,secret,crates/docling-serve/src/lib.rs
+DOCLING_RS_MCP_TOKEN,secret,crates/docling-cli/src/mcp.rs
+DOCLING_RS_ALLOW_PRIVATE_IP_FETCH,network,crates/docling/src/fetch.rs
+DOCLING_RS_MAX_IMAGE_BYTES,limit,crates/docling/src/backend/images.rs
+DOCLING_RS_MAX_IMAGES,limit,crates/docling/src/backend/images.rs
+DOCLING_RS_MAX_IMAGE_TOTAL_MB,limit,crates/docling/src/backend/images.rs
+DOCLING_RS_MIN_IMAGE_BYTES,limit,crates/docling/src/backend/images.rs
+DOCLING_RS_VLM_ENDPOINT,network,crates/docling/src/vlm.rs
+DOCLING_RS_VLM_MODEL,network,crates/docling/src/options.rs
+DOCLING_ASR_ADDED_TOKENS,model path,crates/docling-asr/src/lib.rs
+DOCLING_ASR_DECODER,model path,crates/docling/src/video.rs
+DOCLING_ASR_ENCODER,model path,crates/docling/src/video.rs
+DOCLING_ASR_VAD_ONNX,model path,crates/docling-asr/src/parakeet.rs
+DOCLING_ASR_VOCAB,model path,crates/docling/src/video.rs
+DOCLING_CHUNK_TOKENIZER,model path,crates/docling/src/chunks.rs
+DOCLING_CODE_FORMULA_DIR,model path,crates/docling-pdf/src/enrich.rs
+DOCLING_LAYOUT_ONNX,model path,crates/docling-pdf/src/layout.rs
+DOCLING_OCR_DET_ONNX,model path,crates/docling-pdf/src/ocr_det.rs
+DOCLING_OCR_TEXTLINE_ORI_ONNX,model path,crates/docling-pdf/src/ocr_cls.rs
+DOCLING_OCR_DICT,model path,crates/docling-pdf/src/ocr.rs
+DOCLING_OCR_REC_ONNX,model path,crates/docling-pdf/src/ocr.rs
+DOCLING_PARSE_RENDER_LIB,model path,crates/docling-pdf/src/render/mod.rs
+DOCLING_PARSE_RESOURCES,model path,crates/docling-pdf/src/dparse_render.rs
+DOCLING_PICTURE_CLASSIFIER_ONNX,model path,crates/docling-pdf/src/enrich.rs
+DOCLING_RS_FONT_DIRS,model path,crates/docling-pdf/src/render/font/fallback.rs
+DOCLING_RS_SYSTEM_FONTS,model path,crates/docling-pdf/src/render/font/fallback.rs
+DOCLING_RS_GRAPH_CACHE_DIR,model path,crates/docling-onnx/src/lib.rs
+DOCLING_RS_MODELS_DIR,model path,crates/docling-asr/src/parakeet.rs
+DOCLING_RS_TESSDATA_DIR,model path,crates/docling-pdf/src/tesseract.rs
+DOCLING_TABLEFORMER_BBOX,model path,crates/docling-pdf/src/tableformer.rs
+DOCLING_TABLEFORMER_DECODER,model path,crates/docling-pdf/src/tableformer.rs
+DOCLING_TABLEFORMER_ENCODER,model path,crates/docling-pdf/src/tableformer.rs
+DOCLING_CHUNK_MAX_TOKENS,operational,crates/docling/src/chunks.rs
+DOCLING_RS_ASR_LANG,operational,crates/docling-asr/src/whisper.rs
+DOCLING_RS_ASR_VAD,operational,crates/docling-asr/src/parakeet.rs
+DOCLING_RS_OCR_ENGINE,operational,crates/docling-pdf/src/ocr.rs
+DOCLING_RS_OCR_LANG,operational,crates/docling-pdf/src/ocr.rs
+DOCLING_RS_OCR_LINES,operational,crates/docling-pdf/src/ocr.rs
+DOCLING_RS_OCR_MODE,operational,crates/docling-pdf/src/ocr.rs
+DOCLING_RS_OCR_ORIENTATION,operational,crates/docling-pdf/src/orient.rs
+DOCLING_RS_OCR_TEXT_SCORE,operational,crates/docling-pdf/src/ocr_prep.rs
+DOCLING_RS_RENDERER,operational,crates/docling-pdf/src/render/mod.rs
+DOCLING_RS_SCAN_RASTER,operational,crates/docling-pdf/src/raster/mod.rs
+DOCLING_RS_TESSERACT_PSM,operational,crates/docling-pdf/src/tesseract.rs
+DOCLING_RS_TF_SIMPLE_MATCH,operational,crates/docling-pdf/src/tf_core.rs
+DOCLING_RS_VLM_EXTRA_BODY,operational,crates/docling/src/vlm.rs
+DOCLING_RS_VLM_PROMPT,operational,crates/docling/src/vlm.rs
+DOCLING_RS_COREML_FORMAT,performance,crates/docling-onnx/src/lib.rs
+DOCLING_RS_COREML_STATIC_SHAPES,performance,crates/docling-onnx/src/lib.rs
+DOCLING_RS_COREML_UNITS,performance,crates/docling-onnx/src/lib.rs
+DOCLING_RS_EP,performance,crates/docling-onnx/src/lib.rs
+DOCLING_RS_FP32,performance,crates/docling-asr/src/parakeet.rs
+DOCLING_RS_IMAGE_FETCH_CONCURRENCY,performance,crates/docling/src/backend/images.rs
+DOCLING_RS_NO_ARENA,performance,crates/docling-cli/src/main.rs
+DOCLING_RS_NO_GRAPH_CACHE,performance,crates/docling-onnx/src/lib.rs
+DOCLING_RS_OCR_DET_MAX_SIDE,performance,crates/docling-pdf/src/ocr_det.rs
+DOCLING_RS_OCR_SCALE,performance,crates/docling-pdf/src/ocr.rs
+DOCLING_RS_OCR_TEXTLINE_ORIENTATION,operational,crates/docling-pdf/src/ocr.rs
+DOCLING_RS_OCR_SESSIONS,performance,crates/docling-pdf/src/ocr.rs
+DOCLING_RS_PDF_INTRA,performance,crates/docling-pdf/src/lib.rs
+DOCLING_RS_PDF_LAYOUT_BATCH,performance,crates/docling-pdf/src/lib.rs
+DOCLING_RS_PDF_PARALLEL_MIN,performance,crates/docling-pdf/src/lib.rs
+DOCLING_RS_PDF_THREADS,performance,crates/docling-pdf/src/lib.rs
+DOCLING_RS_PDF_WORKERS,performance,crates/docling-pdf/src/lib.rs
+DOCLING_RS_SLOW_RESIZE,performance,crates/docling-pdf/src/ocr_det.rs
+DOCLING_RS_TF_INTRA,performance,crates/docling-pdf/src/lib.rs
+DOCLING_RS_XNNPACK_THREADS,performance,crates/docling-onnx/src/lib.rs
+DOCLING_LATEX_DUMP,debug,crates/docling/src/backend/latex_walker.rs
+DOCLING_RS_DEBUG,debug,crates/docling-core/src/env.rs
+DOCLING_RS_DEBUG_MERGES,debug,crates/docling-pdf/src/assemble.rs
+DOCLING_RS_DEBUG_REGIONS,debug,crates/docling-pdf/src/lib.rs
+DOCLING_RS_ENRICH_DEBUG,debug,crates/docling-pdf/src/enrich.rs
+DOCLING_RS_ORT_PROFILE,debug,crates/docling-onnx/src/lib.rs
+DOCLING_RS_RASTER_DUMP,debug,crates/docling-pdf/src/raster/mod.rs
+DOCLING_RS_SHIM_CORPUS,debug,crates/docling-pdf/src/render/mod.rs
+DOCLING_RS_TF_MATCH_DUMP,debug,crates/docling-pdf/src/tf_core.rs
+DOCLING_RS_TIMING,debug,crates/docling-onnx/src/lib.rs
+DOCLING_RS_VLM_DEBUG,debug,crates/docling/src/vlm.rs
+DOCLING_RS_PICTURE_OCR_MIN_SIDE,operational,crates/docling/src/converter.rs
+DOCLING_RS_PICTURE_OCR_SCALE,performance,crates/docling-pdf/src/ocr.rs
+DOCLING_RS_VIDEO_SCENE_THRESHOLD,operational,crates/docling/src/converter.rs
+DOCLING_RS_VIDEO_FRAME_MAX_SIDE,operational,crates/docling/src/converter.rs
+DOCLING_RS_VIDEO_FRAME_DEDUPE,operational,crates/docling/src/converter.rs
+DOCLING_RS_NER_DIR,model path,crates/docling-pdf/src/ner.rs

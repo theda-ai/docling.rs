@@ -1,70 +1,68 @@
-Ms PiaRutschmann Marktgasse28 9400Rorschach
+Ms Pia Rutschmann Marktgasse 28 9400 Rorschach
 
-DearMs.Rutschmann,
+Dear Ms. Rutschmann,
 
-Wearebillingyouasfollowsforcompletionoftheassignedactivities
+We are billing you as follows for completion of the assigned activities:
 
-## Bino.3139
+## Bill no. 3139
 
-| Item Description 1 Gardenwork   | Item Description 1 Gardenwork   |
-|---------------------------------|---------------------------------|
+| Item Description 1 Garden work   | Item Description 1 Garden work   |
+|----------------------------------|----------------------------------|
 
-Yourssincerely
+Yours sincerely,
 
-RobertSchneider
+Robert Schneider
 
 ## Receipt
 
-Account/Payableto CH5800791123000889012 RobertSchneiderAG RueduLac1268 2501Bie
+Account/Payableto CH5800791123000889012 Robert SchneiderAG Rue du Lac1268 2501 Biel
 
-Payableby PiaRutschmann Marktgasse28 9400Rorschach
+Payable by Pia Rutschmann Marktgasse 28 9400 Rorschach
 
-Currency
+Currency Amount
+
+3 949.75
 
 CHF
 
-Amount
+Acceptance point
 
-3.949.75
+## Fictitious example for illustration purposes
 
-Acceptancepoint
-
-## Fictitiousexampleforillustrationpurposes
-
-Paymentpart
+Payment part
 
 <!-- image -->
 
-Currency
+Currency Amount
 
-CHE
+3 949.75
 
-Amount
+CHF
 
-3949.75
-
-RobertSchneiderAG RueduLac1268 2501Bie
+Robert Schneider AG Rue du Lac 1268 2501 Biel
 
 Telefon
 
+Telefon: 059/9876540
+
 Mobil
 
-059/9876540
+Mobil:079/98765 43
 
-079/9876543
+E-Mail:
 
-E-Mail
+E-Mail: robert@rschneider.ch
 
 Internet:
 
-robert@rschneider.ch www.rschneider.ch
+Internet:www.rschneider.ch
 
-Date
+Date:
 
-01.07.2020
+Date: 01.07.2020
 
-Account/Payableto CH5800791123000889012 RobertSchneiderAG RueduLac1268 2501Bie
+Account/ Payable to CH58 0079 1123 0008 8901 2 Robert Schneider AG Rue du Lac 1268 2501 Biel
 
-Additionalinformation BillNo.3139forgardenworkanddisposalof cuttings
+Additional information Bill No. 3139 for garden work and disposal of cuttings
 
-Payableby PiaRutschmann Marktgasse28 9400Rorschach
+Payable by Pia Rutschmann Marktgasse 28 9400 Rorschach

@@ -40,6 +40,10 @@ B
 
 D
 
+HTML
+
+OTSL model shows clean bounding box alignment
+
 A
 
 ST
@@ -59,8 +63,6 @@ R
 0.25
 
 0.5
-
-μ
 
 416
 
@@ -126,8 +128,6 @@ OTSL # tokens: 135
 
 ≤ μ
 
-OTSL model shows clean bounding box alignment μ
-
 C C L L L C L L L L L C L L NL
 
 C C C C C C C C C C C C C C NL
@@ -152,4 +152,4 @@ C
 
 E
 
-≥
+OTSL

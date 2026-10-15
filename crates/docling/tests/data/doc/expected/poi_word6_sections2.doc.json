@@ -1,0 +1,288 @@
+{
+  "schema_name": "DoclingDocument",
+  "version": "1.10.0",
+  "name": "poi_word6_sections2",
+  "origin": {
+    "mimetype": "text/plain",
+    "binary_hash": 10359957893574084847,
+    "filename": "poi_word6_sections2"
+  },
+  "furniture": {
+    "self_ref": "#/furniture",
+    "children": [],
+    "content_layer": "furniture",
+    "name": "_root_",
+    "label": "unspecified"
+  },
+  "body": {
+    "self_ref": "#/body",
+    "children": [
+      {
+        "$ref": "#/texts/0"
+      },
+      {
+        "$ref": "#/texts/1"
+      },
+      {
+        "$ref": "#/texts/2"
+      },
+      {
+        "$ref": "#/texts/3"
+      },
+      {
+        "$ref": "#/texts/4"
+      },
+      {
+        "$ref": "#/texts/5"
+      },
+      {
+        "$ref": "#/texts/6"
+      },
+      {
+        "$ref": "#/texts/7"
+      },
+      {
+        "$ref": "#/texts/8"
+      },
+      {
+        "$ref": "#/texts/9"
+      },
+      {
+        "$ref": "#/texts/10"
+      },
+      {
+        "$ref": "#/texts/11"
+      },
+      {
+        "$ref": "#/texts/12"
+      },
+      {
+        "$ref": "#/texts/13"
+      },
+      {
+        "$ref": "#/texts/14"
+      },
+      {
+        "$ref": "#/texts/15"
+      },
+      {
+        "$ref": "#/texts/16"
+      }
+    ],
+    "content_layer": "body",
+    "name": "_root_",
+    "label": "unspecified"
+  },
+  "groups": [],
+  "texts": [
+    {
+      "self_ref": "#/texts/0",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**STATEMENT  OF  INSOLVENCY  PRACTICE  10  (SCOTLAND)**",
+      "text": "**STATEMENT  OF  INSOLVENCY  PRACTICE  10  (SCOTLAND)**"
+    },
+    {
+      "self_ref": "#/texts/1",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**PROXY  FORMS**",
+      "text": "**PROXY  FORMS**"
+    },
+    {
+      "self_ref": "#/texts/2",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "**SCOTLAND**",
+      "text": "**SCOTLAND**"
+    },
+    {
+      "self_ref": "#/texts/3",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "1\tThis statement of insolvency practice is one of a series issued by the Council of the Society with a view to harmonising the approach of members to questions of insolvency practice.  It should be read in conjunction with the Explanatory Foreword to the Statements of Insolvency Practice and Insolvency Technical Reminders issued in June 1996.  Members are reminded that SPI Statements of Insolvency Practice are for the purpose of guidance only and may not be relied upon as definitive statements.  No liability attaches to the Council or anyone involved in the preparation or publication of Statements of Insolvency Practice.",
+      "text": "1\tThis statement of insolvency practice is one of a series issued by the Council of the Society with a view to harmonising the approach of members to questions of insolvency practice.  It should be read in conjunction with the Explanatory Foreword to the Statements of Insolvency Practice and Insolvency Technical Reminders issued in June 1996.  Members are reminded that SPI Statements of Insolvency Practice are for the purpose of guidance only and may not be relied upon as definitive statements.  No liability attaches to the Council or anyone involved in the preparation or publication of Statements of Insolvency Practice."
+    },
+    {
+      "self_ref": "#/texts/4",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "2\tThis statement applies to Scotland only.",
+      "text": "2\tThis statement applies to Scotland only."
+    },
+    {
+      "self_ref": "#/texts/5",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "3\t**Corporate Insolvency - Proxies**",
+      "text": "3\t**Corporate Insolvency - Proxies**"
+    },
+    {
+      "self_ref": "#/texts/6",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "3.1\tRule 7.15(2) of the Insolvency (Scotland) Rules 1986 (“the Rules”) stipulates that, when notice is given of a meeting to be held in corporate insolvency proceedings and forms of proxy are sent out with the notice, no form so sent out shall have inserted in it the name or description of any person.  No proxy form, therefore, should have inserted in it the name or description of any person for appointment as an insolvency office holder, either solely or jointly, or for appointment as a member of a committee, or as proxy holder.",
+      "text": "3.1\tRule 7.15(2) of the Insolvency (Scotland) Rules 1986 (“the Rules”) stipulates that, when notice is given of a meeting to be held in corporate insolvency proceedings and forms of proxy are sent out with the notice, no form so sent out shall have inserted in it the name or description of any person.  No proxy form, therefore, should have inserted in it the name or description of any person for appointment as an insolvency office holder, either solely or jointly, or for appointment as a member of a committee, or as proxy holder."
+    },
+    {
+      "self_ref": "#/texts/7",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "3.2\tMembers who send out proxy forms should ensure that no part of the form is pre-completed with the name or description of any person (except for the title of the proceedings, which may be inserted for the convenience of the person completing the form).",
+      "text": "3.2\tMembers who send out proxy forms should ensure that no part of the form is pre-completed with the name or description of any person (except for the title of the proceedings, which may be inserted for the convenience of the person completing the form)."
+    },
+    {
+      "self_ref": "#/texts/8",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "3.3\tWhen a member advises on the sending out of proxy forms he is required to take all reasonable steps to ensure that no part of the form is pre-completed with the name or description of any person.  If the person whom a member is advising refuses to accept the member’s advice in this regard the member should ensure that he has put his advice in writing so that he can demonstrate that he has given advice consistent with the law.",
+      "text": "3.3\tWhen a member advises on the sending out of proxy forms he is required to take all reasonable steps to ensure that no part of the form is pre-completed with the name or description of any person.  If the person whom a member is advising refuses to accept the member’s advice in this regard the member should ensure that he has put his advice in writing so that he can demonstrate that he has given advice consistent with the law."
+    },
+    {
+      "self_ref": "#/texts/9",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "3.4\tRule 7.16(2) of the Rules stipulates that a proxy may be lodged at or before the meeting at which it is to be used.",
+      "text": "3.4\tRule 7.16(2) of the Rules stipulates that a proxy may be lodged at or before the meeting at which it is to be used."
+    },
+    {
+      "self_ref": "#/texts/10",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "4\t**Individual Insolvency - Mandates**",
+      "text": "4\t**Individual Insolvency - Mandates**"
+    },
+    {
+      "self_ref": "#/texts/11",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "4.1\tParagraph 11 of Schedule 6 to the Bankruptcy (Scotland) Act 1985 provides that a creditor may authorise in writing any person to represent him at a meeting and such authorisation must be lodged with the interim trustee or, as the case may be, the permanent trustee before the commencement of the meeting.  There is no form of mandate prescribed by legislation.  It should be noted that although the prescribed form of statement of claim provides for the insertion of the name and address of the authorised person, this does not amount to a mandate.  There is no legal requirement for members to send mandate forms to creditors (or, indeed, statement of claim forms except where obliged to do so in agency cases by the contract entered into with the Accountant in Bankruptcy).",
+      "text": "4.1\tParagraph 11 of Schedule 6 to the Bankruptcy (Scotland) Act 1985 provides that a creditor may authorise in writing any person to represent him at a meeting and such authorisation must be lodged with the interim trustee or, as the case may be, the permanent trustee before the commencement of the meeting.  There is no form of mandate prescribed by legislation.  It should be noted that although the prescribed form of statement of claim provides for the insertion of the name and address of the authorised person, this does not amount to a mandate.  There is no legal requirement for members to send mandate forms to creditors (or, indeed, statement of claim forms except where obliged to do so in agency cases by the contract entered into with the Accountant in Bankruptcy)."
+    },
+    {
+      "self_ref": "#/texts/12",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "4.2\tMembers who chose to send out mandate forms should ensure that no part of the form is pre-completed with the name or description of any person (except for the title of the proceedings, which may be inserted for the convenience of the person completing the form).",
+      "text": "4.2\tMembers who chose to send out mandate forms should ensure that no part of the form is pre-completed with the name or description of any person (except for the title of the proceedings, which may be inserted for the convenience of the person completing the form)."
+    },
+    {
+      "self_ref": "#/texts/13",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "4.3\tWhen a member advises on the sending out of mandate forms, he should take all reasonable steps to ensure that no part of the form is pre-completed with the name or description of any person.  If the person whom a member is advising refuses to accept the member’s advice in this regard, the member should ensure that he has put his advice in writing.",
+      "text": "4.3\tWhen a member advises on the sending out of mandate forms, he should take all reasonable steps to ensure that no part of the form is pre-completed with the name or description of any person.  If the person whom a member is advising refuses to accept the member’s advice in this regard, the member should ensure that he has put his advice in writing."
+    },
+    {
+      "self_ref": "#/texts/14",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "4.4\tAlthough the statutory provision referred to in paragraph 4.1 does not apply to trust deeds, the statements of practice set out in paragraphs 4.2 and 4.3 should be followed in trust deed cases.",
+      "text": "4.4\tAlthough the statutory provision referred to in paragraph 4.1 does not apply to trust deeds, the statements of practice set out in paragraphs 4.2 and 4.3 should be followed in trust deed cases."
+    },
+    {
+      "self_ref": "#/texts/15",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [],
+      "orig": "Issued August 1997",
+      "text": "Issued August 1997"
+    },
+    {
+      "self_ref": "#/texts/16",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "furniture",
+      "label": "page_footer",
+      "prov": [],
+      "orig": "g:\\1998\\publicat\\sips\\sip10sco.doc",
+      "text": "g:\\1998\\publicat\\sips\\sip10sco.doc"
+    }
+  ],
+  "pictures": [],
+  "tables": [],
+  "key_value_items": [],
+  "form_items": [],
+  "pages": {}
+}

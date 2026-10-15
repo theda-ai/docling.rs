@@ -9,8 +9,13 @@
 | `sources/works6.wps` | LibreOffice `…/libwps/pass/Works_6.0.wps` | Works 6.0 — OLE `CONTENTS` stream, `CHNKWKS` |
 
 These are LibreOffice's libwps smoke files: structurally complete documents
-with (nearly) empty text, so they pin generation detection and the header /
-index / text-zone walk rather than content. The content decoding (text codes,
+whose text zones hold paragraph marks only (`\r\n` × 1–4 in the `WPS4` files,
+`\r\r\r` in the `WPS8` `TEXT` zone), so their `expected/` outputs are
+**empty by design** — they pin generation detection and the header / index /
+text-zone walk rather than content. The readable sentences in
+`works2_dos.wps` ("…mbered footnote", "Here's a letter footnote") lie past the
+header's end of text (byte 258): slack left over from an earlier save, which
+libwps does not read either. The content decoding (text codes,
 CP 850, character formats, UTF-16 zones, FDPC pages) is pinned by the
 synthetic streams in `wps.rs`'s unit tests, whose layouts follow libwps'
 `WPS4Text` / `WPS8Text` readers. Python docling has no Works reader (it goes

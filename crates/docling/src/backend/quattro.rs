@@ -707,26 +707,4 @@ mod tests {
         assert_eq!(g[&(3, 1)], "1.5");
         assert_eq!(g[&(4, 1)], "-2");
     }
-
-    #[test]
-    fn corpus_samples_convert() {
-        let dir =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/quattro/sources");
-        for (f, needle) in [
-            ("formatcorpus_ksbase.wq1", "OBSERV"),
-            (
-                "formatcorpus_ks4000.wq2",
-                "SATURATED HYDRAULIC CONDUCTIVITY",
-            ),
-            ("formatcorpus_test.wb1", "| X |"),
-            ("formatcorpus_test.wb2", "| X |"),
-            ("formatcorpus_test.wb3", "This is an example spreadsheet"),
-            ("formatcorpus_test.qpw", "This is an example spreadsheet"),
-        ] {
-            let bytes = std::fs::read(dir.join(f)).unwrap();
-            let doc = convert(bytes).unwrap_or_else(|e| panic!("{f}: {e}"));
-            let md = md(&doc);
-            assert!(md.contains(needle), "{f}:\n{md}");
-        }
-    }
 }

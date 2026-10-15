@@ -91,6 +91,9 @@ pub enum TreeKind {
         captions: Vec<usize>,
         image: Option<PictureImage>,
         classification: Option<String>,
+        /// The picture-OCR enrichment's text (#645), serialized like the flat
+        /// node's: `meta.description` + the `description` annotation.
+        description: Option<crate::PictureDescription>,
         /// The prediction's `confidence`, when the backend writes one: the
         /// DocLang deserializer stamps `1.0`; the office and HTML backends
         /// leave it out (`None`).
@@ -106,6 +109,12 @@ pub enum TreeKind {
     },
     /// A form key-value region (`field_regions` / `field_items`).
     FieldRegion { items: Vec<FieldItem> },
+    /// A `KeyValueItem` (`key_value_items`): docling's `GraphData` of key and
+    /// value cells and their links, written verbatim.
+    KeyValueGraph {
+        cells: Vec<crate::GraphCell>,
+        links: Vec<crate::GraphLink>,
+    },
 }
 
 /// docling's `ProvenanceItem` for a tree item, written verbatim: the
@@ -119,11 +128,11 @@ pub struct TreeProv {
     pub page_no: usize,
     /// `[l, t, r, b]`, exactly as docling computed them.
     pub bbox: [f64; 4],
-    /// docling's `coord_origin` tag. `MsPowerpointDocumentBackend` builds a
-    /// shape's box with `BoundingBox.from_tuple(…, BOTTOMLEFT)` — which reads
-    /// the tuple as `(l, b, r, t)`, so the shape's top EMU lands in `b` — a
-    /// quirk the JSON keeps; a speaker note's zero box is `TOPLEFT`
-    /// (`BoundingBox`'s default).
+    /// docling's `coord_origin` tag. The office backends tag their
+    /// top-left-based boxes `TOPLEFT` (the PPTX backend since docling#4294 —
+    /// it used to tag them `BOTTOMLEFT`, which read the tuple as `(l, b, r,
+    /// t)` and swapped the vertical edges); a backend that really works in a
+    /// bottom-left space sets this.
     pub bottom_left: bool,
     /// `[0, len(text)]` in characters for a text item, `[0, 0]` for a table
     /// or picture.
@@ -169,6 +178,85 @@ pub struct TreeItem {
     /// stays so every other index keeps its meaning, but the item is not
     /// numbered or written.
     pub deleted: bool,
+    /// Footnotes / endnotes referenced from inside this text item (#538): the
+    /// note call's position (chars into the item's text) and the note's text.
+    /// docling keeps notes as unlinked furniture `footnote` items, so the
+    /// JSON never shows this; the Pandoc AST writes each as a `Note` there.
+    pub notes: Vec<TreeNote>,
+    /// This furniture `footnote` item is the body of a note some text item
+    /// calls (it travels in that item's [`Self::notes`]); the Pandoc AST then
+    /// leaves it out as a standalone block.
+    pub note_body: bool,
+}
+
+/// A note call inside a text item ([`TreeItem::notes`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeNote {
+    /// The call's position, in chars into the item's `text`.
+    pub offset: usize,
+    /// The note's plain text.
+    pub text: String,
+}
+
+impl ItemTree {
+    /// Where each note call of one paragraph lands (#538): `full_text` is the
+    /// paragraph's text, `offsets` the calls' positions in it (chars), and
+    /// the paragraph's items are those created from `first_new` on. Each text
+    /// item is a trimmed slice of the paragraph (a formatting run, a link, or
+    /// the whole heading / list item), matched in order; a call inside an
+    /// item lands there, one between items ends the earlier (or starts the
+    /// first). When no item matches, the call ends the paragraph's last text
+    /// item; with no text item at all it is `None`.
+    pub fn place_note_calls(
+        &self,
+        first_new: usize,
+        full_text: &str,
+        offsets: &[usize],
+    ) -> Vec<Option<(usize, usize)>> {
+        let texts: Vec<(usize, &str)> = (first_new..self.items.len())
+            .filter(|&i| !self.items[i].deleted)
+            .filter_map(|i| match &self.items[i].kind {
+                TreeKind::Text { text, .. } | TreeKind::Code { text, .. } => {
+                    Some((i, text.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+        // Each found item's (id, start, end) in chars of `full_text`.
+        let mut spans: Vec<(usize, usize, usize)> = Vec::new();
+        let mut cursor = 0usize; // bytes
+        for &(item, text) in &texts {
+            if text.is_empty() {
+                continue;
+            }
+            if let Some(pos) = full_text[cursor..].find(text) {
+                let start_b = cursor + pos;
+                let start = full_text[..start_b].chars().count();
+                spans.push((item, start, start + text.chars().count()));
+                cursor = start_b + text.len();
+            }
+        }
+        offsets
+            .iter()
+            .map(|&offset| {
+                spans
+                    .iter()
+                    .find(|&&(_, start, end)| offset >= start && offset <= end)
+                    .map(|&(item, start, _)| (item, offset - start))
+                    .or_else(
+                        || match spans.iter().rev().find(|&&(_, _, end)| end <= offset) {
+                            Some(&(item, start, end)) => Some((item, end - start)),
+                            None => spans.first().map(|&(item, _, _)| (item, 0)),
+                        },
+                    )
+                    .or_else(|| {
+                        texts
+                            .last()
+                            .map(|&(item, text)| (item, text.chars().count()))
+                    })
+            })
+            .collect()
+    }
 }
 
 /// docling's item tree in creation order (see the [module docs](self)).
@@ -200,6 +288,8 @@ impl ItemTree {
             comments: Vec::new(),
             source: None,
             deleted: false,
+            notes: Vec::new(),
+            note_body: false,
         });
         match parent {
             Some(p) => self.items[p].children.push(id),
@@ -278,6 +368,63 @@ impl ItemTree {
         }
     }
 
+    /// Re-number the items in traversal order — a pre-order walk of the body
+    /// through every layer, which is how docling's
+    /// `DoclingDocument.concatenate` (and `_normalize_references`) re-creates
+    /// a document's items: a group created after the content it was later
+    /// wrapped around comes before that content afterwards. Items the walk
+    /// does not reach (deleted ones) are dropped. Returns each old id's new
+    /// id.
+    pub fn renumber_in_traversal_order(&mut self) -> Vec<Option<usize>> {
+        let mut order = Vec::with_capacity(self.items.len());
+        let mut stack: Vec<usize> = self.body.iter().rev().copied().collect();
+        while let Some(id) = stack.pop() {
+            if self.items[id].deleted {
+                continue;
+            }
+            order.push(id);
+            stack.extend(self.items[id].children.iter().rev());
+        }
+        let mut new_of: Vec<Option<usize>> = vec![None; self.items.len()];
+        for (new, &old) in order.iter().enumerate() {
+            new_of[old] = Some(new);
+        }
+        let remap = |ids: &mut Vec<usize>| {
+            *ids = ids.iter().filter_map(|&i| new_of[i]).collect();
+        };
+        let mut old_items: Vec<Option<TreeItem>> = std::mem::take(&mut self.items)
+            .into_iter()
+            .map(Some)
+            .collect();
+        for &old in &order {
+            let mut item = old_items[old].take().expect("each item visited once");
+            item.parent = item.parent.and_then(|p| new_of[p]);
+            remap(&mut item.children);
+            remap(&mut item.comments);
+            match &mut item.kind {
+                TreeKind::Table {
+                    rich_cells,
+                    captions,
+                    ..
+                } => {
+                    rich_cells.retain_mut(|(_, _, g)| match new_of[*g] {
+                        Some(n) => {
+                            *g = n;
+                            true
+                        }
+                        None => false,
+                    });
+                    remap(captions);
+                }
+                TreeKind::Picture { captions, .. } => remap(captions),
+                _ => {}
+            }
+            self.items.push(item);
+        }
+        remap(&mut self.body);
+        new_of
+    }
+
     /// Remove `id` from the tree — docling's `delete_items`, which the DOCX
     /// backend uses to drop the empty text item a blank spacer paragraph left
     /// between two items of a resumed list. The item leaves its parent's
@@ -289,6 +436,99 @@ impl ItemTree {
             None => self.body.retain(|&c| c != id),
         }
         self.items[id].deleted = true;
+    }
+
+    /// docling-core's `DoclingDocument.validate_misplaced_list_items` (a
+    /// model validator, so it runs whenever docling-core serializes or loads
+    /// a document): every `list_item` whose parent is not a `list` group is
+    /// re-homed into a new one. A pre-order walk of the body (groups
+    /// included) collects them; consecutive misplaced items directly on the
+    /// body share one group, any other misplaced item gets its own. Working
+    /// from the last run back, each run gets a `ListGroup` (name `group`)
+    /// inserted where its first item stood, the items are deleted and
+    /// re-added under the group as fresh items, so they move to the end of
+    /// the text numbering (#527: the DOCX backend leaves such items in rich
+    /// table cells). A no-op for a well-formed tree.
+    ///
+    /// One deliberate divergence (#586): docling-core deletes each item *with
+    /// its children* and re-adds it from its text alone, so a mixed-format
+    /// item — an empty `list_item` over an `inline` group of text runs —
+    /// comes back empty and its text is gone from the JSON (and from the
+    /// Markdown/HTML docling serializes after that validator ran; the JSON
+    /// docling saves *before* exporting still has it). Here the children
+    /// follow the item into the group: the structure docling-core requires,
+    /// the content the document had.
+    pub fn wrap_misplaced_list_items(&mut self) {
+        let is_list_item = |t: &Self, id: usize| matches!(&t.items[id].kind, TreeKind::Text { label, .. } if label == "list_item");
+        let in_list_group = |t: &Self, id: usize| {
+            t.items[id].parent.is_some_and(
+                |p| matches!(&t.items[p].kind, TreeKind::Group { label, .. } if label == "list"),
+            )
+        };
+        let mut runs: Vec<Vec<usize>> = Vec::new();
+        // `None` = the body itself, which the walk yields first.
+        let mut prev: Option<usize> = None;
+        let mut stack: Vec<usize> = self.body.iter().rev().copied().collect();
+        while let Some(id) = stack.pop() {
+            if self.items[id].deleted {
+                continue;
+            }
+            if is_list_item(self, id) && !in_list_group(self, id) {
+                let continues =
+                    prev.is_some_and(|p| is_list_item(self, p) && self.items[p].parent.is_none());
+                match runs.last_mut() {
+                    Some(run) if continues => run.push(id),
+                    _ => runs.push(vec![id]),
+                }
+            }
+            prev = Some(id);
+            stack.extend(self.items[id].children.iter().rev().copied());
+        }
+        for run in runs.into_iter().rev() {
+            let parent = self.items[run[0]].parent;
+            let group = self.add(
+                parent,
+                None,
+                TreeKind::Group {
+                    label: "list".into(),
+                    name: "group".into(),
+                },
+            );
+            let siblings = match parent {
+                Some(p) => &mut self.items[p].children,
+                None => &mut self.body,
+            };
+            siblings.pop();
+            let at = siblings
+                .iter()
+                .position(|&c| c == run[0])
+                .unwrap_or(siblings.len());
+            siblings.insert(at, group);
+            for &li in &run {
+                // Not `delete_subtree`: the children move to the copy (#586).
+                self.delete(li);
+            }
+            // `add_list_item` keeps the text, marker, formatting, hyperlink
+            // and first provenance — not comments or a source. The children
+            // (the inline group of a mixed-format item) are carried over.
+            for &li in &run {
+                let children = std::mem::take(&mut self.items[li].children);
+                let copy = TreeItem {
+                    parent: Some(group),
+                    children: children.clone(),
+                    comments: Vec::new(),
+                    source: None,
+                    deleted: false,
+                    ..self.items[li].clone()
+                };
+                let id = self.items.len();
+                self.items.push(copy);
+                for c in children {
+                    self.items[c].parent = Some(id);
+                }
+                self.items[group].children.push(id);
+            }
+        }
     }
 
     /// The last live text-bucket item (docling's `doc.texts[-1]`).
@@ -440,6 +680,7 @@ mod tests {
                 captions: vec![cap],
                 image: None,
                 classification: Some("bar_chart".into()),
+                description: None,
                 confidence: None,
                 chart: None,
                 dpi: None,
@@ -475,5 +716,129 @@ mod tests {
             2,
             "slide-0, slide-1 precede it in `groups`"
         );
+    }
+
+    /// `renumber_in_traversal_order`: docling's `concatenate` re-creates the
+    /// items as a pre-order walk meets them, so a group created after the
+    /// content it was wrapped around (a rich cell's group) comes first, and a
+    /// deleted item disappears; every cross-reference follows.
+    #[test]
+    fn renumbering_follows_the_traversal() {
+        let mut t = ItemTree::default();
+        let a = t.add(None, None, text("a"));
+        let table = t.add(
+            None,
+            None,
+            TreeKind::Table {
+                table: Table::default(),
+                rich_cells: Vec::new(),
+                captions: Vec::new(),
+            },
+        );
+        let cell_text = t.add(None, None, text("cell"));
+        let group = t.add(
+            Some(table),
+            None,
+            TreeKind::Group {
+                label: "unspecified".into(),
+                name: "rich_cell_group_1_0_0".into(),
+            },
+        );
+        t.reparent(cell_text, Some(group));
+        if let TreeKind::Table { rich_cells, .. } = &mut t.items[table].kind {
+            rich_cells.push((0, 0, group));
+        }
+        let gone = t.add(None, None, text("gone"));
+        t.delete(gone);
+        let z = t.add(None, None, text("z"));
+
+        let new_of = t.renumber_in_traversal_order();
+        assert_eq!(
+            new_of,
+            vec![Some(0), Some(1), Some(3), Some(2), None, Some(4)]
+        );
+        assert_eq!(t.items.len(), 5);
+        assert_eq!(t.body, vec![0, 1, 4]);
+        assert_eq!(t.items[1].children, vec![2], "the group follows its table");
+        assert_eq!(t.items[2].parent, Some(1));
+        assert_eq!(
+            t.items[3].parent,
+            Some(2),
+            "the cell text follows its group"
+        );
+        assert!(matches!(&t.items[3].kind, TreeKind::Text { text, .. } if text == "cell"));
+        assert!(
+            matches!(&t.items[1].kind, TreeKind::Table { rich_cells, .. } if rich_cells == &[(0, 0, 2)])
+        );
+        let _ = (a, z);
+    }
+
+    /// #586: a misplaced `list_item` keeps its children when it is re-homed.
+    /// docling-core's `validate_misplaced_list_items` re-adds the item from
+    /// its text alone, so a mixed-format item (empty `list_item` over an
+    /// `inline` group of runs) lost every run — a DOCX table cell whose list
+    /// paragraph followed a `numId 0` spacer came out as an empty bullet in
+    /// the JSON and the HTML. The group goes where the item stood, the copy
+    /// is numbered last, the inline group and its texts move under it.
+    #[test]
+    fn wrapping_a_misplaced_list_item_keeps_its_runs() {
+        let mut t = ItemTree::default();
+        let cell = t.add(
+            None,
+            None,
+            TreeKind::Group {
+                label: "unspecified".into(),
+                name: "rich_cell_group_1_0_1".into(),
+            },
+        );
+        let before = t.add(Some(cell), None, text("before"));
+        let item = t.add(
+            Some(cell),
+            None,
+            TreeKind::Text {
+                label: "list_item".into(),
+                text: String::new(),
+                orig: None,
+                formatting: None,
+                hyperlink: None,
+                level: None,
+                list: Some(ListMeta {
+                    enumerated: false,
+                    marker: String::new(),
+                }),
+            },
+        );
+        let inline = t.add(
+            Some(item),
+            None,
+            TreeKind::Group {
+                label: "inline".into(),
+                name: "group".into(),
+            },
+        );
+        let run_a = t.add(Some(inline), None, text("Second item text"));
+        let run_b = t.add(Some(inline), None, text("[Optional]"));
+        let after = t.add(Some(cell), None, text("after"));
+
+        t.wrap_misplaced_list_items();
+
+        let group = t.items[cell].children[1];
+        assert_eq!(t.items[cell].children, vec![before, group, after]);
+        assert!(
+            matches!(&t.items[group].kind, TreeKind::Group { label, name } if label == "list" && name == "group")
+        );
+        assert!(t.items[item].deleted, "the original item is deleted");
+        let copy = t.items[group].children[0];
+        assert_ne!(copy, item);
+        assert!(
+            copy > after,
+            "the copy is numbered after every existing item"
+        );
+        assert_eq!(t.items[copy].children, vec![inline]);
+        assert_eq!(t.items[inline].parent, Some(copy));
+        assert_eq!(t.items[inline].children, vec![run_a, run_b]);
+        for id in [inline, run_a, run_b] {
+            assert!(!t.items[id].deleted, "item {id} must survive the re-homing");
+        }
     }
 }

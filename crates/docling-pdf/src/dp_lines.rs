@@ -4,8 +4,8 @@
 //! cells via a 3-pass contraction — left-to-right, right-to-left, then
 //! left-to-right with reverse — using corner-distance adjacency and inserting at
 //! most one space per merge. This reproduces docling-parse's inter-word spacing
-//! (justified double spaces, the space before a `:`, and RTL ordering) that the
-//! ad-hoc `lines_from_glyphs` reconstruction can't.
+//! (justified double spaces, the space before a `:`, and RTL ordering) that an
+//! ad-hoc gap-heuristic reconstruction can't.
 //!
 //! Geometry uses native PDF coordinates (y increases upward); each cell carries
 //! its four transformed corners r0=bottom-left, r1=bottom-right, r2=top-right,
@@ -20,9 +20,9 @@ const MERGE_WITH_SPACE: f64 = 0.33; // line_space_width_factor_for_merge_with_sp
 // create_word_cells: words contract under their own, tighter factors — the
 // adjacency gate is word_space_width_factor_for_merge (0.33) and the space
 // threshold is twice that (2.0 * 0.33), which the 0.33 gate can never exceed,
-// so a word cell never contains an inserted space. Space glyphs are pure
-// word-boundary barriers: they are dropped from the word run up front, so a
-// thin CJK space's neighbors may still contract into one spaceless word.
+// so a word cell never contains an inserted space. Space glyphs are hard
+// word-boundary barriers during the contraction (`applicable`'s
+// `block_spaces`) and are erased only afterwards, as docling-parse does.
 const WORD_MERGE: f64 = 0.33; // word_space_width_factor_for_merge
 const WORD_MERGE_WITH_SPACE: f64 = 2.0 * WORD_MERGE;
 const H_TOL: f64 = 1.0; // horizontal_cell_tolerance (ligature eps_d1 relaxation)
@@ -339,19 +339,36 @@ fn build_cells(glyphs: &[Glyph], euclidean: bool) -> Vec<Cell> {
         if !g.ll.is_finite() {
             continue;
         }
+        // The char cell's quad: the loose rectangle for upright text, the
+        // glyph's own rotated quad otherwise (#528) — the contraction below
+        // works on corners and edge lengths, so it reads a 90°/180°/270° line
+        // in its own reading order, exactly like docling-parse.
+        let q = g.quad.map(|q| q.map(f64::from)).unwrap_or_else(|| {
+            let (l, b, r, t) = (g.ll as f64, g.lb as f64, g.lr as f64, g.lt as f64);
+            [l, b, r, b, r, t, l, t]
+        });
         // Drop *degenerate* space glyphs (zero-width loose box): pdfium's generated
         // spaces get a zero-width box at the wrong baseline that breaks the
         // corner-distance adjacency. Without them the inter-word gap drives
         // `merge_with`'s space insertion. Spaces with a real width are kept (they
-        // carry justified double-space information).
-        if g.ch == ' ' && (g.lr - g.ll).abs() < 0.5 {
+        // carry justified double-space information). The width is the baseline
+        // edge — a rotated glyph's x extent is its em height.
+        if g.ch == ' ' && (q[2] - q[0]).hypot(q[3] - q[1]) < 0.5 {
             continue;
         }
         // Recompose a ligature: pdfium decomposes one font glyph (Latin fi/ffi,
         // Arabic lam-alef) into several chars at the *same* loose box. Append them
         // into one cell so the contraction never inserts a space inside it.
+        // "Same box": both baseline corners match as points, upright or
+        // rotated. A ligature's chars share one box, baseline included; glyphs
+        // stacked one under another at the same x (a chart's y-axis ticks
+        // `3`…`8`, each placed by its own `cm`) are separate cells — comparing
+        // the x span alone glued those into one `345678` cell carrying the
+        // first tick's box (#609), where docling-parse keeps six.
         if let Some(last) = cells.last_mut() {
-            if (last.rx0 - g.ll as f64).abs() < 0.5 && (last.rx1 - g.lr as f64).abs() < 0.5 {
+            let near =
+                |ax: f64, ay: f64, bx: f64, by: f64| (ax - bx).abs() < 0.5 && (ay - by).abs() < 0.5;
+            if near(last.rx0, last.ry0, q[0], q[1]) && near(last.rx1, last.ry1, q[2], q[3]) {
                 // Overprint duplicate: the *same* character re-stamped, offset by a
                 // fraction of its width (a kashida/elongation segment re-drawn for
                 // weight). docling-parse drops it; appending over-counts
@@ -359,7 +376,10 @@ fn build_cells(glyphs: &[Glyph], euclidean: bool) -> Vec<Cell> {
                 // (> 0.1) so a ligature expansion — which decomposes one glyph into
                 // several chars at the *identical* box (`ﬀ`→`ff`, diff ≈ 0) — is still
                 // recomposed; real doubled letters sit a full advance apart (> 0.5).
-                let offset = (g.ll as f64 - last.rx0).abs();
+                let offset = match g.quad {
+                    None => (q[0] - last.rx0).abs(),
+                    Some(_) => (q[0] - last.rx0).hypot(q[1] - last.ry0),
+                };
                 if euclidean && offset > 0.1 && last.text.ends_with(g.ch) {
                     continue;
                 }
@@ -380,14 +400,14 @@ fn build_cells(glyphs: &[Glyph], euclidean: bool) -> Vec<Cell> {
         let fb = (0xFB00..=0xFB06).contains(&(g.ch as u32));
         cells.push(Cell {
             text,
-            rx0: g.ll as f64,
-            ry0: g.lb as f64,
-            rx1: g.lr as f64,
-            ry1: g.lb as f64,
-            rx2: g.lr as f64,
-            ry2: g.lt as f64,
-            rx3: g.ll as f64,
-            ry3: g.lt as f64,
+            rx0: q[0],
+            ry0: q[1],
+            rx1: q[2],
+            ry1: q[3],
+            rx2: q[4],
+            ry2: q[5],
+            rx3: q[6],
+            ry3: q[7],
             ltr,
             active: true,
             lig_carry: false,
@@ -444,26 +464,37 @@ pub(crate) fn line_and_word_cells(
             b: page_h - bot,
         }
     };
-    // Word run: the space glyphs act as pure word-boundary barriers and never
-    // survive into a word cell — with them out of the stream, two glyphs that
-    // *overlap* across a thin CJK space (`군`…`감`, 1.5 pt apart under a 2.5 pt
-    // gate) contract into one spaceless word (`1군감염병`), while a full Latin
-    // space's gap (~0.5 em) exceeds the 0.33 gate and keeps words apart.
-    let mut word_run: Vec<Cell> = built
-        .iter()
-        .filter(|c| !is_all_space(&c.text))
-        .cloned()
-        .collect();
+    // Word run: docling-parse's `create_word_cells` order — copy the char
+    // cells, contract (`sanitize_bbox`), *then* erase the spaces. The space
+    // glyphs stay in the stream during the contraction, where `applicable`'s
+    // `block_spaces` makes each one a hard word boundary; they are dropped
+    // afterwards by the blank filter below. Filtering them out up front let
+    // the 0.33 gate alone decide word breaks, which glues tight-set Latin
+    // (`MODE` + `to`: 1.8 pt apart under a 2.0 pt gate → `MODEto`) and the
+    // thin-spaced Korean docling-parse ≥ 7 keeps apart (`1군` `감염병`).
+    let mut word_run: Vec<Cell> = built.clone();
     let mut cells = built;
     contract(&mut cells, euclidean, LINE_FACTORS);
-    let lines: Vec<TextCell> = cells.into_iter().map(to_text_cell).collect();
+    let lines = to_text_cells(cells, to_text_cell);
     contract(&mut word_run, euclidean, WORD_FACTORS);
-    let words: Vec<TextCell> = word_run
-        .into_iter()
-        .filter(|c| !c.text.trim().is_empty())
-        .map(to_text_cell)
-        .collect();
+    word_run.retain(|c| !c.text.trim().is_empty());
+    let words = to_text_cells(word_run, to_text_cell);
     (lines, words)
+}
+
+/// Map the contracted cells into a freshly allocated, exactly sized vector.
+///
+/// A plain `into_iter().map(..).collect()` would take std's in-place-collect
+/// path and hand back the *input's* allocation: one ~150-byte [`Cell`] slot per
+/// glyph of the page, reinterpreted as ~4× as many 40-byte [`TextCell`] slots,
+/// while the contraction leaves a few glyphs per cell. Callers keep these
+/// vectors for the whole document (the text-layer path holds every page), so
+/// the dead capacity added up to ~30× the cells' real size — gigabytes on a
+/// long table-heavy PDF.
+fn to_text_cells(cells: Vec<Cell>, f: impl Fn(Cell) -> TextCell) -> Vec<TextCell> {
+    let mut out = Vec::with_capacity(cells.len());
+    out.extend(cells.into_iter().map(f));
+    out
 }
 
 fn is_rtl_char(c: char) -> bool {
@@ -549,4 +580,99 @@ fn is_punct_or_space(s: &str) -> bool {
 fn is_ligature(s: &str) -> bool {
     matches!(s, "ff" | "fi" | "fl" | "ffi" | "ffl")
         || s.chars().any(|c| (0xFB00..=0xFB06).contains(&(c as u32)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn glyph(ch: char, l: f32, r: f32) -> Glyph {
+        Glyph {
+            ch,
+            l,
+            b: 100.0,
+            r,
+            t: 110.0,
+            ll: l,
+            lb: 98.0,
+            lr: r,
+            lt: 110.0,
+            font: 0,
+            quad: None,
+        }
+    }
+
+    /// Tight-set Latin (a table cell in a born-digital manual): the gap between
+    /// `MODE` and `to` (1.84 pt) is under the 0.33 × average-width word gate (2.0 pt), so
+    /// only the space glyph between them keeps the words apart. docling-parse
+    /// erases spaces after the word contraction, not before.
+    #[test]
+    fn space_glyph_separates_tight_words() {
+        let glyphs = [
+            glyph('M', 137.66, 143.74),
+            glyph('O', 143.74, 149.82),
+            glyph('D', 149.82, 155.90),
+            glyph('E', 155.90, 161.98),
+            glyph(' ', 161.84, 164.09),
+            glyph('t', 163.82, 166.60),
+            glyph('o', 166.60, 171.60),
+        ];
+        let (lines, words) = line_and_word_cells(&glyphs, 792.0, true);
+        let words: Vec<&str> = words.iter().map(|w| w.text.as_str()).collect();
+        assert_eq!(words, ["MODE", "to"]);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "MODE to");
+    }
+
+    /// #609: a chart's y-axis ticks set one under another at the same x (each
+    /// tick placed by its own `cm`, same `Tm`) are six line cells with their
+    /// own boxes, as in docling-parse — not one `345678` cell with the first
+    /// tick's box. A ligature decomposed at one box still recomposes.
+    #[test]
+    fn stacked_glyphs_at_one_x_stay_separate_cells() {
+        let at = |ch: char, b: f32| Glyph {
+            lb: b,
+            lt: b + 10.0,
+            b,
+            t: b + 10.0,
+            ..glyph(ch, 98.0, 103.0)
+        };
+        let ticks: Vec<Glyph> = "345678"
+            .chars()
+            .enumerate()
+            .map(|(k, ch)| at(ch, 316.0 + 25.92 * k as f32))
+            .collect();
+        let lines = line_cells(&ticks, 792.0, true);
+        let texts: Vec<&str> = lines.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, ["3", "4", "5", "6", "7", "8"]);
+        assert!(lines.windows(2).all(|w| w[0].t > w[1].t));
+
+        let lig = [glyph('f', 10.0, 16.0), glyph('i', 10.0, 16.0)];
+        let lines = line_cells(&lig, 792.0, true);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "fi");
+    }
+
+    /// The returned vectors own no more than their cells. Collecting straight
+    /// from the per-glyph `Cell` buffer reused its allocation (std's in-place
+    /// collect), so a page kept ~4 slots per *glyph* — on a dense table page,
+    /// 30× the cells' size, for every page the text-layer path held.
+    #[test]
+    fn cells_do_not_keep_the_glyph_buffer() {
+        // Ten rows of `777 777 …`: abutting glyphs, words split by space glyphs.
+        let glyphs: Vec<Glyph> = (0..400)
+            .map(|i| {
+                let x = (i % 40) as f32 * 6.0;
+                let ch = if i % 4 == 3 { ' ' } else { '7' };
+                let mut g = glyph(ch, x, x + 6.0);
+                let row = (i / 40) as f32 * 14.0;
+                (g.b, g.t, g.lb, g.lt) = (100.0 + row, 110.0 + row, 98.0 + row, 110.0 + row);
+                g
+            })
+            .collect();
+        let (lines, words) = line_and_word_cells(&glyphs, 792.0, true);
+        assert_eq!((lines.len(), words.len()), (10, 100));
+        assert_eq!(lines.capacity(), lines.len());
+        assert_eq!(words.capacity(), words.len());
+    }
 }

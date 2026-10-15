@@ -1,0 +1,817 @@
+[ Header
+    2
+    ( "" , [] , [] )
+    [ Str "Test" , Space , Str "with" , Space , Str "tables" ]
+, Para
+    [ Str "A" , Space , Str "uniform" , Space , Str "table" ]
+, Table
+    ( "" , [] , [] )
+    (Caption Nothing [])
+    [ ( AlignDefault , ColWidthDefault )
+    , ( AlignDefault , ColWidthDefault )
+    , ( AlignDefault , ColWidthDefault )
+    ]
+    (TableHead
+       ( "" , [] , [] )
+       [ Row
+           ( "" , [] , [] )
+           [ Cell
+               ( "" , [] , [] )
+               AlignDefault
+               (RowSpan 1)
+               (ColSpan 1)
+               [ Plain [ Str "Header" , Space , Str "0.0" ] ]
+           , Cell
+               ( "" , [] , [] )
+               AlignDefault
+               (RowSpan 1)
+               (ColSpan 1)
+               [ Plain [ Str "Header" , Space , Str "0.1" ] ]
+           , Cell
+               ( "" , [] , [] )
+               AlignDefault
+               (RowSpan 1)
+               (ColSpan 1)
+               [ Plain [ Str "Header" , Space , Str "0.2" ] ]
+           ]
+       ])
+    [ TableBody
+        ( "" , [] , [] )
+        (RowHeadColumns 0)
+        []
+        [ Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Cell" , Space , Str "1.0" ] ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Cell" , Space , Str "1.1" ] ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Cell" , Space , Str "1.2" ] ]
+            ]
+        , Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Cell" , Space , Str "2.0" ] ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Cell" , Space , Str "2.1" ] ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Cell" , Space , Str "2.2" ] ]
+            ]
+        ]
+    ]
+    (TableFoot ( "" , [] , [] ) [])
+, Para
+    [ Str "A"
+    , Space
+    , Str "non-uniform"
+    , Space
+    , Str "table"
+    , Space
+    , Str "with"
+    , Space
+    , Str "horizontal"
+    , Space
+    , Str "spans"
+    ]
+, Table
+    ( "" , [] , [] )
+    (Caption Nothing [])
+    [ ( AlignDefault , ColWidthDefault )
+    , ( AlignDefault , ColWidthDefault )
+    , ( AlignDefault , ColWidthDefault )
+    ]
+    (TableHead
+       ( "" , [] , [] )
+       [ Row
+           ( "" , [] , [] )
+           [ Cell
+               ( "" , [] , [] )
+               AlignDefault
+               (RowSpan 1)
+               (ColSpan 1)
+               [ Plain [ Str "Header" , Space , Str "0.0" ] ]
+           , Cell
+               ( "" , [] , [] )
+               AlignDefault
+               (RowSpan 1)
+               (ColSpan 1)
+               [ Plain [ Str "Header" , Space , Str "0.1" ] ]
+           , Cell
+               ( "" , [] , [] )
+               AlignDefault
+               (RowSpan 1)
+               (ColSpan 1)
+               [ Plain [ Str "Header" , Space , Str "0.2" ] ]
+           ]
+       ])
+    [ TableBody
+        ( "" , [] , [] )
+        (RowHeadColumns 0)
+        []
+        [ Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Cell" , Space , Str "1.0" ] ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 2)
+                [ Plain
+                    [ Str "Merged"
+                    , Space
+                    , Str "Cell"
+                    , Space
+                    , Str "1.1"
+                    , Space
+                    , Str "1.2"
+                    ]
+                ]
+            ]
+        , Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Cell" , Space , Str "2.0" ] ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 2)
+                [ Plain
+                    [ Str "Merged"
+                    , Space
+                    , Str "Cell"
+                    , Space
+                    , Str "2.1"
+                    , Space
+                    , Str "2.2"
+                    ]
+                ]
+            ]
+        ]
+    ]
+    (TableFoot ( "" , [] , [] ) [])
+, Para
+    [ Str "A"
+    , Space
+    , Str "non-uniform"
+    , Space
+    , Str "table"
+    , Space
+    , Str "with"
+    , Space
+    , Str "horizontal"
+    , Space
+    , Str "spans"
+    , Space
+    , Str "in"
+    , Space
+    , Str "inner"
+    , Space
+    , Str "columns"
+    ]
+, Table
+    ( "" , [] , [] )
+    (Caption Nothing [])
+    [ ( AlignDefault , ColWidthDefault )
+    , ( AlignDefault , ColWidthDefault )
+    , ( AlignDefault , ColWidthDefault )
+    , ( AlignDefault , ColWidthDefault )
+    ]
+    (TableHead
+       ( "" , [] , [] )
+       [ Row
+           ( "" , [] , [] )
+           [ Cell
+               ( "" , [] , [] )
+               AlignDefault
+               (RowSpan 1)
+               (ColSpan 1)
+               [ Plain [ Str "Header" , Space , Str "0.0" ] ]
+           , Cell
+               ( "" , [] , [] )
+               AlignDefault
+               (RowSpan 1)
+               (ColSpan 1)
+               [ Plain [ Str "Header" , Space , Str "0.1" ] ]
+           , Cell
+               ( "" , [] , [] )
+               AlignDefault
+               (RowSpan 1)
+               (ColSpan 1)
+               [ Plain [ Str "Header" , Space , Str "0.2" ] ]
+           , Cell
+               ( "" , [] , [] )
+               AlignDefault
+               (RowSpan 1)
+               (ColSpan 1)
+               [ Plain [ Str "Header" , Space , Str "0.3" ] ]
+           ]
+       ])
+    [ TableBody
+        ( "" , [] , [] )
+        (RowHeadColumns 0)
+        []
+        [ Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Cell" , Space , Str "1.0" ] ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 2)
+                [ Plain
+                    [ Str "Merged"
+                    , Space
+                    , Str "Cell"
+                    , Space
+                    , Str "1.1"
+                    , Space
+                    , Str "1.2"
+                    ]
+                ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Cell" , Space , Str "1.3" ] ]
+            ]
+        , Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Cell" , Space , Str "2.0" ] ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 2)
+                [ Plain
+                    [ Str "Merged"
+                    , Space
+                    , Str "Cell"
+                    , Space
+                    , Str "2.1"
+                    , Space
+                    , Str "2.2"
+                    ]
+                ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Cell" , Space , Str "2.3" ] ]
+            ]
+        ]
+    ]
+    (TableFoot ( "" , [] , [] ) [])
+, Para
+    [ Str "A"
+    , Space
+    , Str "non-uniform"
+    , Space
+    , Str "table"
+    , Space
+    , Str "with"
+    , Space
+    , Str "vertical"
+    , Space
+    , Str "spans"
+    ]
+, Table
+    ( "" , [] , [] )
+    (Caption Nothing [])
+    [ ( AlignDefault , ColWidthDefault )
+    , ( AlignDefault , ColWidthDefault )
+    , ( AlignDefault , ColWidthDefault )
+    ]
+    (TableHead
+       ( "" , [] , [] )
+       [ Row
+           ( "" , [] , [] )
+           [ Cell
+               ( "" , [] , [] )
+               AlignDefault
+               (RowSpan 1)
+               (ColSpan 1)
+               [ Plain [ Str "Header" , Space , Str "0.0" ] ]
+           , Cell
+               ( "" , [] , [] )
+               AlignDefault
+               (RowSpan 1)
+               (ColSpan 1)
+               [ Plain [ Str "Header" , Space , Str "0.1" ] ]
+           , Cell
+               ( "" , [] , [] )
+               AlignDefault
+               (RowSpan 1)
+               (ColSpan 1)
+               [ Plain [ Str "Header" , Space , Str "0.2" ] ]
+           ]
+       ])
+    [ TableBody
+        ( "" , [] , [] )
+        (RowHeadColumns 0)
+        []
+        [ Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Cell" , Space , Str "1.0" ] ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 2)
+                (ColSpan 1)
+                [ Plain
+                    [ Str "Merged"
+                    , Space
+                    , Str "Cell"
+                    , Space
+                    , Str "1.1"
+                    , Space
+                    , Str "2.1"
+                    ]
+                ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Cell" , Space , Str "1.2" ] ]
+            ]
+        , Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Cell" , Space , Str "2.0" ] ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Cell" , Space , Str "2.2" ] ]
+            ]
+        , Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Cell" , Space , Str "3.0" ] ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 2)
+                (ColSpan 1)
+                [ Plain
+                    [ Str "Merged"
+                    , Space
+                    , Str "Cell"
+                    , Space
+                    , Str "3.1"
+                    , Space
+                    , Str "4.1"
+                    ]
+                ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Cell" , Space , Str "3.2" ] ]
+            ]
+        , Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Cell" , Space , Str "4.0" ] ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Cell" , Space , Str "4.2" ] ]
+            ]
+        ]
+    ]
+    (TableFoot ( "" , [] , [] ) [])
+, Para
+    [ Str "A"
+    , Space
+    , Str "non-uniform"
+    , Space
+    , Str "table"
+    , Space
+    , Str "with"
+    , Space
+    , Str "all"
+    , Space
+    , Str "kinds"
+    , Space
+    , Str "of"
+    , Space
+    , Str "spans"
+    , Space
+    , Str "and"
+    , Space
+    , Str "empty"
+    , Space
+    , Str "cells"
+    ]
+, Table
+    ( "" , [] , [] )
+    (Caption Nothing [])
+    [ ( AlignDefault , ColWidthDefault )
+    , ( AlignDefault , ColWidthDefault )
+    , ( AlignDefault , ColWidthDefault )
+    , ( AlignDefault , ColWidthDefault )
+    , ( AlignDefault , ColWidthDefault )
+    ]
+    (TableHead
+       ( "" , [] , [] )
+       [ Row
+           ( "" , [] , [] )
+           [ Cell
+               ( "" , [] , [] )
+               AlignDefault
+               (RowSpan 1)
+               (ColSpan 1)
+               [ Plain [ Str "Header" , Space , Str "0.0" ] ]
+           , Cell
+               ( "" , [] , [] )
+               AlignDefault
+               (RowSpan 1)
+               (ColSpan 1)
+               [ Plain [ Str "Header" , Space , Str "0.1" ] ]
+           , Cell
+               ( "" , [] , [] )
+               AlignDefault
+               (RowSpan 1)
+               (ColSpan 1)
+               [ Plain [ Str "Header" , Space , Str "0.2" ] ]
+           , Cell
+               ( "" , [] , [] ) AlignDefault (RowSpan 1) (ColSpan 1) []
+           , Cell
+               ( "" , [] , [] ) AlignDefault (RowSpan 1) (ColSpan 1) []
+           ]
+       ])
+    [ TableBody
+        ( "" , [] , [] )
+        (RowHeadColumns 0)
+        []
+        [ Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Cell" , Space , Str "1.0" ] ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 2)
+                (ColSpan 1)
+                [ Plain
+                    [ Str "Merged"
+                    , Space
+                    , Str "Cell"
+                    , Space
+                    , Str "1.1"
+                    , Space
+                    , Str "2.1"
+                    ]
+                ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Cell" , Space , Str "1.2" ] ]
+            , Cell
+                ( "" , [] , [] ) AlignDefault (RowSpan 1) (ColSpan 1) []
+            , Cell
+                ( "" , [] , [] ) AlignDefault (RowSpan 1) (ColSpan 1) []
+            ]
+        , Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Cell" , Space , Str "2.0" ] ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Cell" , Space , Str "2.2" ] ]
+            , Cell
+                ( "" , [] , [] ) AlignDefault (RowSpan 1) (ColSpan 1) []
+            , Cell
+                ( "" , [] , [] ) AlignDefault (RowSpan 1) (ColSpan 1) []
+            ]
+        , Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Cell" , Space , Str "3.0" ] ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 2)
+                (ColSpan 1)
+                [ Plain
+                    [ Str "Merged"
+                    , Space
+                    , Str "Cell"
+                    , Space
+                    , Str "3.1"
+                    , Space
+                    , Str "4.1"
+                    ]
+                ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Cell" , Space , Str "3.2" ] ]
+            , Cell
+                ( "" , [] , [] ) AlignDefault (RowSpan 3) (ColSpan 1) []
+            , Cell
+                ( "" , [] , [] ) AlignDefault (RowSpan 1) (ColSpan 1) []
+            ]
+        , Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Cell" , Space , Str "4.0" ] ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Cell" , Space , Str "4.2" ] ]
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 2)
+                (ColSpan 1)
+                [ Plain
+                    [ Str "Merged"
+                    , Space
+                    , Str "Cell"
+                    , Space
+                    , Str "4.4"
+                    , Space
+                    , Str "5.4"
+                    ]
+                ]
+            ]
+        , Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] ) AlignDefault (RowSpan 1) (ColSpan 1) []
+            , Cell
+                ( "" , [] , [] ) AlignDefault (RowSpan 1) (ColSpan 1) []
+            , Cell
+                ( "" , [] , [] ) AlignDefault (RowSpan 1) (ColSpan 1) []
+            ]
+        , Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] ) AlignDefault (RowSpan 1) (ColSpan 1) []
+            , Cell
+                ( "" , [] , [] ) AlignDefault (RowSpan 1) (ColSpan 1) []
+            , Cell
+                ( "" , [] , [] ) AlignDefault (RowSpan 1) (ColSpan 1) []
+            , Cell
+                ( "" , [] , [] ) AlignDefault (RowSpan 1) (ColSpan 1) []
+            , Cell
+                ( "" , [] , [] ) AlignDefault (RowSpan 1) (ColSpan 1) []
+            ]
+        , Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] ) AlignDefault (RowSpan 1) (ColSpan 5) []
+            ]
+        , Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] ) AlignDefault (RowSpan 1) (ColSpan 1) []
+            , Cell
+                ( "" , [] , [] ) AlignDefault (RowSpan 1) (ColSpan 1) []
+            , Cell
+                ( "" , [] , [] ) AlignDefault (RowSpan 1) (ColSpan 1) []
+            , Cell
+                ( "" , [] , [] ) AlignDefault (RowSpan 1) (ColSpan 1) []
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Cell" , Space , Str "8.4" ] ]
+            ]
+        ]
+    ]
+    (TableFoot ( "" , [] , [] ) [])
+, Para
+    [ Str "A"
+    , Space
+    , Str "non-uniform"
+    , Space
+    , Str "table"
+    , Space
+    , Str "with"
+    , Space
+    , Str "a"
+    , Space
+    , Str "row"
+    , Space
+    , Str "starting"
+    , Space
+    , Str "late"
+    ]
+, Table
+    ( "" , [] , [] )
+    (Caption Nothing [])
+    [ ( AlignDefault , ColWidthDefault )
+    , ( AlignDefault , ColWidthDefault )
+    ]
+    (TableHead
+       ( "" , [] , [] )
+       [ Row
+           ( "" , [] , [] )
+           [ Cell
+               ( "" , [] , [] )
+               AlignDefault
+               (RowSpan 1)
+               (ColSpan 1)
+               [ Plain [ Str "Header" , Space , Str "0.0" ] ]
+           , Cell
+               ( "" , [] , [] )
+               AlignDefault
+               (RowSpan 1)
+               (ColSpan 1)
+               [ Plain [ Str "Header" , Space , Str "0.1" ] ]
+           ]
+       ])
+    [ TableBody
+        ( "" , [] , [] )
+        (RowHeadColumns 0)
+        []
+        [ Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] ) AlignDefault (RowSpan 1) (ColSpan 1) []
+            , Cell
+                ( "" , [] , [] )
+                AlignDefault
+                (RowSpan 1)
+                (ColSpan 1)
+                [ Plain [ Str "Cell" , Space , Str "1.1" ] ]
+            ]
+        ]
+    ]
+    (TableFoot ( "" , [] , [] ) [])
+, Para
+    [ Str "A"
+    , Space
+    , Str "non-uniform"
+    , Space
+    , Str "table"
+    , Space
+    , Str "with"
+    , Space
+    , Str "a"
+    , Space
+    , Str "vertical"
+    , Space
+    , Str "span"
+    , Space
+    , Str "over"
+    , Space
+    , Str "a"
+    , Space
+    , Str "row"
+    , Space
+    , Str "starting"
+    , Space
+    , Str "late"
+    ]
+, Table
+    ( "" , [] , [] )
+    (Caption Nothing [])
+    [ ( AlignDefault , ColWidthDefault )
+    , ( AlignDefault , ColWidthDefault )
+    , ( AlignDefault , ColWidthDefault )
+    ]
+    (TableHead
+       ( "" , [] , [] )
+       [ Row
+           ( "" , [] , [] )
+           [ Cell
+               ( "" , [] , [] )
+               AlignDefault
+               (RowSpan 1)
+               (ColSpan 1)
+               [ Plain [ Str "Header" , Space , Str "0.0" ] ]
+           , Cell
+               ( "" , [] , [] )
+               AlignDefault
+               (RowSpan 1)
+               (ColSpan 1)
+               [ Plain [ Str "Header" , Space , Str "0.1" ] ]
+           , Cell
+               ( "" , [] , [] )
+               AlignDefault
+               (RowSpan 2)
+               (ColSpan 1)
+               [ Plain
+                   [ Str "Merged"
+                   , Space
+                   , Str "Cell"
+                   , Space
+                   , Str "0.2"
+                   , Space
+                   , Str "1.2"
+                   ]
+               ]
+           ]
+       ])
+    [ TableBody
+        ( "" , [] , [] )
+        (RowHeadColumns 0)
+        []
+        [ Row
+            ( "" , [] , [] )
+            [ Cell
+                ( "" , [] , [] ) AlignDefault (RowSpan 1) (ColSpan 1) []
+            , Cell
+                ( "" , [] , [] ) AlignDefault (RowSpan 1) (ColSpan 1) []
+            ]
+        ]
+    ]
+    (TableFoot ( "" , [] , [] ) [])
+]

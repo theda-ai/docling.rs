@@ -1,0 +1,761 @@
+[ Para
+    [ Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "a"
+    , Space
+    , Str "word"
+    , Space
+    , Str "document"
+    , Space
+    , Str "and"
+    , Space
+    , Str "this"
+    , Space
+    , Str "is"
+    , Space
+    , Str "an"
+    , Space
+    , Str "inline"
+    , Space
+    , Str "equation:"
+    , Space
+    , Math InlineMath "A= \\pi r^{2}"
+    , Str "."
+    ]
+, BulletList
+    [ [ Plain
+          [ Str "First"
+          , Space
+          , Str "item"
+          , Space
+          , Str "with"
+          , Space
+          , Str "inline"
+          , Space
+          , Str "equation:"
+          , Space
+          , Math InlineMath "A= \\pi r^{2}"
+          , Space
+          , Str "is"
+          , Space
+          , Str "the"
+          , Space
+          , Str "area"
+          , Space
+          , Str "formula."
+          ]
+      ]
+    , [ Plain
+          [ Str "Second"
+          , Space
+          , Str "item"
+          , Space
+          , Str "with"
+          , Space
+          , Str "equations:"
+          , Space
+          , Math InlineMath "E=mc^{2}"
+          , Space
+          , Str "and"
+          , Space
+          , Math InlineMath "F=ma"
+          , Space
+          , Str "are"
+          , Space
+          , Str "physics"
+          , Space
+          , Str "formulas."
+          ]
+      ]
+    , [ Plain
+          [ Str "The"
+          , Space
+          , Str "formula"
+          , Space
+          , Math InlineMath "a^{2}+b^{2}=c^{2}"
+          , Space
+          , Str "is"
+          , Space
+          , Str "the"
+          , Space
+          , Str "Pythagorean"
+          , Space
+          , Str "theorem."
+          ]
+      ]
+    ]
+, Para
+    [ Str "If"
+    , Space
+    , Str "instead,"
+    , Space
+    , Str "I"
+    , Space
+    , Str "want"
+    , Space
+    , Str "an"
+    , Space
+    , Str "equation"
+    , Space
+    , Str "by"
+    , Space
+    , Str "line,"
+    , Space
+    , Str "I"
+    , Space
+    , Str "can"
+    , Space
+    , Str "do"
+    , Space
+    , Str "this:"
+    ]
+, Para [ Math DisplayMath "a^{2}+b^{2}=c^{2} \\times 23" ]
+, Para
+    [ Str "And"
+    , Space
+    , Str "that"
+    , Space
+    , Str "is"
+    , Space
+    , Str "an"
+    , Space
+    , Str "equation"
+    , Space
+    , Str "by"
+    , Space
+    , Str "itself."
+    , Space
+    , Str "Cheers!"
+    ]
+, Para
+    [ Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "another"
+    , Space
+    , Str "equation:"
+    ]
+, Para
+    [ Math
+        DisplayMath
+        "f\\left(x\\right)=a_{0}+\\sum_{n=1}^{ \\infty }\\left(a_{n}\\cos(\\frac{n \\pi x}{L})+b_{n}\\sin(\\frac{n \\pi x}{L})\\right)"
+    ]
+, Para
+    [ Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    ]
+, Para
+    [ Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "a"
+    , Space
+    , Str "word"
+    , Space
+    , Str "document"
+    , Space
+    , Str "and"
+    , Space
+    , Str "this"
+    , Space
+    , Str "is"
+    , Space
+    , Str "an"
+    , Space
+    , Str "inline"
+    , Space
+    , Str "equation:"
+    , Space
+    , Math InlineMath "A= \\pi r^{2}"
+    , Str "."
+    , Space
+    , Str "If"
+    , Space
+    , Str "instead,"
+    , Space
+    , Str "I"
+    , Space
+    , Str "want"
+    , Space
+    , Str "an"
+    , Space
+    , Str "equation"
+    , Space
+    , Str "by"
+    , Space
+    , Str "line,"
+    , Space
+    , Str "I"
+    , Space
+    , Str "can"
+    , Space
+    , Str "do"
+    , Space
+    , Str "this:"
+    ]
+, Para
+    [ Math
+        DisplayMath
+        "\\left(x+a\\right)^{n}=\\sum_{k=0}^{n}\\left(\\genfrac{}{}{0pt}{}{n}{k}\\right)x^{k}a^{n-k}"
+    ]
+, Para
+    [ Str "And"
+    , Space
+    , Str "that"
+    , Space
+    , Str "is"
+    , Space
+    , Str "an"
+    , Space
+    , Str "equation"
+    , Space
+    , Str "by"
+    , Space
+    , Str "itself."
+    , Space
+    , Str "Cheers!"
+    ]
+, Para
+    [ Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "another"
+    , Space
+    , Str "equation:"
+    ]
+, Para
+    [ Math
+        DisplayMath
+        "\\left(1+x\\right)^{n}=1+\\frac{nx}{1!}+\\frac{n\\left(n-1\\right)x^{2}}{2!}+ \\text{ \\textellipsis }"
+    ]
+, Para
+    [ Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    , Space
+    , Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "text."
+    ]
+, Para
+    [ Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "a"
+    , Space
+    , Str "word"
+    , Space
+    , Str "document"
+    , Space
+    , Str "and"
+    , Space
+    , Str "these"
+    , Space
+    , Str "are"
+    , Space
+    , Str "inline"
+    , Space
+    , Str "equations:"
+    , Space
+    , Math InlineMath "N_{s}^{H}"
+    , Space
+    , Str "/"
+    , Space
+    , Math InlineMath "N_{s}^{P}"
+    , Space
+    , Str "\8203."
+    , Space
+    , Str "If"
+    , Space
+    , Str "instead,"
+    , Space
+    , Str "I"
+    , Space
+    , Str "want"
+    , Space
+    , Str "an"
+    , Space
+    , Str "equation"
+    , Space
+    , Str "by"
+    , Space
+    , Str "line,"
+    , Space
+    , Str "I"
+    , Space
+    , Str "can"
+    , Space
+    , Str "do"
+    , Space
+    , Str "this:"
+    ]
+, Para
+    [ Math
+        DisplayMath
+        "e^{x}=1+\\frac{x}{1!}+\\frac{x^{2}}{2!}+\\frac{x^{3}}{3!}+ \\text{ \\textellipsis } , - \\infty  < x <  \\infty"
+    ]
+, Para
+    [ Str "And"
+    , Space
+    , Str "that"
+    , Space
+    , Str "is"
+    , Space
+    , Str "an"
+    , Space
+    , Str "equation"
+    , Space
+    , Str "by"
+    , Space
+    , Str "itself."
+    , Space
+    , Str "Cheers!"
+    ]
+, Para
+    [ Str "Large"
+    , Space
+    , Str "operators"
+    , Space
+    , Str "and"
+    , Space
+    , Str "integrals"
+    , Space
+    , Str "are"
+    , Space
+    , Str "represented"
+    , Space
+    , Str "with"
+    , Space
+    , Str "n-ary"
+    , Space
+    , Str "objects"
+    , Space
+    , Str "in"
+    , Space
+    , Str "OMML"
+    , Space
+    , Str "XML:"
+    ]
+, Para [ Math DisplayMath "\\sum_{0}^{2}x" ]
+, Para
+    [ Math
+        DisplayMath
+        "\\bigcup_{n=1}^{m}\\left(X_{n} \\cap Y_{n}\\right)"
+    ]
+, Para [ Math DisplayMath "\\prod_{k=1}^{n}A_{k}" ]
+, Para [ Math DisplayMath "\\bigwedge_{}^{}x" ]
+, Para [ Math DisplayMath "\\int_{}^{}(2x+1)dx" ]
+, Para [ Math DisplayMath "\\iint_{0}^{1}xdx" ]
+, Para [ Math DisplayMath "\\iiint_{}^{}ydy" ]
+, Para [ Math DisplayMath "\\oint_{}^{}\\frac{dy}{dx}" ]
+, Para [ Math DisplayMath "\\oiint_{0}^{2 \\pi }idt" ]
+, Para [ Math DisplayMath "\\oiiint_{C}^{}\\frac{1}{z}dz" ]
+, Para
+    [ Str "Operators"
+    , Space
+    , Str "used"
+    , Space
+    , Str "with"
+    , Space
+    , Str "limits:"
+    ]
+, Para
+    [ Math
+        DisplayMath
+        "\\operatorname{argmax}_{ \\epsilon}f(x),   \\lim_{n}{\\left(1+\\frac{1}{n}\\right)}^{n} ,  \\max_{0 \\leq x \\leq 1}xe^{-x^{2}},  unsupported_{n}{\\left(1+\\frac{1}{n}\\right)}^{n}"
+    ]
+, Para
+    [ Str "Equations"
+    , Space
+    , Str "with"
+    , Space
+    , Str "the"
+    , Space
+    , Str "OMML"
+    , Space
+    , Str "group"
+    , Space
+    , Str "character"
+    , Space
+    , Str "object:"
+    ]
+, Para
+    [ Math
+        DisplayMath
+        "P_{ x}=\\underbrace{S \\cdot T \\cdot G \\cdot (x+y+z)}_{group\\ with\\ underbraces}+e^{x}"
+    ]
+, Para
+    [ Math
+        DisplayMath
+        "Q_{ y}=\\overset{group\\ with\\ overbraces}{\\overbrace{G \\cdot T \\cdot S \\cdot (x+y+z)}}+e^{y}"
+    ]
+, Para
+    [ Math DisplayMath "s\\left\\{max\\right\\}= A \\times B" ]
+]

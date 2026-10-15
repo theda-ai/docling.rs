@@ -210,15 +210,19 @@ pub fn resolve(base_dir: &str, target: &str) -> String {
 }
 
 /// Build a [`PictureImage`] from image bytes, reading the pixel size from the
-/// header (decode-free). Returns `None` for formats the `image` crate can't read
-/// (e.g. EMF/WMF vector media).
+/// header (decode-free). A Windows metafile (EMF/WMF), which the `image`
+/// crate cannot read, is rendered to PNG instead (#536); `None` for anything
+/// else it can't read.
 pub fn picture_image(path: &str, data: Vec<u8>) -> Option<PictureImage> {
-    let (width, height) = image::ImageReader::new(Cursor::new(&data))
+    let dims = image::ImageReader::new(Cursor::new(&data))
         .with_guessed_format()
-        .ok()?
-        .into_dimensions()
-        .ok()?;
+        .ok()
+        .and_then(|r| r.into_dimensions().ok());
+    let Some((width, height)) = dims else {
+        return super::metafile::render(&data, None);
+    };
     Some(PictureImage {
+        dpi: PictureImage::DEFAULT_DPI,
         mimetype: mime_for(path).to_string(),
         width,
         height,

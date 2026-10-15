@@ -17,8 +17,23 @@ pub struct DoclingJsonBackend;
 
 impl DeclarativeBackend for DoclingJsonBackend {
     fn convert(&self, source: &SourceDocument) -> Result<DoclingDocument, ConversionError> {
-        let mut root: Value = serde_json::from_str(&source.text()?)
-            .map_err(|e| ConversionError::with_source("docling-json", e))?;
+        let text = source.text()?;
+        let mut root: Value = match serde_json::from_str(&text) {
+            Ok(v) => v,
+            // Not JSON at all — but not a docling document either (its
+            // schema name is nowhere in the text): the bytes as a json
+            // code block, as MarkItDown reads any `.json` (#671). A broken
+            // DoclingDocument keeps its parse error.
+            Err(_) if !text.contains("DoclingDocument") => {
+                return crate::backend::text::convert_json_text(source);
+            }
+            Err(e) => return Err(ConversionError::with_source("docling-json", e)),
+        };
+        // Generic JSON (#671) — no `schema_name`, no `body` to walk — is one
+        // `json` code block, not an empty document.
+        if !crate::backend::text::is_docling_document(&root) {
+            return crate::backend::text::convert_json_text(source);
+        }
         // Referenced images resolve against the JSON file's directory (#403).
         inline_referenced_images(
             &mut root,
@@ -412,6 +427,7 @@ fn table_item(item: &Value, root: &Value, doc: &mut DoclingDocument) {
             cells: None,
             caption: caption_of(item, root),
             caption_parent: caption_parent_of(item, root),
+            caption_location: None,
         }));
     }
 }
@@ -425,9 +441,11 @@ fn picture_item(item: &Value, root: &Value, doc: &mut DoclingDocument) {
     doc.push(Node::Picture {
         caption: caption_of(item, root),
         caption_parent: caption_parent_of(item, root),
+        caption_location: None,
         caption_href: None,
         image: picture_image(item),
         classification: None,
+        description: None,
     });
 }
 
@@ -482,11 +500,18 @@ fn picture_image(item: &Value) -> Option<PictureImage> {
     let declared = |k: &str| image["size"][k].as_f64().unwrap_or(0.0).round().max(0.0) as u32;
     let (width, height) = crate::backend::rtf::image_size(&mimetype, &data)
         .unwrap_or((declared("width"), declared("height")));
+    // The declared dpi round-trips (a PDF crop's 144 stays 144, #519).
+    let dpi = image["dpi"]
+        .as_u64()
+        .and_then(|d| u32::try_from(d).ok())
+        .filter(|&d| d > 0)
+        .unwrap_or(PictureImage::DEFAULT_DPI);
     Some(PictureImage {
         mimetype,
         width,
         height,
         data,
+        dpi,
     })
 }
 

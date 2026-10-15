@@ -5,6 +5,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords.workspace = true
 rust-version.workspace = true
 
 [features]
@@ -20,6 +23,9 @@ cloud = ["dep:object_store"]
 # GPU execution providers for the PDF/image ML pipeline (#74) — pass-through
 # to docling → docling-pdf; select at runtime with DOCLING_RS_EP.
 cuda = ["docling/cuda"]
+# pdfium as an opt-in PDF renderer (`DOCLING_RS_RENDERER=pdfium`) — off by
+# default, the pipeline renders in pure Rust; pass-through to docling-pdf.
+pdfium = ["docling/pdfium"]
 # HEIC/HEIF image input (#211) — links the system libheif.
 heif = ["docling/heif"]
 tensorrt = ["docling/tensorrt"]
@@ -27,6 +33,7 @@ directml = ["docling/directml"]
 coreml = ["docling/coreml"]
 # CPU-class XNNPACK (#324): self-built ONNX Runtime only (ORT_LIB_LOCATION).
 xnnpack = ["docling/xnnpack"]
+ort-load-dynamic = ["docling/ort-load-dynamic"]
 # OpenTelemetry trace export (#297): request/conversion spans shipped over
 # OTLP when OTEL_EXPORTER_OTLP_ENDPOINT is set at runtime. Off by default —
 # the OTel SDK stack is heavy; structured tracing logs and the Prometheus
@@ -40,11 +47,8 @@ otel = [
 
 [dependencies]
 axum = { version = "0.8", features = ["multipart"] }
-docling = { path = "../docling", version = "1.69.1" }
-docling-core = { path = "../docling-core", version = "1.69.1" }
-# malloc_trim after conversions (#263): glibc's allocator otherwise keeps
-# freed page-bitmap heap mapped forever, ratcheting a warm server's RSS.
-libc = "0.2"
+docling = { path = "../docling", version = "2.26.0" }
+docling-core = { path = "../docling-core", version = "2.26.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "signal"] }

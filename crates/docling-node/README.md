@@ -19,21 +19,26 @@ needed to use the package:
 npm install docling.rs   # or: bun add docling.rs
 ```
 
-Prebuilt platforms: Linux x64 / arm64 (glibc) and Windows x64. (macOS isn't
+Prebuilt platforms: Linux x64 / arm64 / s390x (glibc) and Windows x64 — on
+IBM Z the addon loads ONNX Runtime at run time from the library
+`download_dependencies.sh` fetches (#504). (macOS isn't
 prebuilt — build from source, see below.) The right binary is pulled in
-automatically as a platform-specific `optionalDependency` (`docling.rs-<triple>`). Releases are published to npm
-automatically by the `npm publish` workflow
-(`.github/workflows/npm-publish.yml`) whenever CI cuts a GitHub Release
-(`v<version>`): the release tag is built and published at its version, together
-with `docling.rs-cuda` and `docling.rs-wasm`. The workflow can also be run by
-hand — by default it builds the latest master (the workspace version), or pass
-a release tag to (re-)publish that; versions already on npm are skipped.
+automatically as a platform-specific `optionalDependency` (`docling.rs-<triple>`). Releases reach npm
+when the maintainer publishes them — `gh workflow run release.yml -f
+tag=v<version>` runs every channel (PyPI, npm, the images, the CLI binaries);
+not every GitHub Release is published. Its npm channel is the `npm publish`
+workflow (`.github/workflows/npm-publish.yml`), which also runs alone (`gh
+workflow run npm-publish.yml -f tag=v<version>`): it builds the release tag and
+publishes it at its version, together with `docling.rs-cuda` (the `cuda`
+input, on by default) and `docling.rs-wasm`; without a tag it builds the
+latest master (the workspace version). Versions already on npm are skipped,
+so re-runs are safe.
 
 ## Build from source
 
 This package lives in the docling.rs Cargo workspace and can also build the
 addon from Rust source — needed for local development or an unsupported
-platform. You need a Rust toolchain (1.88+) and Node.js 14+ (or Bun).
+platform. You need a Rust toolchain (1.92+) and Node.js 14+ (or Bun).
 
 ```bash
 cd crates/docling-node
@@ -60,7 +65,7 @@ package** (Linux x64). Same JS API; the npm tarball is a few KB and its
 this repo's matching `npm-cuda-v<version>` GitHub release, verifying each
 file against the release's sha256 manifest (the binaries are far past npm's
 practical size limits — the same fetch-at-install model `onnxruntime-node`
-uses). Requires glibc ≥ 2.38 (Ubuntu 24.04+ era), CUDA 12 + cuDNN 9 at
+uses). Requires glibc ≥ 2.38 (Ubuntu 24.04+ era), CUDA 13 + cuDNN 9 at
 runtime, and `github.com` access at install time — or set
 `DOCLING_RS_NPM_CUDA_URL` to a mirror base URL / local directory with the
 same assets (air-gapped installs). To keep existing `require('docling.rs')`
@@ -72,9 +77,9 @@ npm install docling.rs-cuda
 ```
 
 The package is published by the `npm publish` workflow
-(`.github/workflows/npm-publish.yml`) — automatically on every GitHub Release,
-or on a manual run with the `cuda` input — which also uploads the release
-assets (`crates/docling-node/cuda/` holds the shim sources).
+(`.github/workflows/npm-publish.yml`, run by hand; its `cuda` input is on by
+default), which also uploads the release assets (`crates/docling-node/cuda/`
+holds the shim sources).
 
 **Or build the addon from source** with the `cuda` feature:
 
@@ -88,7 +93,7 @@ cp ../../target/release/libonnxruntime_providers_{shared,cuda}.so .
 The CUDA execution provider is two *separate* shared libraries that ONNX
 Runtime dlopens at session start; the `$ORIGIN` rpath makes it look next to
 the `.node` addon, so ship them alongside it (without them a CUDA build
-falls back to CPU with a warning). CUDA 12 + cuDNN 9 must be installed on the
+falls back to CPU with a warning). CUDA 13 + cuDNN 9 must be installed on the
 system. A GPU build defaults to `DOCLING_RS_EP=auto` — GPU when usable, CPU
 fallback; set `DOCLING_RS_EP=cuda` to fail loudly instead of falling back, or
 `DOCLING_RS_EP=cpu` to force CPU. `tensorrt` / `directml` (Windows) /
@@ -201,14 +206,15 @@ for await (const c of streamFileChunks('report.docx', {
 ### PDF / images: getting the ML models
 
 Declarative formats (Markdown, HTML, DOCX, XLSX, …) are pure Rust and need
-nothing. The **PDF/image** path needs native assets that are *not* bundled in the
-addon — pdfium plus the ONNX models (layout, OCR, TableFormer). Converting a
-PDF/image/METS input **throws** until they're on disk. Fetch them with a
+nothing. The **PDF/image** path needs the ONNX models (layout, OCR,
+TableFormer), which are *not* bundled in the addon — the PDF pages themselves
+are parsed and rendered in pure Rust. Converting a PDF/image/METS input
+**throws** until the models are on disk. Fetch them with a
 one-liner from your app's directory (where you'll `npm install docling.rs`):
 
 > The exception is [`pipeline: 'vlm'`](#vlm-pipeline-remote-endpoint), which
-> replaces the ONNX stack with a remote endpoint: it needs **pdfium only** (to
-> rasterize PDF pages), and nothing at all for image input.
+> replaces the ONNX stack with a remote endpoint: it needs **nothing on disk**
+> (PDF pages are rendered in pure Rust).
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/docling-project/docling.rs/master/scripts/install/download_dependencies.sh | sh
@@ -222,13 +228,12 @@ const res = await convertFileAsync('paper.pdf', { to: 'markdown' }) // ✅ works
 
 `scripts/install/download_dependencies.sh` fetches everything from this repo's
 [GitHub Releases](https://github.com/docling-project/docling.rs/releases) straight into
-`./models` and `./.pdfium` — which this package (and the Rust CLI) look for by
+`./.models` — which this package (and the Rust CLI) look for by
 default, relative to the process's current directory, so no env vars or setup
 call are needed afterwards:
 
 | Asset | Destination |
 | --- | --- |
-| **pdfium** | `.pdfium/lib/libpdfium.so` (`libpdfium.dylib` on macOS) |
 | **layout** (`layout_heron.onnx`) | `models/layout_heron.onnx` |
 | **OCR** rec model + dictionary | `models/ocr_rec.onnx`, `models/ppocr_keys_v1.txt` |
 | **OCR** text detector (optional, #429 — lines outside layout regions on scans/images) | `models/ocr_det.onnx` |
@@ -240,25 +245,25 @@ call are needed afterwards:
 > [`docs/MODELS_NOTICE.md`](../../docs/MODELS_NOTICE.md) for full attribution), not
 > docling.rs's own weights — docling.rs hosts the converted `.onnx` as a
 > GitHub Release purely so you don't need a local Python/torch toolchain.
-> pdfium and the OCR model are re-hosted, unmodified, from their own public
-> releases, on the same host for convenience.
+> The OCR model is re-hosted, unmodified, from its own public release, on
+> the same host for convenience.
 >
-> Run it from wherever your app lives — the script only writes to `./models`
-> and `./.pdfium` under the current directory, e.g. in a container build step:
+> Run it from wherever your app lives — the script only writes to `./.models`
+> under the current directory, e.g. in a container build step:
 > ```bash
 > cd /path/to/your/app && curl -fsSL https://raw.githubusercontent.com/docling-project/docling.rs/master/scripts/install/download_dependencies.sh | sh
 > ```
 >
 > To use your own export/host instead, point the env vars at it directly:
 > `DOCLING_LAYOUT_ONNX`, `DOCLING_OCR_REC_ONNX`, `DOCLING_OCR_DICT`,
-> `DOCLING_TABLEFORMER_{ENCODER,DECODER,BBOX}`, `PDFIUM_DYNAMIC_LIB_PATH` — an
-> env var always wins over the `./models` / `./.pdfium` default.
+> `DOCLING_TABLEFORMER_{ENCODER,DECODER,BBOX}` — an env var always wins over
+> the `./.models` default.
 
 ```js
-checkDependencies() // { home, pdfium, layout, ocr, tableformer, chunkTokenizer, ready, missing }
+checkDependencies() // { home, layout, ocr, ocrDet, tableformer, chunkTokenizer, ready, missing }
 ```
 
-`ready` describes the **standard** pipeline (`pdfium && layout`); a VLM-only
+`ready` describes the **standard** pipeline (the layout model); a VLM-only
 install has `ready: false` and still converts.
 
 ### Reusing a warm `Pipeline` (many PDFs)
@@ -289,18 +294,36 @@ models are mutable sessions) — overlapping `*Async` calls queue in submission
 order, so batch throughput comes from keeping the models warm, not from
 parallel calls.
 
+The constructor takes the same PDF/image options as the one-shot calls —
+`ocrEngine`, `ocrLang`, `ocrMode`, `ocrScale`, `ocrTextlineOrientation`
+(RapidOCR's text-line orientation handling, #666), `noOcr` (docling's `--no-ocr`:
+never OCR, keep layout and tables; `skipOcr` is its pre-2.0 name),
+`textLayerOnly` (the text layer only, no models — what `noOcr` meant before
+2.0, #611), `password` (an encrypted PDF's or Office document's password,
+#611/#625; `pdfPassword`, its earlier name, still works), `forceFullPageOcr`, `noTextPanels`, `headingHierarchy`, `pages`,
+`imagesScale` / `pageImages`
+(picture-crop resolution in px per point and the JSON page images, docling's
+`images_scale` / `generate_page_images`, #520), `documentTimeout` (a per-document
+budget in seconds, docling's `document_timeout`: once spent, the pages done so
+far are the document, `status` is `"partial_success"` and `errors` says why,
+#497) and the enrichment switches — and
+applies them to every conversion on that instance, e.g.
+`new Pipeline({ ocrEngine: 'tesseract', ocrLang: 'por+eng' })` for Portuguese
+scans. They are validated on `new` exactly as `DocumentConverter` validates
+them (an unknown `ocrLang` throws, #471). The per-call `OutputOptions` only
+choose the output (`to`, `imageMode`, `artifactsDir`, `pageBreakPlaceholder`).
+
 `Pipeline` rejects `pipeline: 'vlm'`: that pipeline loads no models, so there
 is nothing to keep warm — use `convertFileAsync` or `DocumentConverter`.
 
 ### VLM pipeline (remote endpoint)
 
 `pipeline: 'vlm'` (issue #77) replaces the whole ONNX stack — layout, OCR,
-TableFormer — with a **Vision Language Model**. Each PDF page is rendered with
-pdfium and sent to any OpenAI-compatible vision endpoint (LM Studio, Ollama,
+TableFormer — with a **Vision Language Model**. Each PDF page is rendered (in
+pure Rust) and sent to any OpenAI-compatible vision endpoint (LM Studio, Ollama,
 vLLM, or a hosted service) with docling's page-conversion prompt; the returned
 DocLang/DocTags markup is parsed by the same reader the CLI uses. No ONNX model
-is loaded, so a VLM-only install needs pdfium alone — and nothing at all for
-image input.
+is loaded, so a VLM-only install needs nothing on disk.
 
 ```js
 import { convertFileAsync } from 'docling.rs'
@@ -380,29 +403,44 @@ models, #388), and `pages: 'A-B'` converts only that
 | `convert(input, options?)` | `ConvertResult` | In-memory bytes (`{ name, data, format? }`). |
 | `convertFileAsync(path, options?)` | `Promise<ConvertResult>` | Off the event loop. |
 | `convertAsync(input, options?)` | `Promise<ConvertResult>` | Off the event loop. |
+| `convertArchiveFile(path, options?)` | `ArchiveItem[]` | Every document inside a ZIP (#557): per entry `outcome` `converted` (`result`) / `skipped` (`error` = the reason) / `failed` (`error`); one broken document fails only itself. |
+| `convertArchive(input, options?)` | `ArchiveItem[]` | Same, over in-memory bytes (`format` ignored). |
+| `convertArchiveFileAsync` / `convertArchiveAsync` | `Promise<ArchiveItem[]>` | Off the event loop. |
 | `streamFileMarkdown(path, options?)` | `AsyncGenerator<string>` | Markdown chunks in document order. |
 | `chunkFile(path, options?)` | `Chunk[]` | Convert + run docling's hierarchical/hybrid chunker. |
 | `chunk(input, options?)` | `Chunk[]` | Same, over in-memory bytes. |
 | `chunkDocument(documentJson, options?)` | `Chunk[]` | Chunk an already-converted docling JSON document. |
 | `chunkFileAsync` / `chunkAsync` / `chunkDocumentAsync` | `Promise<Chunk[]>` | Off the event loop. |
 | `streamFileChunks` / `streamChunks` / `streamDocumentChunks` | `AsyncGenerator<Chunk>` | Chunks yielded as produced; `break` cancels. |
+| `emailAttachmentsFile(path, options?)` | `EmailAttachment[]` | The attachments of an `.eml` / `.msg` with their payloads (#561): `{ index, name, contentType, format, size, inline, skipped, data }` — `data` a `Buffer` when kept (absent over a limit or without a payload), `format` the id it converts as (absent, with `skipped` saying why, when it will not), a forwarded message an `.eml` entry. Convert one with `convert({ name: att.name, data: att.data, format: att.format })` — `format` carries what the extension cannot (a `scan.bin` sent as `application/pdf`). `inline` is true for images of the body only; names are unique within the message (`report-2.pdf`). `options`: `maxEntries`, `maxEntrySize`, `maxTotalSize` (bytes; defaults the `DOCLING_RS_ZIP_MAX_*` limits: 10 000 / 256 MiB / 1 GiB). |
+| `emailAttachmentsAsync` / `emailAttachmentsFileAsync` | `Promise<EmailAttachment[]>` | Off the event loop (a large `.msg` parses without blocking). |
+| `emailAttachments(input, options?)` | `EmailAttachment[]` | Same, over in-memory message bytes (`{ name, data }`). |
 | `supportedFormats()` | `string[]` | Supported input format ids. |
 | `formatFromName(name)` | `string \| null` | Detect a format id from a filename/extension. |
 | `checkDependencies(options?)` | `DependencyStatus` | Report which PDF/image deps are present. |
 
 `Pipeline` is the reusable warm PDF/image converter: `new Pipeline(converterOptions)`
 then `convertFile` / `convert` / `convertFileAsync` / `convertAsync` /
-`convertFileStreaming` / `streamFileMarkdown`.
+`convertFileStreaming` / `streamFileMarkdown`. It reads `strict`, the
+enrichment switches and every PDF/image option (`ocrEngine`, `ocrLang`,
+`ocrMode`, `ocrScale`, `ocrTextlineOrientation`, `noOcr`, `textLayerOnly`, `password`,
+`forceFullPageOcr`, `noTextPanels`, `headingHierarchy`, `pages`, `imagesScale`,
+`pageImages`) from
+`converterOptions` (#471).
 
 `DocumentConverter` is the reusable form: `new DocumentConverter(converterOptions)`
 then `convert` / `convertFile` / `convertFileAsync` / `convertAsync` /
-`convertFileStreaming`. Converter config (`strict`, `fetchImages`,
+`convertFileStreaming` / `convertArchiveFile` / `convertArchive` (+ `*Async`).
+Converter config (`strict`, `fetchImages`,
 `allowedFormats`, `pipeline` + the `vlm*` options) is set once on the
 constructor; output options (`to`, `imageMode`, `artifactsDir`) are per call.
 
 ### Options
 
-- `to`: `"markdown"` (default) or `"json"`.
+- `to`: `"markdown"` (default), `"json"`, `"html"`, `"text"`, `"latex"`, `"vtt"`
+  (WebVTT subtitles from an audio/video transcript or a `.vtt`, #614) or `"pandoc"`
+  (Pandoc's JSON AST — pipe it to `pandoc -f json -t docx`; pictures follow
+  `imageMode`).
 - `imageMode`: `"placeholder"` (default), `"embedded"`, or `"referenced"`.
 - `artifactsDir`: directory name used in `referenced` links (default `"artifacts"`).
 - `pageBreakPlaceholder`: text inserted between pages in Markdown output —
@@ -415,6 +453,18 @@ constructor; output options (`to`, `imageMode`, `artifactsDir`) are per call.
   legacy output (Markdown only).
 - `fetchImages`: for HTML/EPUB, resolve and embed external `<img src>`. Off by
   default; fetches http(s) URLs over the network — enable only for trusted input.
+  The alias of `imageSources: "remote"`.
+- `imageSources` (#646): which image references resolve — `"none"` (default),
+  `"embedded"` (`data:` URIs and parts of the same container: EPUB/MHTML entries,
+  an email's `cid:` attachments; no filesystem, no network — the tier for
+  untrusted input), `"local"` (plus files under the source file's directory,
+  never an absolute path or one that escapes it), `"remote"` (plus http(s)
+  fetches). HTML, EPUB, MHTML, JATS, AsciiDoc, ODF, Markdown (`![…](data:…)`,
+  inline `<img>`) and email bodies (`cid:` images in body order).
+  `imageHosts` (exact names or `*.suffix`) confines `"remote"` to listed hosts,
+  redirects included; `maxImageBytes` (32 MiB), `maxImages`, `maxImageTotalMb`
+  and `minImageBytes` bound what a document may make the process hold — over a
+  limit a picture stays a placeholder, the conversion never fails.
 - `allowedFormats`: restrict the converter to these format ids/extensions.
 - `pages`: convert only this PDF page window, `"A-B"` or `"N"` (1-based inclusive).
 - `ocrLang`: OCR recognition language for scanned pages, `"en"` (default) or
@@ -437,14 +487,59 @@ constructor; output options (`to`, `imageMode`, `artifactsDir`) are per call.
   default; each needs its model under `.models/` (`scripts/install/download_dependencies.sh --enrich`),
   a missing one warns and skips the pass. CodeFormula is an autoregressive VLM:
   expect seconds per code/formula region on CPU. Also read by `new Pipeline()`.
+- `doPictureOcr`: OCR the pictures embedded in non-PDF documents (DOCX/PPTX
+  screenshots, HTML figures, sampled video frames) with the OCR models and
+  attach the text to the picture as docling's description annotation (#645):
+  Markdown prints it between the caption and the image placeholder, the JSON
+  picture item carries `meta.description` + the `description` annotation,
+  chunks include it. `pictureOcrClasses` (comma-separated
+  DocumentFigureClassifier labels, e.g.
+  `"screenshot_from_computer,screenshot_from_manual"`) and
+  `pictureOcrMinSide` (px, default 32) filter which pictures are read;
+  `pictureOcrScale` sets their OCR resolution in px per picture pixel under
+  RapidOCR's 2000 px cap (#666; `1.0` = native pixels);
+  `ocrTextlineOrientation: true` reads vertical, skewed and upside-down lines;
+  `keepPictureImages: false` drops the image bytes after the pass. Off by
+  default — every default output is unchanged.
+- `doPictureDescription`: describe every picture — any format, PDF figures
+  and image inputs included — through an OpenAI-compatible vision endpoint
+  (#670); the answer is the picture's description annotation, where
+  `doPictureOcr` puts its text. `pictureDescriptionEndpoint` / `Model` /
+  `ApiKey` fall back to the `vlm*` options, then `DOCLING_RS_VLM_*`;
+  `pictureDescriptionMode` is `"caption"` (MarkItDown's caption prompt) or
+  `"ocr"` (markitdown-ocr's text-extraction prompt); `pictureDescriptionPrompt`
+  overrides it; `pictureDescriptionConcurrency` pictures are in flight at
+  once. Endpoint errors warn; the conversion goes on.
+- `redactPii`: redact personal data from the converted document before any
+  output (#621, a docling.rs extension) — e-mail, phone, card numbers (Luhn),
+  IBANs (mod-97), IP addresses, URL credentials, national IDs and, with the
+  NER model under `.models/ner/`, names / organizations / locations; every
+  string of the document model is rewritten, so Markdown, JSON, DCLX and
+  chunks come out clean. `redactMode` (`"label"` | `"pseudonym"` |
+  `"fixed:<text>"`), `redactKinds` (comma-separated), `redactPattern`
+  (`NAME=REGEX` lines) and `redactImages` (`"drop"` | `"box_out"` | `"keep"`)
+  tune it; the result's `redaction` is the counts per label. Also read by
+  `new Pipeline()`.
 - `asrModel` / `asrLang`: Whisper model preset and transcription language
   (`"auto"` default) for audio/video sources.
 - `encoding`: character encoding of text inputs (Markdown, CSV, AsciiDoc,
   WebVTT, XML, …) — docling's `TextBackendOptions.encoding`, a WHATWG label
   such as `"shift_jis"` or `"koi8-r"`. Unset detects (BOM, UTF-8, then
   windows-1252); bytes the named encoding cannot decode fail the conversion.
+- `ipynbOutputs`: Jupyter notebooks (#673) — `"none"` (default: the notebook
+  as written; markdown cells, code cells as code items in the kernel's
+  language, raw cells as code blocks) or `"text"` (stream and `text/plain`
+  results as code blocks after their cell, image outputs as pictures).
 - `videoFrames`: max frames sampled from a video input as timestamped pictures
-  (`0` = transcript only; default 8, needs ffmpeg at runtime).
+  (`0` = transcript only; default 8, needs ffmpeg at runtime; `4294967295` =
+  every distinct cut, #647).
+- `videoSceneThreshold` / `videoFrameMaxSide` / `videoFrameDedupe` (#647):
+  ffmpeg's scene score a frame must exceed to be a cut (0.27; 0.6 keeps hard
+  cuts only), a cap on each frame's longer side applied inside ffmpeg (0 =
+  source size), and the difference-hash distance (0–64) under which a frame
+  is a duplicate of a kept one and dropped (unset = keep all; 4–6 collapses a
+  re-lit slide). Frames stream one at a time through `doPictureOcr` +
+  `keepPictureImages: false`, so a long lecture costs one frame of memory.
 - `pipeline`: `"standard"` (default) or `"vlm"` — convert PDF/image pages
   through a remote vision endpoint instead of the ONNX stack (#77). See
   [VLM pipeline](#vlm-pipeline-remote-endpoint). The five `vlm*` options below

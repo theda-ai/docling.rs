@@ -123,11 +123,14 @@ impl DeclarativeBackend for WpdBackend {
                 }
             )));
         }
+        // Typed as not decryptable (#636): the WordPerfect cipher is not
+        // implemented, so a password would not help; the wording stays.
         if p.encrypted {
-            return Err(ConversionError::Parse(
-                "wpd: password-protected WordPerfect document (encrypted documents are not \
-                 supported)"
-                    .into(),
+            return Err(ConversionError::encrypted_with_message(
+                "wpd",
+                crate::EncryptionError::NotDecryptable("WordPerfect encryption".into()),
+                "password-protected WordPerfect document (encrypted documents are not \
+                 supported)",
             ));
         }
         let body = bytes.get(p.doc_area..).ok_or_else(|| {
@@ -1457,8 +1460,15 @@ mod tests {
         assert!(e.contains("not a WordPerfect document"), "{e}");
         let mut enc = wp6(b"x");
         enc[12] = 1;
-        let e = convert(enc).unwrap_err().to_string();
+        let err = convert(enc).unwrap_err();
+        let e = err.to_string();
         assert!(e.contains("password-protected"), "{e}");
+        // Typed (#636), and not something a password would solve.
+        let kind = err.encryption().expect("typed");
+        assert!(
+            matches!(kind, crate::EncryptionError::NotDecryptable(_)) && !kind.needs_password(),
+            "{kind:?}"
+        );
         let mut mac = wp6(b"x");
         mac[9] = 44;
         let e = convert(mac).unwrap_err().to_string();

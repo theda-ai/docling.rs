@@ -311,6 +311,7 @@ fn convert_dbf(d: &[u8], doc: &mut DoclingDocument) -> Result<(), ConversionErro
         cells: None,
         caption: None,
         caption_parent: Default::default(),
+        caption_location: None,
     }));
     Ok(())
 }

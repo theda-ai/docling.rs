@@ -65,6 +65,9 @@ enum El {
     },
     Image {
         title: String,
+        /// The destination (`![alt](dest)`), resolved to bytes under the
+        /// image policy (#646).
+        dest: String,
         children: Vec<El>,
     },
     CodeSpan(String),
@@ -114,20 +117,64 @@ fn parse(text: &str) -> El {
         .collect();
     let mut events: Vec<Event> = Vec::with_capacity(raw.len());
     let mut k = 0;
+    // Where the previous event's source ended: a text event starting one
+    // byte later, behind a backslash, is a resolved escape whose source
+    // range no longer shows the backslash.
+    let mut prev_end = 0usize;
     while k < raw.len() {
         if matches!(raw[k].0, Event::Text(_)) {
             let mut merged = String::new();
             let mut end = raw[k].1.start;
+            let run_escaped =
+                raw[k].1.start == prev_end + 1 && text.as_bytes().get(prev_end) == Some(&b'\\');
+            if run_escaped {
+                // pulldown hands the escaped character over glued to the text
+                // that follows it; marko keeps it as a `Literal` node of its
+                // own, so it is split off here. An escaped `|` is content the
+                // row buffer could not tell from a cell delimiter: like
+                // docling's `_escape_pipes` (docling#4313) it is carried as
+                // `&#124;` and decoded once the cell is split off (or the run
+                // turns out to be text).
+                if let Some((Event::Text(t), range)) = raw.get(k) {
+                    let mut chars = t.chars();
+                    if let Some(first) = chars.next() {
+                        events.push(Event::Text(
+                            if first == '|' {
+                                "&#124;".to_string()
+                            } else {
+                                first.to_string()
+                            }
+                            .into(),
+                        ));
+                        merged.push_str(chars.as_str());
+                        end = range.end;
+                        k += 1;
+                    }
+                }
+            }
             while let Some((Event::Text(t), range)) = raw.get(k) {
                 if range.start != end {
                     break;
                 }
-                merged.push_str(t);
+                // A character reference pulldown resolved (its source is not
+                // its text) spelling a `|` — `&#x7C;`, `&verbar;` — is content
+                // too (docling#4371, `_unescape_except_pipe`): carried encoded
+                // like the escaped pipe above.
+                let reference = text.get(range.clone()).is_some_and(|src| src != &**t);
+                if reference && t.contains('|') {
+                    merged.push_str(&t.replace('|', "&#124;"));
+                } else {
+                    merged.push_str(t);
+                }
                 end = range.end;
                 k += 1;
             }
-            events.push(Event::Text(merged.into()));
+            prev_end = end;
+            if !merged.is_empty() {
+                events.push(Event::Text(merged.into()));
+            }
         } else {
+            prev_end = raw[k].1.end;
             events.push(raw[k].0.clone());
             k += 1;
         }
@@ -256,8 +303,11 @@ fn parse_container(tag: Tag, events: &[Event], i: &mut usize, depth: u16) -> El 
             dest: dest_url.to_string(),
             children: parse_children(events, i, depth),
         },
-        Tag::Image { title, .. } => El::Image {
+        Tag::Image {
+            title, dest_url, ..
+        } => El::Image {
             title: title.to_string(),
+            dest: dest_url.to_string(),
             children: parse_children(events, i, depth),
         },
         _ => El::Other(parse_children(events, i, depth)),
@@ -294,6 +344,23 @@ fn inline_text(el: &El, out: &mut String) {
 }
 
 /// `_split_table_row`: an empty edge field comes from an edge pipe and is dropped.
+/// docling's `_unescape_except_pipe`: character references decode, except
+/// every spelling of `|`, which stays encoded so it is not taken for a cell
+/// delimiter.
+fn unescape_except_pipe(text: &str) -> String {
+    cached_regex!(r"&#?\w+;")
+        .replace_all(text, |caps: &regex::Captures| {
+            let entity = &caps[0];
+            let decoded = unescape_entities(entity);
+            if decoded == "|" {
+                entity.to_string()
+            } else {
+                decoded
+            }
+        })
+        .into_owned()
+}
+
 fn split_table_row(row: &str) -> Vec<String> {
     let mut cells: Vec<&str> = row.split('|').collect();
     if cells.first().is_some_and(|c| c.trim().is_empty()) {
@@ -346,7 +413,9 @@ enum Pending {
     ListItem { enumerated: bool, marker: String },
 }
 
-struct Walker {
+struct Walker<'a> {
+    /// Resolves an image's destination to its bytes (#646).
+    images: &'a dyn super::images::ImageResolver,
     tree: ItemTree,
     in_table: bool,
     in_pipeless_table: bool,
@@ -363,9 +432,13 @@ struct Walker {
 
 /// Build docling's item tree for a Markdown document, or `None` when it holds
 /// a raw HTML block (see the module docs).
-pub(super) fn build_tree(text: &str) -> Option<ItemTree> {
+pub(super) fn build_tree(
+    text: &str,
+    images: &dyn super::images::ImageResolver,
+) -> Option<ItemTree> {
     let root = parse(text);
     let mut w = Walker {
+        images,
         tree: ItemTree::default(),
         in_table: false,
         in_pipeless_table: false,
@@ -403,7 +476,7 @@ fn text_kind(
     }
 }
 
-impl Walker {
+impl Walker<'_> {
     /// `_close_table`: the buffered `|` lines become one table on the body —
     /// row 0 the header, row 1 (the delimiter) skipped, the rest the body,
     /// every row cut or padded to the header's width (GFM), cells unescaped.
@@ -631,12 +704,13 @@ impl Walker {
                         .push(Pending::ListItem { enumerated, marker });
                 }
             }
-            El::Image { title, .. } => {
+            El::Image { title, dest, .. } => {
                 self.close_table();
                 // The `"title"` is the caption (on the body, like every
                 // `add_text` without a parent); the alt text runs are walked
-                // as the picture's children afterwards. No image payload:
-                // upstream fetches none by default.
+                // as the picture's children afterwards. The payload is what
+                // the image policy resolves the destination to (#646) —
+                // nothing by default, as upstream fetches none.
                 let mut captions = Vec::new();
                 if !title.is_empty() {
                     let cap = self.tree.add(
@@ -658,8 +732,9 @@ impl Walker {
                     None,
                     TreeKind::Picture {
                         captions,
-                        image: None,
+                        image: self.images.resolve(dest),
                         classification: None,
+                        description: None,
                         confidence: None,
                         chart: None,
                         dpi: None,
@@ -680,21 +755,28 @@ impl Walker {
                 hyperlink = Some(docling_href(dest));
             }
             El::Text(original) => {
-                let mut snippet = unescape_entities(original.trim());
+                let snippet = unescape_entities(original.trim());
+                // Any spelling of `|` — `\|`, `&#x7c;`, `&verbar;` — stays
+                // encoded while deciding whether the run is a table row
+                // (`_unescape_except_pipe`, docling#4371), so it cannot open
+                // a table or add a column; the cell is unescaped once split.
+                let except_pipe = unescape_except_pipe(original.trim());
                 let is_table_row = !snippet.is_empty()
                     && (self.in_pipeless_table
-                        || (snippet.contains('|')
+                        || (except_pipe.contains('|')
                             && (self.in_table || original.trim_start().starts_with('|'))));
                 if is_table_row {
                     self.in_table = true;
                 }
-                if self.in_table && !snippet.is_empty() {
+                if self.in_table && !original.is_empty() {
                     // Formatted cell content arrives as separate runs, each
-                    // appended to the row being buffered.
-                    snippet = original.trim().to_string();
+                    // appended to the row being buffered *unstripped*
+                    // (docling#4318): the space between `**C**` and `Cadre`
+                    // belongs to the cell, which is trimmed once split.
+                    let table_text = original.to_string();
                     match self.table_buffer.last_mut() {
-                        Some(last) => last.push_str(&snippet),
-                        None => self.table_buffer.push(snippet),
+                        Some(last) => last.push_str(&table_text),
+                        None => self.table_buffer.push(table_text),
                     }
                 } else if !snippet.is_empty() {
                     self.close_table();
@@ -857,7 +939,7 @@ mod tests {
     use docling_core::tree::TreeItem;
 
     fn tree(md: &str) -> ItemTree {
-        build_tree(md).expect("a tree")
+        build_tree(md, &super::super::images::NoFetch).expect("a tree")
     }
 
     fn label(it: &TreeItem) -> String {
@@ -868,6 +950,7 @@ mod tests {
             TreeKind::Table { .. } => "table".into(),
             TreeKind::Picture { .. } => "picture".into(),
             TreeKind::FieldRegion { .. } => "field_region".into(),
+            TreeKind::KeyValueGraph { .. } => "key_value_region".into(),
         }
     }
 
@@ -1006,14 +1089,14 @@ mod tests {
     /// no tree is built (the flat export stays).
     #[test]
     fn html_blocks_yield_no_tree() {
-        assert!(build_tree("para\n\n<div>hi</div>\n").is_none());
-        assert!(build_tree("para\n").is_some());
+        assert!(build_tree("para\n\n<div>hi</div>\n", &super::super::images::NoFetch).is_none());
+        assert!(build_tree("para\n", &super::super::images::NoFetch).is_some());
     }
 
     /// Deep nesting is cut off instead of overflowing the stack.
     #[test]
     fn deep_nesting_is_bounded() {
         let deep = ">".repeat(50_000) + " x\n";
-        assert!(build_tree(&deep).is_some());
+        assert!(build_tree(&deep, &super::super::images::NoFetch).is_some());
     }
 }

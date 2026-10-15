@@ -8,17 +8,27 @@
 //! orientation and reports the angle to un-rotate by, composing with the
 //! metadata normalization through the same [`PdfPage::unrotate`] machinery.
 //!
-//! There is no orientation model to run (the pipeline deliberately has no
-//! text-*detection* network — layout is the detector, and it is exactly what
-//! fails on a sideways page). Instead the recognizer itself is the judge, the
-//! classic OSD trick: segment the page into line crops (the pure-Rust
-//! projection segmentation OCR already uses), recognize a handful of the
-//! widest lines under each orientation hypothesis, and score each hypothesis
-//! by how much confident text falls out. Upright text decodes many characters
-//! at high confidence; sideways/upside-down text decodes few, badly. An
-//! upright page early-exits after scoring only its own hypothesis, so the
-//! common case pays a few small recognition runs; the probe count is capped,
-//! so cost does not grow with page density.
+//! There is no orientation model to run. Instead the recognizer itself is
+//! the judge, the classic OSD trick: take the page's text lines, recognize a
+//! handful of the widest under each orientation hypothesis, and score each
+//! hypothesis by how much confident text falls out. Upright text decodes
+//! many characters at high confidence; sideways/upside-down text decodes
+//! few, badly. An upright page early-exits after scoring only its own
+//! hypothesis, so the common case pays a few small recognition runs; the
+//! probe count is capped, so cost does not grow with page density.
+//!
+//! The lines come from the PP-OCR text detector when it is installed (#571):
+//! its boxes are real text runs, which upright read at the confidence a
+//! recognizer gives real text, and which rotated with the page into each
+//! hypothesis read as the garbage they then are — a clean signal. The
+//! projection strips the probe started with (#225) are the fallback without
+//! the detector: on a sparse form — fields spread over a baseline,
+//! handwriting, stamps, boxes — a strip spans several fields and reads at a
+//! confidence no better than garbage, and on 9 of FUNSD's 199 upright forms
+//! the vote then went to a rotation, losing most of their text. The decision
+//! also asks that the winner read *better*, not merely *more*: a rotated
+//! hypothesis must beat 0° in mean confidence by a margin, the "rotated page
+//! reads better than the original" check an upright page cannot fail.
 //!
 //! Scores are deterministic (single-threaded recognition, fixed probe
 //! selection), so pinned snapshots stay stable. Failures degrade to "assume
@@ -33,7 +43,8 @@ use image::RgbImage;
 
 use crate::layout::Region;
 use crate::ocr::OcrModel;
-use crate::ocr_prep::{prep_region_lines, PrepLine};
+use crate::ocr_det::DetBox;
+use crate::ocr_prep::{prep_region_lines, prep_region_lines_det, PrepLine};
 use crate::Recognizer;
 use docling_core::debug_log;
 
@@ -69,6 +80,13 @@ const UPRIGHT_CHARS: usize = 20;
 /// recognizer is noisy on garbage input, and a no-op must stay the default
 /// when the signal is thin.
 const OVERTURN: f32 = 1.2;
+/// ...and read more *confidently* than 0° by this much (#571): a page that
+/// really is rotated reads at garbage confidence upright and at text
+/// confidence in the right hypothesis — a wide gap — while an upright page
+/// whose strips read poorly (sparse forms, handwriting, stamps) gives every
+/// hypothesis about the same low confidence, and the character count alone
+/// then decided for a rotation.
+const CONF_MARGIN: f32 = 0.10;
 /// ...and clear this floor: a page whose *best* hypothesis still reads almost
 /// nothing (blank page, pure line-art) has no orientation evidence at all.
 const MIN_CHARS: usize = 8;
@@ -91,13 +109,13 @@ impl Score {
     }
 }
 
-/// Segment `img` into line crops and score the `PROBES` widest through the
-/// recognizer.
-fn probe(img: &RgbImage, ocr: &mut OcrModel) -> Result<Score, String> {
+/// Cut `img` into line crops — the detector's `boxes` (in `img` pixels) when
+/// there are any, the projection strips otherwise — and score the `PROBES`
+/// widest through the recognizer.
+fn probe(img: &RgbImage, ocr: &mut OcrModel, boxes: &[DetBox]) -> Result<Score, String> {
     // The whole page as one text region, in image-pixel "points" (scale 1.0):
-    // the same projection segmentation OCR uses per layout region, minus the
-    // layout model — which cannot be trusted on the very pages this pass is
-    // for.
+    // the same line prep OCR uses per layout region, minus the layout model
+    // — which cannot be trusted on the very pages this pass is for.
     let page = Region {
         label: "text",
         score: 1.0,
@@ -107,7 +125,11 @@ fn probe(img: &RgbImage, ocr: &mut OcrModel) -> Result<Score, String> {
         b: img.height() as f32,
     };
     let (_, mut lines) = crate::timing::timed("orient.prep", || {
-        prep_region_lines(img, std::slice::from_ref(&page), 1.0)
+        if boxes.is_empty() {
+            prep_region_lines(img, std::slice::from_ref(&page), 1.0)
+        } else {
+            prep_region_lines_det(img, std::slice::from_ref(&page), 1.0, boxes)
+        }
     });
     // Widest first — most characters per recognition run. Stable order (width,
     // then original index) keeps the selection deterministic.
@@ -125,22 +147,58 @@ fn probe(img: &RgbImage, ocr: &mut OcrModel) -> Result<Score, String> {
 /// (`0`/`90`/`180`/`270`); un-rotating by the returned angle makes it upright.
 /// Any internal failure returns 0 — the page converts as-is, exactly as it
 /// would have without this pass. The PP-OCR engine runs the four-way probe
-/// below; Tesseract (#460) asks its own OSD (`scale` is the px/pt of `img`,
-/// its dpi hint).
-pub(crate) fn detect(img: &RgbImage, ocr: &mut Recognizer, scale: f32) -> u16 {
+/// below on the text detector's `boxes` (in `img` pixels; empty = the
+/// projection strips); Tesseract (#460) asks its own OSD (`scale` is the
+/// px/pt of `img`, its dpi hint).
+pub(crate) fn detect(img: &RgbImage, ocr: &mut Recognizer, scale: f32, boxes: &[DetBox]) -> u16 {
     match ocr {
-        Recognizer::PpOcr(model) => detect_by_probe(img, model),
+        Recognizer::PpOcr(model) => detect_by_probe(img, model, boxes),
         Recognizer::Tesseract(t) => t.detect_orientation(img, scale).unwrap_or(0),
     }
 }
 
+/// `boxes` (in the pixels of a `w × h` image) as they land on that image
+/// un-rotated by `deg` — the `PdfPage::unrotate` convention: `rotate270` for
+/// 90, `rotate180`, `rotate90` for 270. A sideways line's tall narrow box
+/// comes out as the wide box the recognizer expects.
+pub(crate) fn rotate_boxes(boxes: &[DetBox], w: f32, h: f32, deg: u16) -> Vec<DetBox> {
+    boxes
+        .iter()
+        .map(|d| {
+            let (l, t, r, b) = match deg {
+                // rotate270 (90° counter-clockwise): (x, y) → (y, w − x).
+                90 => (d.t, w - d.r, d.b, w - d.l),
+                180 => (w - d.r, h - d.b, w - d.l, h - d.t),
+                // rotate90 (90° clockwise): (x, y) → (h − y, x).
+                270 => (h - d.b, d.l, h - d.t, d.r),
+                _ => (d.l, d.t, d.r, d.b),
+            };
+            // The quad's corners follow the same pixels (#666).
+            let point = |(x, y): (f32, f32)| match deg {
+                90 => (y, w - x),
+                180 => (w - x, h - y),
+                270 => (h - y, x),
+                _ => (x, y),
+            };
+            DetBox {
+                l,
+                t,
+                r,
+                b,
+                score: d.score,
+                quad: crate::ocr_det::order_corners(d.quad.map(point)),
+            }
+        })
+        .collect()
+}
+
 /// The recognize-four-ways probe, see the module docs.
-fn detect_by_probe(img: &RgbImage, ocr: &mut OcrModel) -> u16 {
+fn detect_by_probe(img: &RgbImage, ocr: &mut OcrModel, boxes: &[DetBox]) -> u16 {
     let fail = |e: String| {
         debug_log!("docling-pdf: orientation probe failed ({e}); assuming upright");
         0
     };
-    let s0 = match probe(img, ocr) {
+    let s0 = match probe(img, ocr, boxes) {
         Ok(s) => s,
         Err(e) => return fail(e),
     };
@@ -172,8 +230,9 @@ fn detect_by_probe(img: &RgbImage, ocr: &mut OcrModel) -> u16 {
             chars: 0,
         },
     );
+    let (w, h) = (img.width() as f32, img.height() as f32);
     for (deg, rotated) in &hypotheses {
-        let s = match probe(rotated, ocr) {
+        let s = match probe(rotated, ocr, &rotate_boxes(boxes, w, h, *deg)) {
             Ok(s) => s,
             Err(e) => return fail(e),
         };
@@ -188,13 +247,54 @@ fn detect_by_probe(img: &RgbImage, ocr: &mut OcrModel) -> u16 {
         }
     }
     // Overturn "upright" only on clear evidence: the winner must read real
-    // text (floors) *and* beat the 0° hypothesis by a margin.
+    // text (floors), beat the 0° hypothesis by a margin, *and* read more
+    // confidently than it (#571) — more characters at the same poor
+    // confidence is a sparse upright page, not a rotated one.
     if best_deg != 0
         && best.chars >= MIN_CHARS
         && best.mean_conf() >= MIN_CONF
         && best.weighted > OVERTURN * s0.weighted
+        && best.mean_conf() >= s0.mean_conf() + CONF_MARGIN
     {
         return best_deg;
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A box follows the pixels through each un-rotation: on a 100 × 60 image
+    /// the line at (10, 5)–(50, 15) lands where `rotate270` / `rotate180` /
+    /// `rotate90` put those pixels, and un-rotating by 0 is the identity.
+    #[test]
+    fn boxes_rotate_with_the_image() {
+        let bx = DetBox::rect(10.0, 5.0, 50.0, 15.0, 0.9);
+        let at = |deg: u16| {
+            let r = rotate_boxes(std::slice::from_ref(&bx), 100.0, 60.0, deg);
+            (r[0].l, r[0].t, r[0].r, r[0].b)
+        };
+        assert_eq!(at(0), (10.0, 5.0, 50.0, 15.0));
+        // rotate270: (x, y) → (y, 100 − x): x 10..50 → y 50..90, y 5..15 → x 5..15.
+        assert_eq!(at(90), (5.0, 50.0, 15.0, 90.0));
+        assert_eq!(at(180), (50.0, 45.0, 90.0, 55.0));
+        // rotate90: (x, y) → (60 − y, x): y 5..15 → x 45..55, x 10..50 → y 10..50.
+        assert_eq!(at(270), (45.0, 10.0, 55.0, 50.0));
+        // Pixel check: the image crate agrees on where a marked pixel goes.
+        let mut img = RgbImage::new(100, 60);
+        img.put_pixel(10, 5, image::Rgb([255, 0, 0]));
+        let r = rotate270(&img);
+        assert_eq!(
+            r.get_pixel(5, 89)[0],
+            255,
+            "rotate270 maps (10,5) → (5, 89)"
+        );
+        let r = rotate90(&img);
+        assert_eq!(
+            r.get_pixel(54, 10)[0],
+            255,
+            "rotate90 maps (10,5) → (54, 10)"
+        );
+    }
 }

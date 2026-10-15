@@ -192,6 +192,15 @@ fn is_checkbox_like(e: &scraper::node::Element) -> bool {
     is_input_checkbox_or_radio(e) || is_custom_checkbox(e)
 }
 
+/// upstream's `li.find(_BLOCK_TAGS) is not None`: whether a block-level tag
+/// sits anywhere below the element.
+fn has_block_descendant(el: ElementRef) -> bool {
+    el.descendants()
+        .skip(1)
+        .filter_map(ElementRef::wrap)
+        .any(|d| BLOCK_TAGS.contains(&d.value().name()))
+}
+
 /// upstream's `_is_checkbox_label_container`.
 fn is_checkbox_label_container(el: ElementRef) -> bool {
     has_class(el.value(), CHECKBOX_CONTAINER_CLASSES)
@@ -294,18 +303,15 @@ fn has_list_ancestor(elem: NodeRef<'_, HtmlNode>, boundary: NodeRef<'_, HtmlNode
 }
 
 /// upstream's `_get_cell_spans`: `colspan` / `rowspan`, each the leading
-/// digit run when the attribute starts with a digit, else 1 (so `"0"` is 0).
+/// digit run when the attribute starts with a digit, else 1, clamped to
+/// `[1, MAX_*SPAN]` — the same reading as the Markdown grid (`html.rs`), so
+/// a `rowspan="0"` keeps its slot in the JSON too (docling#4287, 2.129).
 fn cell_spans(cell: ElementRef) -> (usize, usize) {
-    let num = |attr: &str| -> usize {
-        let raw = cell.value().attr(attr).unwrap_or("1");
-        if raw.starts_with(|c: char| c.is_ascii_digit()) {
-            let digits: String = raw.chars().take_while(|c| c.is_ascii_digit()).collect();
-            digits.parse().unwrap_or(1)
-        } else {
-            1
-        }
-    };
-    (num("colspan"), num("rowspan"))
+    use super::html::{span_value, MAX_COLSPAN, MAX_ROWSPAN};
+    (
+        span_value(cell.value().attr("colspan"), MAX_COLSPAN),
+        span_value(cell.value().attr("rowspan"), MAX_ROWSPAN),
+    )
 }
 
 /// An `href` as docling's `AnnotatedText.hyperlink` serializes it: a URL
@@ -383,7 +389,11 @@ fn code_language_hint(pre: ElementRef) -> Option<String> {
 }
 
 /// Build docling's item tree for a parsed HTML document.
-pub(super) fn build_tree(parsed: &Html, images: &dyn ImageResolver) -> ItemTree {
+pub(super) fn build_tree(
+    parsed: &Html,
+    images: &dyn ImageResolver,
+    infer_furniture: bool,
+) -> ItemTree {
     let root = parsed.root_element();
     let mut w = Walker {
         tree: ItemTree::default(),
@@ -419,9 +429,10 @@ pub(super) fn build_tree(parsed: &Html, images: &dyn ImageResolver) -> ItemTree 
     let content = parsed.select(sel!("body")).next().unwrap_or(root);
     // `infer_furniture`: everything before the first heading (one not inside
     // a table) is site chrome on the furniture layer.
-    let has_header = content
-        .select(sel!("h1, h2, h3, h4, h5, h6"))
-        .any(|h| ancestor_named(*h, "table", None).is_none());
+    let has_header = infer_furniture
+        && content
+            .select(sel!("h1, h2, h3, h4, h5, h6"))
+            .any(|h| ancestor_named(*h, "table", None).is_none());
     w.layer = has_header.then_some(ContentLayer::Furniture);
     w.walk(content);
     w.tree
@@ -869,26 +880,12 @@ impl<'a> Walker<'a> {
                         .children()
                         .filter_map(ElementRef::wrap)
                         .find(|c| c.value().name() == "figcaption");
-                    if let Some(cap) = caption_tag {
-                        let parts = self.extract(*cap, false, true, false);
-                        let single = to_single(&parts);
-                        if !single.text.is_empty() {
-                            let text = clean_unicode(single.text.trim());
-                            let parent = self.parent();
-                            let cap_item = self.add_annotated(
-                                "caption",
-                                text,
-                                Some(single.text.clone()),
-                                single.formatting,
-                                single.hyperlink,
-                                parent,
-                            );
-                            if let Some(&first) = added.first() {
-                                if let TreeKind::Table { captions, .. } =
-                                    &mut self.tree.items[first].kind
-                                {
-                                    captions.push(cap_item);
-                                }
+                    if let Some(cap_item) = caption_tag.and_then(|cap| self.emit_caption(cap)) {
+                        if let Some(&first) = added.first() {
+                            if let TreeKind::Table { captions, .. } =
+                                &mut self.tree.items[first].kind
+                            {
+                                captions.push(cap_item);
                             }
                         }
                     }
@@ -948,6 +945,7 @@ impl<'a> Walker<'a> {
                         captions: Vec::new(),
                         image: None,
                         classification: Some(class_name),
+                        description: None,
                         confidence: None,
                         chart: None,
                         dpi: None,
@@ -1194,6 +1192,19 @@ impl<'a> Walker<'a> {
                 .filter(|c| is_custom_checkbox(c.value()))
                 .filter(|c| ancestor_named(**c, "li", None).is_some_and(|l| l.id() == li.id()))
                 .collect();
+            // GFM task-list form (docling#4401): bare checkbox input(s) plus
+            // inline text and no block content. The text belongs to the
+            // checkbox item(s), emitted under the list group — no list item.
+            let task_list = !inputs.is_empty()
+                && boxes.is_empty()
+                && inputs.iter().all(|i| is_input_checkbox_or_radio(i.value()))
+                && !has_block_descendant(li);
+            if task_list {
+                for input in &inputs {
+                    self.emit_input(*input);
+                }
+                continue;
+            }
             let item = self.add_list_item_with_content(li, list_group, is_ordered, &marker, None);
             if item.is_some() {
                 counter += 1;
@@ -1355,6 +1366,14 @@ impl<'a> Walker<'a> {
     /// stack preserved around it) and re-parented under a group of the table,
     /// every cell recorded with its declared spans and raw text.
     fn handle_table(&mut self, tag: ElementRef<'a>) -> usize {
+        // The table's own `<caption>` (non-recursive, so a nested table does
+        // not steal its ancestor's) is emitted first, under the current
+        // parent, and linked from the table (docling#4289).
+        let caption = tag
+            .children()
+            .filter_map(ElementRef::wrap)
+            .find(|c| c.value().name() == "caption")
+            .and_then(|cap| self.emit_caption(cap));
         let parent = self.parent();
         let table_id = self.tree.add(
             parent,
@@ -1362,7 +1381,7 @@ impl<'a> Walker<'a> {
             TreeKind::Table {
                 table: Table::default(),
                 rich_cells: Vec::new(),
-                captions: Vec::new(),
+                captions: caption.into_iter().collect(),
             },
         );
         // `thead` / `tbody` are unwrapped; a `tfoot`'s rows are not reached.
@@ -1600,11 +1619,32 @@ impl<'a> Walker<'a> {
                 captions,
                 image,
                 classification: None,
+                description: None,
                 confidence: None,
                 chart: None,
                 dpi: None,
             },
         )
+    }
+
+    /// upstream's `_emit_caption`: a `<caption>`/`<figcaption>` as a `caption`
+    /// text item under the current parent; `None` when it holds no text.
+    fn emit_caption(&mut self, cap: ElementRef<'a>) -> Option<usize> {
+        let parts = self.extract(*cap, false, true, false);
+        let single = to_single(&parts);
+        if single.text.trim().is_empty() {
+            return None;
+        }
+        let text = clean_unicode(single.text.trim());
+        let parent = self.parent();
+        Some(self.add_annotated(
+            "caption",
+            text,
+            Some(single.text.clone()),
+            single.formatting,
+            single.hyperlink,
+            parent,
+        ))
     }
 
     /// upstream's `_emit_input`.
@@ -1623,7 +1663,19 @@ impl<'a> Walker<'a> {
             } else {
                 "checkbox_unselected"
             };
-            (label, normalize_checkbox_text(&checkbox_label_text(input)))
+            let mut text = normalize_checkbox_text(&checkbox_label_text(input));
+            if text.is_empty() {
+                // GFM task-list form (docling#4401): a bare checkbox followed by
+                // sibling text inside its list item — that text is the
+                // checkbox's label. Only a plain `<li>` parent counts, so
+                // nested blocks cannot leak into the label.
+                if let Some(li) = input.parent().and_then(ElementRef::wrap) {
+                    if li.value().name() == "li" && !has_block_descendant(li) {
+                        text = normalize_checkbox_text(&li.text().collect::<String>());
+                    }
+                }
+            }
+            (label, text)
         } else {
             let text = ["value", "placeholder", "name"]
                 .iter()
@@ -1826,7 +1878,11 @@ mod tests {
     use docling_core::tree::TreeItem;
 
     fn tree(html: &str) -> ItemTree {
-        build_tree(&Html::parse_document(html), &super::super::images::NoFetch)
+        build_tree(
+            &Html::parse_document(html),
+            &super::super::images::NoFetch,
+            true,
+        )
     }
 
     fn label(it: &TreeItem) -> String {
@@ -1837,6 +1893,7 @@ mod tests {
             TreeKind::Table { .. } => "table".into(),
             TreeKind::Picture { .. } => "picture".into(),
             TreeKind::FieldRegion { .. } => "field_region".into(),
+            TreeKind::KeyValueGraph { .. } => "key_value_region".into(),
         }
     }
 
@@ -1910,11 +1967,15 @@ mod tests {
     #[test]
     fn cell_spans_follow_get_cell_spans() {
         let html = Html::parse_fragment(
-            r#"<table><tr><td colspan="3x" rowspan="0">a</td><td rowspan="x2">b</td></tr></table>"#,
+            r#"<table><tr><td colspan="3x" rowspan="0">a</td><td rowspan="x2">b</td>
+               <td colspan="99999999999999999999999" rowspan="70000">c</td></tr></table>"#,
         );
         let cells: Vec<ElementRef> = html.select(sel!("td")).collect();
-        assert_eq!(cell_spans(cells[0]), (3, 0));
+        // A zero span keeps one slot (docling#4287), not none.
+        assert_eq!(cell_spans(cells[0]), (3, 1));
         assert_eq!(cell_spans(cells[1]), (1, 1));
+        // Past HTML's limits: clamped, even past `usize`.
+        assert_eq!(cell_spans(cells[2]), (1000, 65_534));
     }
 
     /// The shape upstream gives a small page: the `<title>` and the prelude

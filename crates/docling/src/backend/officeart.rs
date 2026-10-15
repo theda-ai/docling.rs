@@ -84,16 +84,17 @@ pub(crate) fn is_blip(rec_type: u16) -> bool {
 /// then a tag byte, then the raw image bytes. Rather than hard-coding every
 /// instance value, the (small) set of plausible payload offsets is tried and
 /// validated by actually decoding the header — a wrong offset simply fails
-/// image sniffing. Metafile BLIPs (EMF/WMF/PICT) are compressed vector
-/// formats the `image` crate can't read; they yield `None` and the caller
-/// keeps the picture as a placeholder.
+/// image sniffing. EMF / WMF BLIPs are (usually deflated) metafiles,
+/// rendered to PNG through [`super::metafile`] (#536); a Mac PICT yields
+/// `None` and the caller keeps the picture as a placeholder.
 pub(crate) fn decode_blip(header: &RecordHeader, body: &[u8]) -> Option<PictureImage> {
     let mime = match header.rec_type {
         RT_BLIP_JPEG | RT_BLIP_JPEG2 => "image/jpeg",
         RT_BLIP_PNG => "image/png",
         RT_BLIP_TIFF => "image/tiff",
         RT_BLIP_DIB => "image/bmp",
-        _ => return None, // metafiles: placeholder
+        RT_BLIP_EMF | RT_BLIP_WMF => return decode_metafile_blip(header, body),
+        _ => return None, // PICT: placeholder
     };
     for uid_len in [16usize, 32] {
         let Some(rest) = body.get(uid_len + 1..) else {
@@ -114,6 +115,39 @@ pub(crate) fn decode_blip(header: &RecordHeader, body: &[u8]) -> Option<PictureI
         }
     }
     None
+}
+
+/// A metafile BLIP ([MS-ODRAW] 2.2.24 / 2.2.25): one or two 16-byte UIDs
+/// (per the low instance bit), then a 34-byte `OfficeArtMetafileHeader` —
+/// `cbSize` (uncompressed size), `rcBounds`, `ptSize` (the picture size in
+/// EMUs), `cbSave`, `compression` (0 = deflate, 0xFE = none), `filter` —
+/// then the metafile. A WMF BLIP drops the placeable header, so `ptSize` is
+/// what sizes it.
+fn decode_metafile_blip(header: &RecordHeader, body: &[u8]) -> Option<PictureImage> {
+    use std::io::Read as _;
+    let uid_len = 16 * (1 + usize::from(header.instance & 1));
+    let mh = body.get(uid_len..uid_len + 34)?;
+    let le32 = |at: usize| u32::from_le_bytes([mh[at], mh[at + 1], mh[at + 2], mh[at + 3]]);
+    let size = le32(0) as usize;
+    let (cx, cy) = (le32(20) as i32, le32(24) as i32);
+    let saved = body.get(uid_len + 34..)?;
+    let saved = &saved[..saved.len().min(le32(28) as usize)];
+    let data = match mh[32] {
+        0 => {
+            // `cbSize` bounds the inflate: a crafted header cannot make it
+            // allocate more than the record claims.
+            let mut out = Vec::with_capacity(size.min(64 << 20));
+            flate2::read::ZlibDecoder::new(saved)
+                .take(size.min(256 << 20) as u64)
+                .read_to_end(&mut out)
+                .ok()?;
+            out
+        }
+        _ => saved.to_vec(),
+    };
+    // 9525 EMU per pixel at 96 dpi.
+    let hint = (cx > 0 && cy > 0).then(|| (f64::from(cx) / 9525.0, f64::from(cy) / 9525.0));
+    super::metafile::render(&data, hint)
 }
 
 /// Wrap headerless DIB bytes in a BMP file header and decode.
@@ -206,5 +240,49 @@ mod tests {
         };
         let img = decode_blip(&h, &body).expect("decodes");
         assert_eq!((img.width, img.height), (1, 1));
+    }
+
+    /// A Word 97 WMF BLIP (no placeable header, sized by `ptSize`) behind
+    /// two UIDs, deflated and stored.
+    #[cfg(feature = "pdf")]
+    #[test]
+    fn decode_blip_renders_metafiles() {
+        use std::io::Write as _;
+        let wmf = crate::backend::metafile::tests::wmf(
+            None,
+            &crate::backend::metafile::tests::wmf_body(),
+        );
+        let deflated = {
+            let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+            z.write_all(&wmf).unwrap();
+            z.finish().unwrap()
+        };
+        for (compression, saved) in [(0u8, &deflated), (0xFE, &wmf)] {
+            let mut body = vec![0u8; 32]; // rgbUid1 + rgbUid2 (odd instance)
+            body.extend_from_slice(&(wmf.len() as u32).to_le_bytes());
+            body.extend_from_slice(&[0; 16]); // rcBounds
+            body.extend_from_slice(&(120 * 9525u32).to_le_bytes());
+            body.extend_from_slice(&(60 * 9525u32).to_le_bytes());
+            body.extend_from_slice(&(saved.len() as u32).to_le_bytes());
+            body.extend_from_slice(&[compression, 0xFE]);
+            body.extend_from_slice(saved);
+            let h = RecordHeader {
+                version: 0,
+                instance: 0x217,
+                rec_type: RT_BLIP_WMF,
+            };
+            let img = decode_blip(&h, &body).expect("renders");
+            assert_eq!(
+                (img.mimetype.as_str(), img.width, img.height),
+                ("image/png", 120, 60)
+            );
+        }
+        // A PICT stays a placeholder.
+        let h = RecordHeader {
+            version: 0,
+            instance: 0x542,
+            rec_type: RT_BLIP_PICT,
+        };
+        assert!(decode_blip(&h, &[0; 64]).is_none());
     }
 }

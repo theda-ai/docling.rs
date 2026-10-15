@@ -1,7 +1,7 @@
 //! `convert_text_layer` (the `pdf-text` / wasm32 path) must produce the same
 //! extraction as the full pipeline's `no_ocr` flag: both run the pure-Rust
-//! text parser through the orphan-region assembly, differing only in how the
-//! page is opened (lopdf vs pdfium). Runs under the default (ml) feature so
+//! text parser through the orphan-region assembly, differing only in the
+//! entry point. Runs under the default (ml) feature so
 //! both entries exist to compare. (The scanned-table e2e below shares this
 //! binary rather than its own: every docling-pdf test target statically links
 //! onnxruntime, so one target carries all the pipeline e2es.)
@@ -16,18 +16,9 @@ fn text_layer_matches_no_ocr() {
     ))
     .expect("corpus pdf");
 
-    // Tests run with CWD = the crate dir; point the pdfium loader at the
-    // checkout's `.pdfium/lib` (the no_ocr side still opens pages via pdfium).
-    if std::env::var("PDFIUM_DYNAMIC_LIB_PATH").is_err() {
-        std::env::set_var(
-            "PDFIUM_DYNAMIC_LIB_PATH",
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../../.pdfium/lib"),
-        );
-    }
-
     let text_layer = docling_pdf::convert_text_layer(&bytes, "code_and_formula.pdf")
         .expect("text-layer conversion");
-    let no_ocr = match docling_pdf::convert_with_options(
+    let no_ocr = docling_pdf::convert_with_options(
         &bytes,
         None,
         "code_and_formula.pdf",
@@ -38,17 +29,8 @@ fn text_layer_matches_no_ocr() {
         docling_pdf::EnrichmentOptions::default(),
         None,
         None,
-    ) {
-        Ok(doc) => doc,
-        // The comparison baseline needs the pdfium shared library, which CI's
-        // model-free test job doesn't have — the equivalence claim is only
-        // checkable where a full local setup exists (scripts/dev/pdfium.sh).
-        Err(docling_pdf::PdfError::Pdfium(e)) if e.contains("LoadLibraryError") => {
-            eprintln!("skipping equivalence check: pdfium unavailable ({e})");
-            return;
-        }
-        Err(e) => panic!("no_ocr conversion: {e:?}"),
-    };
+    )
+    .expect("no_ocr conversion");
 
     let a = text_layer.export_to_markdown();
     assert!(!a.trim().is_empty(), "text layer should extract");
@@ -60,16 +42,13 @@ fn text_layer_matches_no_ocr() {
 /// gate) and the table must extract with its OCR'd cell text — region-scoped
 /// OCR skips table interiors, so the words come from the dedicated
 /// `ocr_table_words` pass; without it the cell matcher saw no words and the
-/// table dissolved. Needs pdfium + the layout/OCR/TableFormer models, so it
-/// skips (like the pdfium skip above) on a model-free CI checkout.
+/// table dissolved. Needs the layout/OCR/TableFormer models, so it skips on a
+/// model-free CI checkout.
 #[test]
 fn scanned_page_extracts_table_and_keeps_chart() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    if std::env::var("PDFIUM_DYNAMIC_LIB_PATH").is_err() {
-        std::env::set_var("PDFIUM_DYNAMIC_LIB_PATH", root.join(".pdfium/lib"));
-    }
+    // The page renders through the pure-Rust raster; pdfium is not needed.
     for needed in [
-        ".pdfium/lib/libpdfium.so",
         ".models/layout_heron_int8.onnx",
         ".models/ocr_rec_en.onnx",
         ".models/tableformer/encoder.onnx",
@@ -107,10 +86,17 @@ fn scanned_page_extracts_table_and_keeps_chart() {
 
 #[test]
 fn scanned_pdf_yields_empty_document() {
-    // No content stream at all — the no-text-layer contract is an empty doc,
-    // not an error (callers decide whether to fall back to OCR).
-    let doc = docling_pdf::convert_text_layer(b"%PDF-1.4\n%%EOF", "scan.pdf").expect("no error");
+    // An image-only page — the no-text-layer contract is an empty doc, not
+    // an error (callers decide whether to fall back to OCR).
+    let scan = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/data/scanned/sources/ocr_test_raster.pdf"),
+    )
+    .unwrap();
+    let doc = docling_pdf::convert_text_layer(&scan, "scan.pdf").expect("no error");
     assert!(doc.nodes.is_empty());
+    // (Bytes no reader opens are an error, not an empty document:
+    // `lib.rs`'s `text_layer_path_reports_an_unreadable_file`.)
 }
 
 /// #211: HEIC is detected by content, and without the `heif` feature the
@@ -126,4 +112,47 @@ fn heif_without_feature_reports_clearly() {
     assert!(msg.contains("--features heif"), "unexpected error: {msg}");
     #[cfg(feature = "heif")]
     assert!(msg.contains("heif"), "unexpected error: {msg}");
+}
+
+/// #517: ONNX Runtime 1.26–1.28's x86 NCHWc rewrite collapsed the picture
+/// classifier onto one distribution for every input (`table` 0.091 first).
+/// Three unambiguous figures from the corpus must each win their own class
+/// clearly (ONNX Runtime 1.29 gives them 0.985–0.999; the bar is 0.9).
+#[test]
+fn picture_classifier_tells_pictures_apart() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let model = root.join(".models/picture_classifier.onnx");
+    if !model.exists() {
+        eprintln!(
+            "skipping picture-classifier check: {} not found",
+            model.display()
+        );
+        return;
+    }
+    std::env::set_var("DOCLING_PICTURE_CLASSIFIER_ONNX", &model);
+    let mut classifier =
+        docling_pdf::enrich::PictureClassifier::load_with(1).expect("classifier loads");
+    for (file, class) in [
+        (
+            "latex/sources/2310.06825/images/230927_bars.png",
+            "bar_chart",
+        ),
+        (
+            "latex/sources/1706.03762/Figures/ModalNet-21.png",
+            "flow_chart",
+        ),
+        ("scanned/sources/qr_bill_example.jpg", "qr_code"),
+    ] {
+        let img = image::open(root.join("tests/data").join(file))
+            .expect("fixture image")
+            .to_rgb8();
+        let preds = classifier.classify(&img).expect("classify");
+        let top = &preds[0];
+        assert!(
+            top.class_name == class && top.confidence > 0.9,
+            "{file}: expected {class}, got {} {:.3}",
+            top.class_name,
+            top.confidence
+        );
+    }
 }

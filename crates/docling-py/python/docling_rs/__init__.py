@@ -33,11 +33,12 @@ Declarative formats (DOCX/HTML/XLSX/…) need no models at all.
 from __future__ import annotations
 
 import enum
+import io
 import os
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, Optional, Union
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple, Union
 
 from docling_core.types.doc import DoclingDocument, ImageRefMode
 
@@ -63,17 +64,38 @@ from . import chunking
 # (Deliberately NO ctypes preload here: loading the provider libraries with
 # RTLD_GLOBAL before the static ORT inside `_native` initializes duplicates
 # ORT symbols process-wide and segfaulted at session creation in testing.)
-from ._native import ConversionError, __version__
+from ._native import (
+    ConversionError,
+    EncryptionError,
+    PasswordRequiredError,
+    WrongPasswordError,
+    __version__,
+)
 from ._native import DocumentConverter as _NativeDocumentConverter
+from ._native import compiled_providers as _compiled_providers
+from ._native import email_attachments as _email_attachments
+
+#: ``video_frames`` meaning "every distinct cut" (#647) — ``video_frames="all"``
+#: spells the same.
+VIDEO_FRAMES_ALL = 2**64 - 1
 
 __all__ = [
     "DocumentConverter",
+    "VIDEO_FRAMES_ALL",
     "ConversionResult",
+    "ArchiveItem",
     "ConversionStatus",
+    "ErrorItem",
     "ConversionError",
+    "EncryptionError",
+    "PasswordRequiredError",
+    "WrongPasswordError",
     "InputDocument",
     "DoclingDocument",
     "ImageRefMode",
+    # email attachment payloads (.eml / .msg)
+    "EmailAttachment",
+    "email_attachments",
     # docling-shaped configuration
     "InputFormat",
     "DocumentStream",
@@ -105,21 +127,66 @@ class ConversionStatus(str, enum.Enum):
 
 
 @dataclass(frozen=True)
+class ArchiveItem:
+    """One entry of a ZIP archive converted with
+    :meth:`DocumentConverter.convert_archive` (#557). ``outcome`` is
+    ``"converted"`` (``result`` holds the :class:`ConversionResult`),
+    ``"skipped"`` (``error`` says why: unsupported type, nested archive,
+    unsafe path, over a ``DOCLING_RS_ZIP_MAX_*`` limit) or ``"failed"``
+    (``error`` is the conversion error — the other entries are unaffected)."""
+
+    path: str
+    outcome: str
+    result: Optional["ConversionResult"] = None
+    error: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class InputDocument:
     """docling's ``ConversionResult.input`` shim: the source's file name/path."""
 
     file: Path
 
 
+@dataclass(frozen=True)
+class ErrorItem:
+    """docling's ``ErrorItem``: one recorded problem of a conversion that still
+    produced a document (``component_type``, ``module_name``,
+    ``error_message``). Today the one recorded problem is a spent
+    ``document_timeout`` (#497)."""
+
+    component_type: str
+    module_name: str
+    error_message: str
+
+
 class ConversionResult:
     """docling's ``ConversionResult``: ``.document`` (a genuine
-    :class:`~docling_core.types.doc.DoclingDocument`), ``.status`` and
-    ``.input``."""
+    :class:`~docling_core.types.doc.DoclingDocument`), ``.status``,
+    ``.input`` and ``.errors`` (non-empty exactly when the status is
+    ``PARTIAL_SUCCESS``). ``.redaction`` (a docling.rs extension, #621) is
+    the PII pass's counts per label — ``{"EMAIL": 2, "PHONE": 1}`` — when
+    the converter was built with ``redact_pii=True``, else ``None``."""
 
-    def __init__(self, status: str, input_name: str, document: DoclingDocument):
+    def __init__(
+        self,
+        status: str,
+        input_name: str,
+        document: DoclingDocument,
+        errors: Iterable[ErrorItem] = (),
+        redaction: Optional[Dict[str, int]] = None,
+    ):
         self.status = ConversionStatus(status)
         self.document = document
         self.input = InputDocument(file=Path(input_name))
+        self.errors = list(errors)
+        self.redaction = dict(redaction) if redaction is not None else None
+
+
+def _is_api_options(pd: Any) -> bool:
+    """docling's ``PictureDescriptionApiOptions`` (ours, or docling's own):
+    anything with a ``url`` and no Python-side describer."""
+    return pd is not None and hasattr(pd, "url") and not hasattr(pd, "_annotate_images")
 
 
 class DocumentConverter:
@@ -139,13 +206,51 @@ class DocumentConverter:
       assembly (docling's ``HeadingHierarchyModel``, #302 — bookmarks >
       numbering > font style). Also accepted docling-shaped, via
       ``pipeline_options.heading_hierarchy_options.enabled``.
-    * ``fetch_images`` — resolve remote/local ``<img src>`` for HTML/EPUB.
+    * ``fetch_images`` — resolve remote/local ``<img src>`` for HTML/EPUB
+      (the alias of ``image_sources="remote"``; #646).
+    * ``image_sources`` — which image references resolve (#646): ``"none"``
+      (default — every picture a placeholder), ``"embedded"`` (``data:`` URIs
+      and parts of the same container: EPUB/MHTML entries, an email's
+      ``cid:`` attachments — no filesystem, no network), ``"local"`` (plus
+      files under the source file's directory, never an absolute path or one
+      that escapes it), ``"remote"`` (plus ``http(s)`` fetches). HTML, EPUB,
+      MHTML, JATS, AsciiDoc, ODF, Markdown (``![…](data:…)`` and inline
+      ``<img>``) and email bodies (``cid:`` images, in body order).
+    * ``image_hosts`` — hosts a ``remote`` image fetch may reach (a list or a
+      comma-separated string; exact names or ``*.suffix`` wildcards); redirects
+      are held to the same list. Default: any host.
+    * ``max_image_bytes`` / ``max_images`` / ``max_image_total_mb`` /
+      ``min_image_bytes`` — the per-document image limits (#646): the largest
+      image that resolves (32 MiB), how many resolve (unlimited), their total
+      in MiB (unlimited), the smallest that resolves (0 — raise it to skip
+      spacer / tracking pixels). Over a limit a picture stays a placeholder;
+      the conversion never fails. Defaults come from ``DOCLING_RS_MAX_IMAGE_BYTES``,
+      ``DOCLING_RS_MAX_IMAGES``, ``DOCLING_RS_MAX_IMAGE_TOTAL_MB``,
+      ``DOCLING_RS_MIN_IMAGE_BYTES``.
     * ``use_web_browser`` — render HTML via headless Chrome before parsing.
     * ``ocr_mode`` / ``ocr_scale`` — docling 2.116's ``OcrMode`` (which regions
       feed the OCR; ``"full_page"``/``"layout_regions"`` discard the embedded
       text layer) and ``OcrOptions.scale`` (OCR input resolution in px per PDF
       point), #254. Also accepted docling-shaped, via
       ``pipeline_options.ocr_options.mode`` / ``.scale``.
+    * ``ocr_textline_orientation`` — RapidOCR's text-line orientation
+      handling (#666): detected lines cropped along their rotated rectangle,
+      tall crops turned 90°, upside-down lines turned by the 0/180 classifier
+      (``.models/ocr_textline_ori.onnx``). ``None`` = off unless
+      ``DOCLING_RS_OCR_TEXTLINE_ORIENTATION`` is set; docling's
+      ``RapidOcrOptions.use_cls`` (when set) maps onto it.
+    * ``picture_ocr_scale`` — with ``do_picture_ocr``, the pictures' OCR
+      resolution in px per picture pixel under RapidOCR's 2000 px cap (#666):
+      ``1.0`` reads them at their native pixels; ``None`` keeps the
+      image-input rule.
+    * ``do_picture_description`` + ``picture_description_endpoint`` /
+      ``_model`` / ``_api_key`` / ``_prompt`` / ``_mode`` (``"caption"`` |
+      ``"ocr"``) / ``_concurrency`` (#670) — describe every picture of any
+      format through an OpenAI-compatible vision endpoint; the answer is the
+      picture's ``meta.description``. Endpoint, model and key fall back to
+      the ``vlm_*`` kwargs, then ``DOCLING_RS_VLM_*``. docling's
+      ``PictureDescriptionApiOptions`` on the pipeline options maps onto
+      these.
     * ``ocr_engine`` — which OCR engine reads scanned pages (#460):
       ``"ppocr"`` (default, the built-in PP-OCRv3 recognizer) or
       ``"tesseract"`` (the system ``tesseract`` binary, docling's
@@ -169,8 +274,41 @@ class DocumentConverter:
       ``prov.page_no`` in the engine's JSON (PDF and DjVu pages, slides, sheets); the
       engine-side ``--page-break-placeholder`` of the CLI / serve / Node is
       not a kwarg of this wrapper.
+    * ``text_layer_only`` — skip the whole PDF ML stack and read the embedded
+      text layer only (the docling.rs fast path behind the CLI's ``--text-layer-only``).
+    * ``list_attachments`` — email (.eml/.msg): append an Attachments section
+      with names and content types (#251; the payload is never embedded).
+    * ``ebcdic_layout`` — EBCDIC (#252): the copybook layout, inline
+      ``EbcdicLayout`` JSON or a file path (default: the ``<stem>.layout.json``
+      sidecar next to the source).
+    * ``video_frames`` — max frames sampled from a video (0 = transcript only;
+      needs the ``ffmpeg`` binary); default 8. ``"all"`` (or
+      :data:`VIDEO_FRAMES_ALL`) keeps every distinct cut (#647).
+    * ``video_scene_threshold`` — ffmpeg's scene score (0–1) a frame must
+      exceed to count as a cut (#647); default 0.27, 0.6 keeps hard cuts only.
+    * ``video_frame_max_side`` — downscale each sampled frame inside ffmpeg
+      so its longer side is at most this many px (#647); 0 / ``None`` = the
+      source resolution.
+    * ``video_frame_dedupe`` — drop a sampled frame whose 64-bit difference
+      hash is within this Hamming distance (0–64) of a frame already kept
+      (#647): the same slide after a fade becomes one picture. ``None`` =
+      keep every frame; 4–6 is a good distance.
+    * ``xbrl_taxonomy`` — XBRL: the directory the instance's taxonomy is read
+      from (docling's ``XBRLBackendOptions.taxonomy``); default: the instance's
+      own directory.
+      These five reached the native class before but not this wrapper; every
+      surface now shares one option set (#577, ``docs/OPTIONS.md``).
     * ``allowed_formats`` — restrict conversion to these :class:`InputFormat`\\ s
       (docling's converter arg); a source of any other format raises.
+    * ``asr_model`` — the speech-recognition model for audio/video, by preset
+      name (docling's ``asr_model_specs``): ``None`` / ``"whisper_tiny"``
+      (default, multilingual Whisper tiny), ``"whisper_tiny_en"``,
+      ``"whisper_base_en"``, ``"whisper_small_en"``,
+      ``"whisper_distil_small_en"``, or ``"parakeet_tdt_0.6b_v3"`` (NVIDIA
+      Parakeet TDT 0.6B v3: 25 European languages detected per utterance,
+      ``asr_lang`` does not apply). Fetch the files once with
+      ``download_models(asr_model=…)``; an unknown name, or a preset whose
+      files are missing, fails the conversion with a message naming them.
     * ``asr_lang`` — transcription language for audio/video: a Whisper code
       (``"en"``, ``"de"``, …) or ``"auto"`` (default) to detect it from the
       first 30 seconds (docling 2.116 parity).
@@ -179,6 +317,11 @@ class DocumentConverter:
       (``MarkdownBackendOptions(encoding="shift_jis")``), a WHATWG label or
       Python codec name. ``None`` (default) detects — BOM, UTF-8, then
       windows-1252; bytes the requested encoding cannot decode raise.
+    * ``ipynb_outputs`` — Jupyter notebooks (#673): ``"none"`` (default,
+      the notebook as written — markdown cells, code cells as code items in
+      the kernel's language, raw cells as code blocks) or ``"text"`` (stream
+      and ``text/plain`` results as code blocks after their cell, image
+      outputs as pictures).
     * ``pipeline`` — ``"standard"`` (default) or ``"vlm"`` (#304): convert
       PDF / image inputs by sending each page to a remote OpenAI-compatible
       vision model instead of the local ML stack (no models needed). The
@@ -188,6 +331,33 @@ class DocumentConverter:
       construction); ``vlm_api_key`` (Bearer token), ``vlm_prompt`` and
       ``vlm_max_tokens`` (default 8192) are optional. With
       ``pipeline="standard"`` the ``vlm_*`` kwargs are ignored, not rejected.
+    * ``document_timeout`` — docling's ``PipelineOptions.document_timeout``
+      (#497): a per-document budget in seconds for the PDF pipeline, checked
+      between pages. Once spent, the pages done so far are the document and
+      the result is a ``PARTIAL_SUCCESS`` whose ``.errors`` says why. ``None``
+      (default) is unlimited. Also accepted docling-shaped, via
+      ``pipeline_options.document_timeout``.
+    * ``password`` — the password of an encrypted PDF (#611; docling's
+      ``--pdf-password``) or Office document — ``.docx``/``.xlsx``/
+      ``.pptx``/``.doc``/``.xls``/``.ppt`` (#625, beyond docling, which
+      reads none). ``pdf_password``, its earlier name, still works. Also
+      accepted docling-shaped, as the PDF ``PdfFormatOption``'s
+      ``backend_options.password`` (a plain string or a pydantic
+      ``SecretStr``).
+    * ``page_range`` — ``(first, last)``, a 1-based inclusive PDF page window
+      for every conversion (#518). docling takes it per call —
+      ``convert(source, page_range=(a, b))`` — which works here too and wins
+      over this default.
+    * ``images_scale`` / ``generate_page_images`` — docling's
+      ``PdfPipelineOptions`` fields of the same names (#520): picture crops
+      (and page images) at ``images_scale`` px per PDF point, and each page's
+      render kept as ``document.pages[n].image`` so docling-core's
+      ``TableItem.get_image`` / ``FormulaItem.get_image`` work. Also accepted
+      docling-shaped via ``pipeline_options``, where ``images_scale`` applies
+      once ``generate_picture_images`` or ``generate_page_images`` is set
+      (docling only renders images then; without either, crops keep the
+      engine's 2.0 px/pt render). Every picture's ``image.dpi`` is
+      72·scale (#519).
     * ``artifacts_path`` — override the model cache dir (docling's
       ``artifacts_path``); defaults to ``~/.cache/docling.rs``.
     """
@@ -205,26 +375,82 @@ class DocumentConverter:
         do_picture_classification: bool = False,
         do_code_enrichment: bool = False,
         do_formula_enrichment: bool = False,
+        do_picture_ocr: bool = False,
+        picture_ocr_classes: Optional[Union[str, Iterable[str]]] = None,
+        picture_ocr_min_side: Optional[int] = None,
+        picture_ocr_scale: Optional[float] = None,
+        keep_picture_images: bool = True,
+        do_picture_description: bool = False,
+        picture_description_endpoint: Optional[str] = None,
+        picture_description_model: Optional[str] = None,
+        picture_description_api_key: Optional[str] = None,
+        picture_description_prompt: Optional[str] = None,
+        picture_description_mode: Optional[str] = None,
+        picture_description_concurrency: Optional[int] = None,
+        redact_pii: bool = False,
+        redact_mode: Optional[str] = None,
+        redact_kinds: Optional[Union[str, Iterable[str]]] = None,
+        redact_pattern: Optional[Union[str, Iterable[str]]] = None,
+        redact_images: Optional[str] = None,
+        redact_allow_terms: Optional[Iterable[str]] = None,
+        redact_deny_terms: Optional[Iterable[str]] = None,
+        redact_allow_patterns: Optional[Iterable[str]] = None,
+        redact_ner_min_score: Optional[float] = None,
         fetch_images: bool = False,
+        image_sources: Optional[str] = None,
+        image_hosts: Optional[Union[str, Iterable[str]]] = None,
+        max_image_bytes: Optional[int] = None,
+        max_images: Optional[int] = None,
+        max_image_total_mb: Optional[int] = None,
+        min_image_bytes: Optional[int] = None,
         use_web_browser: bool = False,
         ocr_lang: Optional[str] = None,
         ocr_mode: Optional[str] = None,
         ocr_scale: Optional[float] = None,
+        ocr_textline_orientation: Optional[bool] = None,
         ocr_engine: Optional[str] = None,
         skip_empty_cells: bool = False,
         compact_tables: bool = False,
+        asr_model: Optional[str] = None,
         asr_lang: Optional[str] = None,
         encoding: Optional[str] = None,
+        ipynb_outputs: Optional[str] = None,
         pipeline: Optional[str] = None,
         vlm_endpoint: Optional[str] = None,
         vlm_model: Optional[str] = None,
         vlm_api_key: Optional[str] = None,
         vlm_prompt: Optional[str] = None,
         vlm_max_tokens: Optional[int] = None,
+        document_timeout: Optional[float] = None,
+        password: Optional[str] = None,
+        pdf_password: Optional[str] = None,
+        page_range: Optional[Tuple[int, int]] = None,
+        images_scale: Optional[float] = None,
+        generate_page_images: bool = False,
+        text_layer_only: bool = False,
+        list_attachments: bool = False,
+        ebcdic_layout: Optional[str] = None,
+        video_frames: Optional[Union[int, str]] = None,
+        video_scene_threshold: Optional[float] = None,
+        video_frame_max_side: Optional[int] = None,
+        video_frame_dedupe: Optional[int] = None,
+        xbrl_taxonomy: Optional[Union[str, "os.PathLike[str]"]] = None,
         artifacts_path=None,
     ):
         ensure_env(artifacts_path)
 
+        if isinstance(video_frames, str):
+            if video_frames.strip().lower() != "all":
+                raise ValueError(
+                    "video_frames: expected a non-negative int or 'all', "
+                    f"got {video_frames!r}"
+                )
+            video_frames = VIDEO_FRAMES_ALL
+
+        if password is None:
+            password = pdf_password
+        if password is None:
+            password = _pdf_backend_password(format_options)
         # A PDF/IMAGE PdfFormatOption overrides the shorthand kwargs.
         pdf_opts = _pdf_pipeline_options(format_options)
         if pdf_opts is not None:
@@ -250,6 +476,57 @@ class DocumentConverter:
             do_formula_enrichment = getattr(
                 pdf_opts, "do_formula_enrichment", do_formula_enrichment
             )
+            # The picture-OCR enrichment (#645) and its filters, when set on
+            # the pipeline options (a docling.rs extension of
+            # PdfPipelineOptions).
+            do_picture_ocr = getattr(pdf_opts, "do_picture_ocr", do_picture_ocr)
+            if getattr(pdf_opts, "picture_ocr_classes", None) is not None:
+                picture_ocr_classes = pdf_opts.picture_ocr_classes
+            if getattr(pdf_opts, "picture_ocr_min_side", None) is not None:
+                picture_ocr_min_side = pdf_opts.picture_ocr_min_side
+            if getattr(pdf_opts, "picture_ocr_scale", None) is not None:
+                picture_ocr_scale = float(pdf_opts.picture_ocr_scale)
+            # RapidOCR's line orientation (#666), a docling.rs extension of
+            # PdfPipelineOptions.
+            if getattr(pdf_opts, "ocr_textline_orientation", None) is not None:
+                ocr_textline_orientation = bool(pdf_opts.ocr_textline_orientation)
+            keep_picture_images = getattr(
+                pdf_opts, "keep_picture_images", keep_picture_images
+            )
+            # docling's picture description through an API
+            # (PictureDescriptionApiOptions, #670) runs in the engine: url →
+            # endpoint, params["model"] → model, an Authorization header →
+            # key, prompt and concurrency theirs. Other describers (a
+            # LangChain chat model) stay the Python post-pass below.
+            pd = getattr(pdf_opts, "picture_description_options", None)
+            if getattr(pdf_opts, "do_picture_description", False) and _is_api_options(pd):
+                do_picture_description = True
+                picture_description_endpoint = str(pd.url) or picture_description_endpoint
+                params = getattr(pd, "params", None) or {}
+                if params.get("model"):
+                    picture_description_model = str(params["model"])
+                headers = getattr(pd, "headers", None) or {}
+                auth = next((v for k, v in headers.items() if k.lower() == "authorization"), None)
+                if isinstance(auth, str) and auth.lower().startswith("bearer "):
+                    picture_description_api_key = auth[7:].strip()
+                if getattr(pd, "prompt", None):
+                    picture_description_prompt = str(pd.prompt)
+                if getattr(pd, "concurrency", None):
+                    picture_description_concurrency = int(pd.concurrency)
+            # docling's PipelineOptions.document_timeout (#497), when set on
+            # the pipeline options, wins over the shorthand kwarg.
+            dt = getattr(pdf_opts, "document_timeout", None)
+            if dt is not None:
+                document_timeout = float(dt)
+            # docling's image outputs (#520): page images on request, and
+            # images_scale whenever docling would render images at all.
+            generate_page_images = bool(
+                getattr(pdf_opts, "generate_page_images", generate_page_images)
+            )
+            if generate_page_images or getattr(pdf_opts, "generate_picture_images", False):
+                scale = getattr(pdf_opts, "images_scale", None)
+                if scale is not None:
+                    images_scale = float(scale)
             # Map docling's ocr_options.lang (a list of language ids) onto the
             # engine's en/ch recognition-model switch. First entry wins;
             # anything that isn't recognisably English/Chinese is ignored with
@@ -264,6 +541,11 @@ class DocumentConverter:
             scale = getattr(ocr_opts, "scale", None)
             if scale is not None:
                 ocr_scale = float(scale)
+            # docling's RapidOcrOptions.use_cls (RapidOCR's text-line
+            # orientation classifier, #666) when set explicitly.
+            use_cls = getattr(ocr_opts, "use_cls", None)
+            if use_cls is not None and ocr_textline_orientation is None:
+                ocr_textline_orientation = bool(use_cls)
             # docling's Tesseract kinds (#460) select the engine; the CLI
             # options' binary, tessdata path and page segmentation mode are
             # process-wide knobs here, seeded like the accelerator device.
@@ -320,19 +602,38 @@ class DocumentConverter:
                 elif acc.device == AcceleratorDevice.CPU:
                     os.environ.setdefault("DOCLING_RS_EP", "cpu")
                 elif acc.device == AcceleratorDevice.MPS:
-                    warnings.warn(
-                        "docling.rs has no MPS execution provider; device "
-                        "'mps' is ignored (CoreML exists behind the `coreml` "
-                        "cargo feature for native macOS builds).",
-                        stacklevel=2,
-                    )
+                    # docling's Apple-GPU device → the CoreML provider, which
+                    # the engine keeps opt-in (#602): this is how
+                    # docling-shaped code asks for it. Only where the build
+                    # has it — the PyPI macOS wheels are CPU-only.
+                    if "coreml" in _compiled_providers():
+                        os.environ.setdefault("DOCLING_RS_EP", "coreml")
+                    else:
+                        warnings.warn(
+                            "docling.rs has no MPS execution provider and this "
+                            "build has no CoreML; device 'mps' is ignored (build "
+                            "the wheel on macOS with `maturin build --features "
+                            "coreml` for CoreML).",
+                            stacklevel=2,
+                        )
                 if acc.num_threads:
                     # Process-wide ONNX Runtime intra-op threads; don't clobber an
                     # explicit environment override.
                     os.environ.setdefault("DOCLING_RS_PDF_THREADS", str(acc.num_threads))
 
+        if isinstance(image_hosts, str):
+            image_hosts = [h.strip() for h in image_hosts.split(",") if h.strip()]
+        elif image_hosts is not None:
+            image_hosts = [str(h) for h in image_hosts]
+
         self._inner = _NativeDocumentConverter(
             fetch_images=fetch_images,
+            image_sources=image_sources,
+            image_hosts=image_hosts,
+            max_image_bytes=max_image_bytes,
+            max_images=max_images,
+            max_image_total_mb=max_image_total_mb,
+            min_image_bytes=min_image_bytes,
             do_ocr=do_ocr,
             force_full_page_ocr=force_full_page_ocr,
             no_text_panels=no_text_panels,
@@ -342,26 +643,83 @@ class DocumentConverter:
             do_picture_classification=do_picture_classification,
             do_code_enrichment=do_code_enrichment,
             do_formula_enrichment=do_formula_enrichment,
+            do_picture_ocr=do_picture_ocr,
+            picture_ocr_classes=_label_list(picture_ocr_classes),
+            picture_ocr_min_side=picture_ocr_min_side,
+            picture_ocr_scale=picture_ocr_scale,
+            keep_picture_images=keep_picture_images,
+            do_picture_description=do_picture_description,
+            picture_description_endpoint=picture_description_endpoint,
+            picture_description_model=picture_description_model,
+            picture_description_api_key=picture_description_api_key,
+            picture_description_prompt=picture_description_prompt,
+            picture_description_mode=picture_description_mode,
+            picture_description_concurrency=picture_description_concurrency,
+            redact_pii=redact_pii,
+            redact_mode=redact_mode,
+            redact_kinds=_joined(redact_kinds, ","),
+            redact_pattern=_joined(redact_pattern, "\n"),
+            redact_images=redact_images,
+            redact_allow_terms=_joined(redact_allow_terms, ","),
+            redact_deny_terms=_joined(redact_deny_terms, ","),
+            redact_allow_patterns=_joined(redact_allow_patterns, "\n"),
+            redact_ner_min_score=redact_ner_min_score,
             ocr_lang=ocr_lang,
             ocr_mode=ocr_mode,
             ocr_scale=ocr_scale,
+            ocr_textline_orientation=ocr_textline_orientation,
             ocr_engine=ocr_engine,
             skip_empty_cells=skip_empty_cells,
             compact_tables=compact_tables,
+            asr_model=asr_model,
             asr_lang=asr_lang,
             encoding=encoding,
+            ipynb_outputs=ipynb_outputs,
             pipeline=pipeline,
             vlm_endpoint=vlm_endpoint,
             vlm_model=vlm_model,
             vlm_api_key=vlm_api_key,
             vlm_prompt=vlm_prompt,
             vlm_max_tokens=vlm_max_tokens,
+            document_timeout=document_timeout,
+            password=password,
+            page_range=_page_range(page_range),
+            images_scale=images_scale,
+            generate_page_images=generate_page_images,
+            text_layer_only=text_layer_only,
+            list_attachments=list_attachments,
+            ebcdic_layout=ebcdic_layout,
+            video_frames=video_frames,
+            video_scene_threshold=video_scene_threshold,
+            video_frame_max_side=video_frame_max_side,
+            video_frame_dedupe=video_frame_dedupe,
+            xbrl_taxonomy=xbrl_taxonomy,
             allowed_formats=(
                 [InputFormat(f).value for f in allowed_formats]
                 if allowed_formats is not None
                 else None
             ),
         )
+        # docling's do_picture_description enrichment, run on the converted
+        # document (picture_description.py): the engine embeds each picture's
+        # crop, so any Python-side describer — e.g. a LangChain chat model via
+        # docling_rs.langchain — works without an engine change.
+        self._picture_description = None
+        if pdf_opts is not None and getattr(pdf_opts, "do_picture_description", False):
+            pd = getattr(pdf_opts, "picture_description_options", None)
+            if _is_api_options(pd):
+                pass  # the engine's pass (#670), wired above
+            elif pd is None or not hasattr(pd, "_annotate_images"):
+                # docling's default (a local SmolVLM) has no counterpart here;
+                # degrade like a missing enrichment model.
+                warnings.warn(
+                    "do_picture_description needs picture_description_options with a "
+                    "describer (e.g. docling_rs.langchain.PictureDescriptionLangChainOptions); "
+                    "pictures are left undescribed",
+                    stacklevel=2,
+                )
+            else:
+                self._picture_description = pd
 
     def initialize_pipeline(self, format: Optional[InputFormat] = None) -> None:
         """Eagerly load the ML models for ``format`` (docling's
@@ -374,39 +732,153 @@ class DocumentConverter:
             InputFormat(format).value if format is not None else None
         )
 
-    def convert(self, source: Union[str, os.PathLike, DocumentStream]) -> ConversionResult:
-        """Convert a filesystem path (str / pathlib.Path) or an in-memory
-        :class:`DocumentStream`."""
-        native = self._convert_native(source)
-        return _wrap(native)
+    def convert(
+        self,
+        source: Union[str, os.PathLike, DocumentStream],
+        page_range: Optional[Tuple[int, int]] = None,
+    ) -> ConversionResult:
+        """Convert a filesystem path (str / pathlib.Path), an ``http(s)://``
+        URL (downloaded first, as docling does) or an in-memory
+        :class:`DocumentStream`. ``page_range=(first, last)`` converts only
+        that 1-based inclusive PDF page window, as docling's
+        ``convert(source, page_range=…)`` does (#518); ``None`` keeps the
+        constructor's window (all pages by default)."""
+        return self._finish(_wrap(self._convert_native(source, page_range)))
 
     def convert_all(
         self,
         sources: Iterable[Union[str, os.PathLike, DocumentStream]],
         raises_on_error: bool = True,
+        page_range: Optional[Tuple[int, int]] = None,
     ) -> Iterator[ConversionResult]:
         """Convert many sources, yielding a :class:`ConversionResult` each
         (docling's ``convert_all``). With ``raises_on_error=False`` a failing
-        source yields a ``failure`` result (empty document) instead of raising."""
+        source yields a ``failure`` result (empty document) instead of raising.
+        ``page_range`` as in :meth:`convert`."""
         for source in sources:
             try:
-                yield _wrap(self._convert_native(source))
+                yield self._finish(_wrap(self._convert_native(source, page_range)))
             except Exception:
                 if raises_on_error:
                     raise
                 name = source.name if isinstance(source, DocumentStream) else str(source)
                 yield ConversionResult("failure", name, DoclingDocument(name=Path(name).name))
 
-    def convert_bytes(self, name: str, data: bytes) -> ConversionResult:
+    def convert_bytes(
+        self, name: str, data: bytes, page_range: Optional[Tuple[int, int]] = None
+    ) -> ConversionResult:
         """Convert in-memory bytes; ``name``'s extension drives format detection
-        (docling's ``DocumentStream`` counterpart)."""
-        native = self._inner.convert_bytes(name, data)
-        return _wrap(native)
+        (docling's ``DocumentStream`` counterpart). ``page_range`` as in
+        :meth:`convert`."""
+        native = self._inner.convert_bytes(name, data, page_range=_page_range(page_range))
+        return self._finish(_wrap(native))
 
-    def _convert_native(self, source):
+    def convert_archive(
+        self, source: Union[str, os.PathLike, bytes, DocumentStream]
+    ) -> Iterator[ArchiveItem]:
+        """Convert every document inside a ZIP archive (#557) — a path,
+        the archive's ``bytes`` or a :class:`DocumentStream` — yielding an
+        :class:`ArchiveItem` per entry in archive order. A broken document
+        fails only its own item; raises only when ``source`` is not a
+        readable ZIP archive. Nothing is extracted to disk, and the
+        ``DOCLING_RS_ZIP_MAX_*`` limits bound what is inflated."""
         if isinstance(source, DocumentStream):
-            return self._inner.convert_bytes(source.name, source.stream.read())
-        return self._inner.convert(source)
+            items = self._inner.convert_archive_bytes(_stream_bytes(source.stream))
+        elif isinstance(source, (bytes, bytearray)):
+            items = self._inner.convert_archive_bytes(bytes(source))
+        elif isinstance(source, str) and _is_url(source):
+            _, data = _fetch_url(source)
+            items = self._inner.convert_archive_bytes(data)
+        else:
+            items = self._inner.convert_archive(source)
+        for item in items:
+            result = None
+            if item.result is not None:
+                result = self._finish(_wrap(item.result))
+            yield ArchiveItem(item.path, item.outcome, result, item.error)
+
+    def _convert_native(self, source, page_range=None):
+        page_range = _page_range(page_range)
+        if isinstance(source, DocumentStream):
+            fmt = getattr(source, "format", None)
+            return self._inner.convert_bytes(
+                source.name,
+                _stream_bytes(source.stream),
+                page_range=page_range,
+                format=InputFormat(fmt).value if fmt is not None else None,
+            )
+        if isinstance(source, str) and _is_url(source):
+            name, data = _fetch_url(source)
+            return self._inner.convert_bytes(name, data, page_range=page_range)
+        return self._inner.convert(source, page_range=page_range)
+
+    def _finish(self, result: ConversionResult) -> ConversionResult:
+        if self._picture_description is not None and result.status != "failure":
+            from .picture_description import describe_pictures
+
+            describe_pictures(result.document, self._picture_description)
+        return result
+
+
+@dataclass
+class EmailAttachment:
+    """One attachment of an ``.eml`` / Outlook ``.msg``, from
+    :func:`email_attachments`. ``data`` is the payload when it was kept
+    (``None`` for an attachment over a limit, or one without a payload — a
+    reference, an OLE object); ``format`` is the :class:`InputFormat` it
+    converts as, ``None`` with ``skipped`` saying why it will not. A
+    forwarded message is an ``.eml`` entry whose ``data`` is the nested
+    message."""
+
+    index: int
+    name: str
+    content_type: Optional[str]
+    format: Optional[InputFormat]
+    size: int
+    inline: bool
+    skipped: Optional[str]
+    data: Optional[bytes]
+
+    def as_stream(self) -> DocumentStream:
+        """The payload as a :class:`DocumentStream` named after the attachment
+        and carrying its detected ``format`` (#564: a ``scan.bin`` sent as
+        ``application/pdf``, or a nameless sniffed part, converts as what it
+        is, not what its extension says), ready for
+        :meth:`DocumentConverter.convert`. Raises ``ValueError`` for an
+        attachment without a payload."""
+        if self.data is None:
+            raise ValueError(f"attachment {self.name!r} has no payload ({self.skipped})")
+        return DocumentStream(name=self.name, stream=io.BytesIO(self.data), format=self.format)
+
+
+def email_attachments(
+    source: Union[str, os.PathLike, bytes, DocumentStream],
+    *,
+    max_entries: Optional[int] = None,
+    max_entry_size: Optional[int] = None,
+    max_total_size: Optional[int] = None,
+) -> List[EmailAttachment]:
+    """List the attachments of an ``.eml`` / ``.msg`` with their payloads — a
+    path, the message bytes, or a :class:`DocumentStream`. The limits are byte
+    counts bounding what is kept (defaults: 10 000 attachments, 256 MiB each,
+    1 GiB in all); file names are reduced to a safe base name, so ``name``
+    can be written to a directory as it is. Convert one with
+    ``converter.convert(attachment.as_stream())``."""
+    if isinstance(source, DocumentStream):
+        data = _stream_bytes(source.stream)
+    elif isinstance(source, (bytes, bytearray, memoryview)):
+        data = bytes(source)
+    else:
+        data = Path(source).read_bytes()
+    rows = _email_attachments(data, max_entries, max_entry_size, max_total_size)
+    out = []
+    for index, name, content_type, fmt, size, inline, skipped, payload in rows:
+        try:
+            fmt = InputFormat(fmt) if fmt is not None else None
+        except ValueError:
+            pass
+        out.append(EmailAttachment(index, name, content_type, fmt, size, inline, skipped, payload))
+    return out
 
 
 def _pdf_pipeline_options(
@@ -423,7 +895,126 @@ def _pdf_pipeline_options(
     return None
 
 
+def _pdf_backend_password(
+    format_options: Optional[Dict[InputFormat, PdfFormatOption]],
+) -> Optional[str]:
+    """The PDF password from a docling-style ``format_options`` mapping —
+    ``PdfFormatOption(backend_options=PdfBackendOptions(password=...))``, a
+    plain string or a pydantic ``SecretStr`` — if any (#611)."""
+    if not format_options:
+        return None
+    fo = format_options.get(InputFormat.PDF)
+    password = getattr(getattr(fo, "backend_options", None), "password", None)
+    if password is None:
+        return None
+    if hasattr(password, "get_secret_value"):
+        password = password.get_secret_value()
+    return str(password)
+
+
+def _stream_bytes(stream) -> bytes:
+    """A :class:`DocumentStream`'s whole content: rewound first when it can
+    be, as docling's backends do (``path_or_stream.seek(0)``), so a stream
+    already read once — or handed over after a peek — still converts (#564)."""
+    if hasattr(stream, "seekable") and stream.seekable():
+        stream.seek(0)
+    return stream.read()
+
+
+def _label_list(labels) -> Optional[str]:
+    """``picture_ocr_classes`` as the engine's comma-separated string: a
+    string passes through, an iterable of labels is joined."""
+    if labels is None or isinstance(labels, str):
+        return labels
+    return ",".join(str(label) for label in labels)
+def _joined(value, sep: str) -> Optional[str]:
+    """A list-or-string option as the engine's joined string (``redact_kinds``
+    with commas, ``redact_pattern`` with newlines); a string passes through."""
+    if value is None or isinstance(value, str):
+        return value
+    return sep.join(str(v) for v in value)
+
+
+def _page_range(page_range) -> Optional[Tuple[int, int]]:
+    """docling's ``page_range`` argument as the engine's ``(first, last)``:
+    any two-item sequence of integers; ``None`` stays ``None``. docling's
+    default window ``(1, sys.maxsize)`` simply means "all pages"."""
+    if page_range is None:
+        return None
+    try:
+        first, last = page_range
+        return (int(first), int(last))
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"page_range must be a (first, last) pair of page numbers, got {page_range!r}"
+        ) from None
+
+
+def _is_url(source: str) -> bool:
+    return source.startswith(("http://", "https://"))
+
+
+# Media types whose extension the URL path may not carry (e.g. arXiv's
+# https://arxiv.org/pdf/2408.09869) — format detection is by extension.
+_URL_EXTENSIONS = {
+    "application/pdf": ".pdf",
+    "text/html": ".html",
+    "application/xhtml+xml": ".html",
+    "text/markdown": ".md",
+    "text/plain": ".txt",
+    "text/csv": ".csv",
+    "application/json": ".json",
+    "application/xml": ".xml",
+    "text/xml": ".xml",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "application/epub+zip": ".epub",
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/tiff": ".tiff",
+    "image/webp": ".webp",
+    "audio/mpeg": ".mp3",
+    "audio/wav": ".wav",
+    "audio/x-wav": ".wav",
+    "video/mp4": ".mp4",
+}
+
+
+def _fetch_url(url: str) -> "tuple[str, bytes]":
+    """Download an http(s) source (docling's ``convert(url)``): the file name
+    comes from ``Content-Disposition``, else the URL path; when that has no
+    extension, the response's media type supplies one. Read whole into memory
+    — the engine converts bytes, like ``DocumentStream``."""
+    import email.message
+    import urllib.parse
+    import urllib.request
+
+    req = urllib.request.Request(url, headers={"User-Agent": f"docling-rs/{__version__}"})
+    with urllib.request.urlopen(req) as resp:
+        data = resp.read()
+        disposition = resp.headers.get("Content-Disposition", "")
+        media_type = resp.headers.get_content_type()
+    name = ""
+    if disposition:
+        msg = email.message.Message()
+        msg["Content-Disposition"] = disposition
+        name = msg.get_filename() or ""
+    if not name:
+        name = Path(urllib.parse.unquote(urllib.parse.urlparse(url).path)).name or "document"
+    if not Path(name).suffix and media_type in _URL_EXTENSIONS:
+        name += _URL_EXTENSIONS[media_type]
+    return name, data
+
+
 def _wrap(native) -> ConversionResult:
     """Validate the Rust engine's JSON into a real ``DoclingDocument``."""
     document = DoclingDocument.model_validate_json(native.document_json)
-    return ConversionResult(native.status, native.input_name, document)
+    errors = [ErrorItem(*item) for item in getattr(native, "errors", ())]
+    return ConversionResult(
+        native.status,
+        native.input_name,
+        document,
+        errors,
+        getattr(native, "redaction", None),
+    )

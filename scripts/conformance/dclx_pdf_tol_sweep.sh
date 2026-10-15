@@ -10,10 +10,9 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 BIN="$(pwd)/target/release/docling-rs"
 DIFF="$(dirname "$0")/dclx_diff.py"
-export PDFIUM_DYNAMIC_LIB_PATH="$(pwd)/.pdfium/lib"
 
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
-ln -sfn "$(pwd)/models" "$tmp/models"; ln -sfn "$(pwd)/.pdfium" "$tmp/.pdfium"
+ln -sfn "$(pwd)/models" "$tmp/models"
 
 n=0
 for ref in tests/data/pdf/groundtruth_dclx/*.dclx; do

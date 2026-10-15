@@ -4,7 +4,7 @@
 //! back to OCR precisely when this produces no nodes, so an empty result here
 //! reproduces that decision offline.
 //!
-//! Note this is *not* what the CLI's `--no-ocr` runs — that goes through
+//! Note this is *not* what the CLI's `--text-layer-only` runs — that goes through
 //! pdfium's text extraction, which can read layers this parser cannot. When the
 //! two disagree, the breakdown below says which stage lost the text.
 //!

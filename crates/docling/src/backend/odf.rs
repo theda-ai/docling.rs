@@ -26,6 +26,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use roxmltree::{Document, Node as XmlNode};
 
+use crate::backend::images::ImagePolicy;
 use crate::backend::markdown::escape_text;
 use crate::backend::ooxml::Package;
 use crate::backend::DeclarativeBackend;
@@ -111,7 +112,7 @@ pub(super) struct Styles {
     /// The package's decodable bitmap parts by name (`Pictures/x.png` →
     /// pixels), read for the JSON item tree: docling's `_add_odf_images`
     /// adds a picture only when PIL can open the part, and writes its
-    /// `image` payload. The flat nodes keep their unloaded placeholders.
+    /// `image` payload; the flat nodes carry the same pixels.
     pub(super) images: HashMap<String, PictureImage>,
     /// The package's part names (`Pictures/1000.png`, …); `None` for flat ODF,
     /// where every image is inline `<office:binary-data>`. Decides whether a
@@ -119,28 +120,56 @@ pub(super) struct Styles {
     /// reference (docling#4015, 2.120.3).
     parts: Option<HashSet<String>>,
     /// Whether external `http(s)` image references may be fetched — the
-    /// converter's `fetch_images` (docling's `enable_remote_fetch`). Local
-    /// filesystem paths are never read: a document-supplied path must not
-    /// turn into an arbitrary local-file read (the advisory behind #4015).
-    fetch_images: bool,
+    /// converter's image policy at the `Remote` tier (docling's
+    /// `enable_remote_fetch`; #646 adds the host allow-list and the size
+    /// cap). Local filesystem paths are never read: a document-supplied
+    /// path must not turn into an arbitrary local-file read (the advisory
+    /// behind #4015).
+    policy: ImagePolicy,
 }
 
 impl DeclarativeBackend for OdfBackend {
     fn convert(&self, source: &SourceDocument) -> Result<DoclingDocument, ConversionError> {
-        convert_odf(source, false)
+        convert_odf(source, &ImagePolicy::default())
     }
 }
 
-/// Convert an ODF / OO1.x / flat-ODF document. `fetch_images` allows external
+/// Convert an ODF / OO1.x / flat-ODF document. `policy` at `Remote` allows external
 /// `http(s)` `draw:image` references to be fetched (bounded, SSRF-guarded);
 /// off, an external image reference yields no picture at all — exactly
 /// docling's `ImageResourceLoader` with remote fetch disabled (#4015).
+/// Whether the package manifest marks `content.xml` as encrypted.
+fn manifest_encrypts_content(manifest: &str) -> bool {
+    let Ok(dom) = Document::parse(manifest) else {
+        return false;
+    };
+    dom.descendants().any(|e| {
+        e.tag_name().name() == "file-entry"
+            && e.attributes()
+                .any(|a| a.name() == "full-path" && a.value() == "content.xml")
+            && e.children()
+                .any(|c| c.tag_name().name() == "encryption-data")
+    })
+}
+
 pub(crate) fn convert_odf(
     source: &SourceDocument,
-    fetch_images: bool,
+    policy: &ImagePolicy,
 ) -> Result<DoclingDocument, ConversionError> {
     {
         let mut pkg = Package::open(&source.bytes);
+        // A password-protected ODF package keeps its manifest in the clear
+        // and lists each encrypted part's `manifest:encryption-data` (ODF
+        // 1.2 part 3, 3.8); its content.xml is ciphertext, which used to
+        // read as "no content.xml" (#624).
+        if let Some(manifest) = pkg.as_mut().and_then(|p| p.read("META-INF/manifest.xml")) {
+            if manifest_encrypts_content(&manifest) {
+                return Err(crate::backend::offcrypto::unsupported(
+                    source.format.as_str(),
+                    "ODF package encryption",
+                ));
+            }
+        }
         let (content, styles_xml) = match pkg.as_mut() {
             Some(pkg) => (
                 pkg.read("content.xml")
@@ -164,7 +193,7 @@ pub(crate) fn convert_odf(
         }
         let styles_dom = Document::parse(&styles_xml).ok();
         let mut styles = parse_styles(&content_dom, styles_dom.as_ref());
-        styles.fetch_images = fetch_images;
+        styles.policy = policy.clone();
         if let Some(pkg) = pkg.as_mut() {
             styles.parts = Some(pkg.names().map(str::to_string).collect());
             styles.charts = load_charts(pkg, &content_dom, &styles);
@@ -204,6 +233,7 @@ pub(crate) fn convert_odf(
             match office.tag_name().name() {
                 "text" => {
                     walk_text(office, &styles, &mut doc);
+                    push_note_furniture(office, &mut doc);
                     built = Some(super::odf_tree::build_text(office, &styles));
                 }
                 "spreadsheet" => {
@@ -231,6 +261,7 @@ pub(crate) fn convert_odf(
                 built = Some(super::odf_tree::build_spreadsheet(body, &styles));
             } else {
                 walk_text(body, &styles, &mut doc);
+                push_note_furniture(body, &mut doc);
                 built = Some(super::odf_tree::build_text(body, &styles));
             }
         }
@@ -306,7 +337,7 @@ fn parse_styles(content: &Document, styles: Option<&Document>) -> Styles {
         charts: HashMap::new(),
         images: HashMap::new(),
         parts: None,
-        fetch_images: false,
+        policy: ImagePolicy::default(),
     }
 }
 
@@ -584,11 +615,103 @@ fn collect_runs_linked(
                 // so skipping the subtree makes both envelopes read the same.
                 // `<office:binary-data>` is an inline image's base64 payload.
                 "object" | "binary-data" => {}
+                // A footnote/endnote's citation marker and body live inside
+                // this element, but neither belongs in the citing sentence's
+                // own text (docling#4375): the body can be arbitrarily long,
+                // and splicing it in here corrupted the reading order. The
+                // body is recovered separately as a furniture item, see
+                // [`note_texts`].
+                "note" => {}
                 // docling's `_odf_text_runs` recurses into every child, so an
                 // image's `<svg:desc>`/`<svg:title>` text is picked up too.
                 _ => collect_runs_linked(child, styles, base, href, out),
             }
         }
+    }
+}
+
+/// The body text of every `<text:note>` below `body`, in document order —
+/// docling's `_add_footnotes` (docling#4375, ODT only): the note body's
+/// `text_content` (its descendant text concatenated), stripped; blank notes
+/// are skipped. Each becomes a furniture-layer `footnote` item, the layer
+/// headers/footers use: available to callers, out of the reading order.
+pub(super) fn note_texts(body: XmlNode) -> Vec<String> {
+    note_bodies(body)
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect()
+}
+
+/// [`note_texts`] with each note's `<text:note>` element — the call site a
+/// citing paragraph's Pandoc `Note` goes to (#538).
+pub(super) fn note_bodies(body: XmlNode) -> Vec<(roxmltree::NodeId, String)> {
+    body.descendants()
+        .filter(|n| n.has_tag_name("note"))
+        .filter_map(|note| {
+            let note_body = note.children().find(|c| c.has_tag_name("note-body"))?;
+            let text: String = note_body
+                .descendants()
+                .filter(|n| n.is_text())
+                .filter_map(|n| n.text())
+                .collect::<String>()
+                .trim()
+                .to_string();
+            (!text.is_empty()).then_some((note.id(), text))
+        })
+        .collect()
+}
+
+/// The `<text:note>` calls of a paragraph-like element (`p`, `h`, or a list
+/// item's direct `p` / `h` children) as `(offset, note)`, the offset in chars
+/// of the text [`collect_runs`] reads from it — the same traversal, with a
+/// note's own text left out as there (#538).
+pub(super) fn note_calls(el: XmlNode) -> (String, Vec<(usize, roxmltree::NodeId)>) {
+    fn walk(el: XmlNode, text: &mut String, out: &mut Vec<(usize, roxmltree::NodeId)>) {
+        for child in el.children() {
+            if child.is_text() {
+                text.push_str(child.text().unwrap_or_default());
+                continue;
+            }
+            if !child.is_element() {
+                continue;
+            }
+            match child.tag_name().name() {
+                "line-break" => text.push('\n'),
+                "tab" | "tab-stop" => text.push('\t'),
+                "s" => {
+                    let n: usize = attr(child, "c").and_then(|v| v.parse().ok()).unwrap_or(1);
+                    text.push_str(&" ".repeat(n));
+                }
+                "object" | "binary-data" => {}
+                "note" => out.push((text.chars().count(), child.id())),
+                _ => walk(child, text, out),
+            }
+        }
+    }
+    let mut text = String::new();
+    let mut out = Vec::new();
+    if el.has_tag_name("list-item") || el.has_tag_name("list-header") {
+        for c in el
+            .children()
+            .filter(|c| c.has_tag_name("p") || c.has_tag_name("h"))
+        {
+            walk(c, &mut text, &mut out);
+        }
+    } else {
+        walk(el, &mut text, &mut out);
+    }
+    (text, out)
+}
+
+/// Footnote/endnote bodies as furniture paragraphs after the body walk.
+fn push_note_furniture(body: XmlNode, doc: &mut DoclingDocument) {
+    for text in note_texts(body) {
+        doc.nodes.push(Node::Furniture {
+            layer: docling_core::ContentLayer::Furniture,
+            inner: Box::new(Node::Paragraph {
+                text: super::markdown::escape_html(&super::markdown::escape_underscores(&text)),
+            }),
+        });
     }
 }
 
@@ -680,7 +803,8 @@ fn serialize_run(text: &str, fmt: Fmt, href: Option<&str>) -> String {
 /// `PictureItem` for it (docling#4015, 2.120.3):
 ///
 /// * an embedded part (`Pictures/…`, or inline `<office:binary-data>` in flat
-///   ODF) is a picture — the bytes stay unloaded here, as before;
+///   ODF) is a picture — carrying the part's pixels when the package holds a
+///   decodable bitmap (`Styles::images`), the inline payload stays unloaded;
 /// * an external `http(s)` reference is fetched (bounded, SSRF-guarded) only
 ///   under `fetch_images`, and is a picture only when the fetch yields one;
 /// * anything else external — an absolute or relative filesystem path, an
@@ -696,7 +820,9 @@ fn odf_picture(styles: &Styles, img: XmlNode) -> Option<Node> {
             caption_href: None,
             image,
             classification: None,
+            description: None,
             caption_parent: Default::default(),
+            caption_location: None,
         })
     };
     if href.is_empty() {
@@ -706,17 +832,20 @@ fn odf_picture(styles: &Styles, img: XmlNode) -> Option<Node> {
     // marker, #215) both name a part.
     let name = href.trim_start_matches("./").trim_start_matches('#');
     match &styles.parts {
-        Some(parts) if parts.contains(name) => return picture(None),
+        // The decoded part when PIL-equivalent decoding reads it (the JSON
+        // tree's payload too), so DocLang names and packages the asset.
+        Some(parts) if parts.contains(name) => return picture(styles.images.get(name).cloned()),
         // Flat ODF has no parts: a non-empty href is external by definition.
         _ => {}
     }
     if href.starts_with("http://") || href.starts_with("https://") {
-        if !styles.fetch_images {
+        if !styles.policy.sources.remote() {
             return None;
         }
         #[cfg(feature = "fetch-images")]
         {
-            return crate::backend::images::fetch_remote(href).and_then(|img| picture(Some(img)));
+            return crate::backend::images::fetch_remote_with(href, &styles.policy)
+                .and_then(|img| picture(Some(img)));
         }
         #[cfg(not(feature = "fetch-images"))]
         {
@@ -1275,6 +1404,7 @@ fn parse_table(table: XmlNode, styles: &Styles) -> Option<Table> {
         caption: None,
         cells: None,
         caption_parent: Default::default(),
+        caption_location: None,
     })
 }
 
@@ -1396,6 +1526,13 @@ fn para_plain_into(el: XmlNode, out: &mut String) {
                 // Inline embedded documents and image payloads (flat ODF) are
                 // not paragraph text.
                 "object" | "binary-data" => {}
+                // A footnote/endnote's citation marker and body live inside
+                // this element, but neither belongs in the citing sentence's
+                // own text (docling#4375): the body can be arbitrarily long,
+                // and splicing it in here corrupted the reading order. The
+                // body is recovered separately as a furniture item, see
+                // [`note_texts`].
+                "note" => {}
                 _ => para_plain_into(child, out),
             }
         }
@@ -1563,6 +1700,7 @@ pub(crate) fn emit_sheet_regions(
                 cells: None,
                 caption: None,
                 caption_parent: Default::default(),
+                caption_location: None,
             }));
         }
     }

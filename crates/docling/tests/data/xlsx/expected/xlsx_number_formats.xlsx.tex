@@ -1,0 +1,78 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc} % allow utf-8 input
+\usepackage[T1]{fontenc}    % use 8-bit T1 fonts
+\usepackage{hyperref}       % hyperlinks
+\usepackage{url}            % simple URL typesetting
+\usepackage{booktabs}       % professional-quality tables
+\usepackage{amsfonts}       % blackboard math symbols
+\usepackage{nicefrac}       % compact symbols for 1/2, etc.
+\usepackage{microtype}      % microtypography
+\usepackage{xcolor}         % colors
+\usepackage{graphicx}       % graphics
+\usepackage[normalem]{ulem} % strikethrough
+
+\begin{document}
+
+\begin{table}[h]
+\begin{tabular}{|l|l|l|l|}
+\hline
+Item & Qty & Price & Line total \\ \hline
+Orange juice & 10 & \$12.50 & \$125.00 \\ \hline
+Tea & 20 & \$7.25 & \$145.00 \\ \hline
+ &  & Subtotal & \$270.00 \\ \hline
+ &  & Discount & 10\% \\ \hline
+ &  & Order month & Feb-25 \\ \hline
+\end{tabular}
+\end{table}
+
+\begin{table}[h]
+\begin{tabular}{|l|l|l|}
+\hline
+Format & Value & Code \\ \hline
+Date & 2025-02-01 & mm-dd-yy \\ \hline
+Datetime 22 & 2025-02-01 13:30:00 & m/d/yy h:mm \\ \hline
+Minutes & 07:45 & mm:ss \\ \hline
+Afternoon & 1:30 PM & h:mm AM/PM \\ \hline
+Morning & 12:07 AM & hh:mm AM/PM \\ \hline
+24h & 13:30 & h:mm \\ \hline
+Day month & 1-Feb-25 & d-mmm-yy \\ \hline
+Due & Due Feb 1 & "Due "mmm d \\ \hline
+Due semicolon & Due; Feb 1 & "Due; "mmm d \\ \hline
+ISO & 2025-02-01 & yyyy-mm-dd \\ \hline
+Weekday & Saturday, February 1, 2025 & dddd, mmmm d, yyyy \\ \hline
+Locale currency & \$12.50 & [\$\$-409]\#,\#\#0.00 \\ \hline
+Negative parens & (\$5.00) & "\$"\#,\#\#0.00\_);\textbackslash{}("\$"\#,\#\#0.00\textbackslash{}) \\ \hline
+Negative red & \$-5.00 & "\$"\#,\#\#0.00;[Red]"\$"-\#,\#\#0.00 \\ \hline
+Negative plain & -\$5.00 & "\$"\#,\#\#0.00 \\ \hline
+Percent half up & 13\% & 0\% \\ \hline
+Percent neg & -13\% & 0\% \\ \hline
+Percent 2dp & 1.25\% & 0.00\% \\ \hline
+Currency half up & \$13 & "\$"\#,\#\#0 \\ \hline
+Currency neg half up & -\$13 & "\$"\#,\#\#0 \\ \hline
+Currency group & \$1,234.57 & "\$"\#,\#\#0.00 \\ \hline
+Zero dash & - & "\$"0;("\$"0);"-" \\ \hline
+Zero empty &  & "\$"0;("\$"0); \\ \hline
+Suffix & 12.50\$ & 0.00"\$" \\ \hline
+Duration & 1 day, 2:07:00 & [h]:mm:ss \\ \hline
+Locale date raw & 2025-02-01 00:00:00 & [\$-409]mmmm d, yyyy \\ \hline
+Conditional raw & 0.125 & [>=1]0\%;0.0\% \\ \hline
+Optional decimals raw & 12.5 & "\$"0.\#\# \\ \hline
+Digit literal raw & 12.5 & "\$0"0.00 \\ \hline
+EUR raw & 1234.5 & "EUR" \#,\#\#0.00 \\ \hline
+Thousands raw & 1234567.891 & \#,\#\#0 \\ \hline
+Padded raw & 42 & 00000 \\ \hline
+Large & \$123,456,789,012.35 & "\$"\#,\#\#0.00 \\ \hline
+Tiny & 0.00\% & 0.00\% \\ \hline
+Text format & 3.5 & @ \\ \hline
+Bool & True & 0\% \\ \hline
+Scientific raw & 12345.678 & 0.00E+00 \\ \hline
+Seconds & 1:02:03 AM & h:mm:ss AM/PM \\ \hline
+Timestamp 21 & 5:06:07 & h:mm:ss \\ \hline
+Date time text & 2024-01-02 00:00:00 & yyyy\textbackslash{}-mm\textbackslash{}-dd\textbackslash{} hh:mm:ss \\ \hline
+Date time text h & 2024-01-02 0:00:00 & yyyy\textbackslash{}-mm\textbackslash{}-dd\textbackslash{} h:mm:ss \\ \hline
+Escaped digits & 1 & \textbackslash{}1\textbackslash{}.0\# \\ \hline
+\end{tabular}
+\end{table}
+
+\end{document}

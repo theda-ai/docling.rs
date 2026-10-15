@@ -10,19 +10,23 @@
 # `pypa/cibuildwheel` (which orchestrates the manylinux containers and auditwheel
 # repair itself) and uploaded with `pypa/gh-action-pypi-publish`.
 #
-# Triggers, mirroring npm-publish.yml:
-#   - Release published: runs automatically for every `v<version>` GitHub
-#     Release ci.yml cuts (created with RELEASE_PAT, so the `release: published`
-#     event fires). The release tag is checked out, its version published, and
-#     the `docling-rs-cuda` wheel built as well (the `cuda_wheel` input is
-#     implied). Releases with any other tag are ignored.
-#   - Manual dispatch: by default it builds the checked-out ref at the current
-#     workspace version (the root Cargo.toml — same source npm-publish.yml
-#     uses), so the PyPI version tracks the crates automatically; pass `version`
-#     (or a release `tag`) to override, `cuda_wheel` to add the CUDA wheel. Run
-#     it from the Actions tab (or `gh workflow run pypi-publish.yml`, optionally
-#     `-f version=0.16.0`) — e.g. to re-publish a version an automatic run
-#     skipped or failed on; the upload skips files already on PyPI.
+# Trigger: manual dispatch only (so is npm-publish.yml). A GitHub Release does
+# NOT publish to PyPI: PyPI caps a project's total size (10 GiB), and a
+# release per merge (~100 MB of docling-rs wheels + ~63 MB of docling-rs-cuda
+# each, 139 releases in three months) filled docling-rs and failed v2.22.0
+# half-way. The maintainer picks the releases worth publishing — release.yml
+# runs this with npm, the images and the CLI binaries; alone, it repairs a
+# failed PyPI channel:
+#
+#     gh workflow run pypi-publish.yml -f tag=v2.23.0
+#
+# `tag` checks the release out and publishes its version; blank builds the
+# dispatched ref at the workspace version (the root Cargo.toml), `version`
+# overrides either. `cuda_wheel` (on by default) adds docling-rs-cuda. After a
+# release tag's launcher is up, the MCP registry entry follows
+# (mcp-registry.yml, called below). Files already on PyPI are skipped, so a
+# re-run repairs a partial publish — within 14 days of the release's first
+# upload, after which PyPI accepts no new files for it.
 #
 # No secrets: publishing uses PyPI Trusted Publishing (OIDC), like
 # docling-core's pypi.yml. This requires a one-time setup on PyPI — add a trusted
@@ -38,8 +42,6 @@
 name: pypi publish
 
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       tag:
@@ -51,13 +53,13 @@ on:
         required: false
         default: ""
       cuda_wheel:
-        description: "Also build the docling-rs-cuda wheel (Linux x86_64, CUDA EP compiled in). Implied on a release event."
+        description: "Also build and publish the docling-rs-cuda wheel (Linux x86_64, CUDA EP compiled in)."
         required: false
         type: boolean
-        default: false
+        default: true
 
 concurrency:
-  group: pypi-publish-${{ inputs.tag || github.event.release.tag_name || github.ref }}
+  group: pypi-publish-${{ inputs.tag || github.ref }}
   cancel-in-progress: false
 
 permissions:
@@ -68,12 +70,11 @@ jobs:
     name: sdist
     # On a release event only the `v<version>` releases ci.yml cuts are
     # published (every other job hangs off this one).
-    if: github.event_name != 'release' || startsWith(github.event.release.tag_name, 'v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.tag || github.event.release.tag_name || github.ref }}
+          ref: ${{ inputs.tag || github.ref }}
 
       # Version resolution mirrors npm-publish.yml: explicit `version` input,
       # else the release `tag`, else the workspace version from the root
@@ -86,7 +87,7 @@ jobs:
         working-directory: crates/docling-py
         run: |
           v="${{ inputs.version }}"
-          if [ -z "$v" ] && [ -n "${{ inputs.tag || github.event.release.tag_name }}" ]; then v="${{ inputs.tag || github.event.release.tag_name }}"; v="${v#v}"; fi
+          if [ -z "$v" ] && [ -n "${{ inputs.tag }}" ]; then v="${{ inputs.tag }}"; v="${v#v}"; fi
           if [ -z "$v" ]; then
             v="$(grep -m1 '^version = ' ../../Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
           fi
@@ -143,6 +144,25 @@ jobs:
           mkdir pkg
           tar -xzf sdist/*.tar.gz -C pkg --strip-components=1
 
+      # Fetch every crate the build needs here, on the runner (with retries),
+      # and point cargo at the copies: the build itself — inside the
+      # manylinux container for the cibuildwheel jobs — then never talks to
+      # crates.io, whose CDN the container could not reach in a release run
+      # ("Could not connect to server" on static.crates.io before anything
+      # compiled). Only the wheel builds vendor; the published sdist stays
+      # small. ONNX Runtime's binaries (`ort`'s download-binaries) are still
+      # fetched by its build script.
+      - name: Vendor crates
+        shell: bash
+        working-directory: pkg
+        env:
+          CARGO_NET_RETRY: "10"
+        run: |
+          MANIFEST="$(sed -n 's/^manifest-path = "\(.*\)"/\1/p' pyproject.toml)"
+          mkdir -p .cargo
+          cargo vendor --locked --manifest-path "${MANIFEST:-Cargo.toml}" vendor > .cargo/config.toml
+          cat .cargo/config.toml
+
       - name: Build wheels
         uses: pypa/cibuildwheel@v4.2.0
         with:
@@ -169,6 +189,76 @@ jobs:
           path: wheelhouse/*.whl
           if-no-files-found: error
 
+  # IBM Z wheel (#504): cross-compiled on the x86_64 runner with maturin's
+  # zig mode — the manylinux_2_28_s390x container would compile the whole
+  # workspace under QEMU for hours, and the distro cross toolchain links
+  # against its glibc 2.39 sysroot (maturin's audit then rejects the
+  # manylinux_2_28 tag: exp@GLIBC_2.29, dlopen@GLIBC_2.34, pidfd_spawnp@2.39…),
+  # while zig targets glibc 2.28 directly, so the wheel installs on RHEL 8/9
+  # era mainframe Linux. abi3 means one wheel. Built with `ort-load-dynamic`:
+  # pyke ships no ONNX Runtime for s390x, so the module dlopens the library
+  # `download_models()` fetches into the cache on an s390x host
+  # (onnxruntime-linux-s390x.tar.gz from the models release).
+  wheel-s390x:
+    name: wheel s390x (cross, zig)
+    needs: sdist
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download sdist
+        uses: actions/download-artifact@v8
+        with:
+          name: sdist
+          path: sdist
+
+      - name: Unpack sdist
+        shell: bash
+        run: |
+          mkdir pkg
+          tar -xzf sdist/*.tar.gz -C pkg --strip-components=1
+
+      - name: Install Rust (stable + s390x target)
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add s390x-unknown-linux-gnu
+
+      # Fetch every crate the build needs here, on the runner (with retries),
+      # and point cargo at the copies: the build itself — inside the
+      # manylinux container for the cibuildwheel jobs — then never talks to
+      # crates.io, whose CDN the container could not reach in a release run
+      # ("Could not connect to server" on static.crates.io before anything
+      # compiled). Only the wheel builds vendor; the published sdist stays
+      # small. ONNX Runtime's binaries (`ort`'s download-binaries) are still
+      # fetched by its build script.
+      - name: Vendor crates
+        shell: bash
+        working-directory: pkg
+        env:
+          CARGO_NET_RETRY: "10"
+        run: |
+          MANIFEST="$(sed -n 's/^manifest-path = "\(.*\)"/\1/p' pyproject.toml)"
+          mkdir -p .cargo
+          cargo vendor --locked --manifest-path "${MANIFEST:-Cargo.toml}" vendor > .cargo/config.toml
+          cat .cargo/config.toml
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Build wheel
+        working-directory: pkg
+        run: |
+          python -m pip install "maturin>=1.5,<2" ziglang
+          maturin build --release --zig --target s390x-unknown-linux-gnu --manylinux 2_28 \
+            --features ort-load-dynamic -i python3.11 --out ../wheelhouse
+          ls -la ../wheelhouse
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheel-s390x
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
   # CUDA wheel (PyPI `docling-rs-cuda`): the same sdist built with
   # `--features cuda`, Linux x86_64 only — the renamed package installs the
   # same `docling_rs` module (mutually exclusive with `docling-rs`) and
@@ -177,7 +267,7 @@ jobs:
   # Operational notes:
   # - the wheel bundles libonnxruntime_providers_{shared,cuda}.so; if PyPI
   #   rejects the upload for size, request a per-project file-size bump
-  #   (onnxruntime-gpu is the precedent). CUDA 12 + cuDNN 9 remain *system*
+  #   (onnxruntime-gpu is the precedent). CUDA 13 + cuDNN 9 remain *system*
   #   requirements at runtime — the wheel does not ship them.
   # - PyPI Trusted Publishing is per-project: register this workflow as a
   #   trusted publisher on the `docling-rs-cuda` project as well, or the
@@ -191,7 +281,7 @@ jobs:
   wheel-cuda:
     name: wheel x86_64 (docling-rs-cuda)
     # Manual runs opt in with `cuda_wheel`; a release builds it unconditionally.
-    if: inputs.cuda_wheel || github.event_name == 'release'
+    if: inputs.cuda_wheel
     needs: sdist
     runs-on: ubuntu-24.04
     steps:
@@ -210,6 +300,25 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
+
+      # Fetch every crate the build needs here, on the runner (with retries),
+      # and point cargo at the copies: the build itself — inside the
+      # manylinux container for the cibuildwheel jobs — then never talks to
+      # crates.io, whose CDN the container could not reach in a release run
+      # ("Could not connect to server" on static.crates.io before anything
+      # compiled). Only the wheel builds vendor; the published sdist stays
+      # small. ONNX Runtime's binaries (`ort`'s download-binaries) are still
+      # fetched by its build script.
+      - name: Vendor crates
+        shell: bash
+        working-directory: pkg
+        env:
+          CARGO_NET_RETRY: "10"
+        run: |
+          MANIFEST="$(sed -n 's/^manifest-path = "\(.*\)"/\1/p' pyproject.toml)"
+          mkdir -p .cargo
+          cargo vendor --locked --manifest-path "${MANIFEST:-Cargo.toml}" vendor > .cargo/config.toml
+          cat .cargo/config.toml
 
       - name: Build docling-rs-cuda wheel
         run: |
@@ -257,10 +366,10 @@ jobs:
 
   publish:
     name: publish to PyPI
-    needs: [sdist, wheels, wheel-cuda]
+    needs: [sdist, wheels, wheel-cuda, wheel-s390x]
     # wheel-cuda is optional (gated on the cuda_wheel input): publish when it
     # succeeded or was skipped, never when anything actually failed.
-    if: ${{ !cancelled() && needs.sdist.result == 'success' && needs.wheels.result == 'success' && (needs.wheel-cuda.result == 'success' || needs.wheel-cuda.result == 'skipped') }}
+    if: ${{ !cancelled() && needs.sdist.result == 'success' && needs.wheels.result == 'success' && needs.wheel-s390x.result == 'success' && (needs.wheel-cuda.result == 'success' || needs.wheel-cuda.result == 'skipped') }}
     runs-on: ubuntu-latest
     # Trusted Publishing (OIDC): no token secret. `id-token: write` lets the job
     # mint the OIDC token PyPI verifies against its trusted-publisher config; the
@@ -269,14 +378,39 @@ jobs:
       name: pypi
       url: https://pypi.org/p/docling-rs
     permissions:
+      contents: read # the checkout for the size check
       id-token: write
     steps:
-      # All wheels + the sdist → a single dist/ for the upload.
-      - name: Download artifacts
+      # Only the size check below; the upload itself needs no checkout.
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: scripts/ci
+
+      # All wheels + the sdist → a single dist/ for the upload. By name: the
+      # docling-rs-mcp launcher (below) uploads on its own, so a launcher
+      # problem can never hold back a docling-rs release.
+      - name: Download the sdist
         uses: actions/download-artifact@v8
         with:
+          name: sdist
+          path: dist
+
+      - name: Download the wheels
+        uses: actions/download-artifact@v8
+        with:
+          pattern: wheel-*
           path: dist
           merge-multiple: true
+
+      # PyPI refuses files past a project's total-size limit one by one,
+      # after the earlier files of the upload went through — v2.22.0 got its
+      # aarch64 wheel only. Fail before uploading anything instead, and warn
+      # near the limit. PYPI_SIZE_LIMIT_GIB (repository variable) records a
+      # limit PyPI raised: `docling-rs=20,docling-rs-cuda=15`.
+      - name: Check room under the PyPI size limits
+        env:
+          PYPI_SIZE_LIMIT_GIB: ${{ vars.PYPI_SIZE_LIMIT_GIB }}
+        run: python3 scripts/ci/pypi_room.py dist
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
@@ -285,3 +419,91 @@ jobs:
           attestations: true
           # Idempotent re-runs: don't fail if a version is already uploaded.
           skip-existing: true
+
+  # `docling-rs-mcp` (#669): the pure-Python launcher behind
+  # `uvx docling-rs-mcp`, MarkItDown's `markitdown-mcp` counterpart. It has
+  # no code of its own — it pins this run's docling-rs, whose wheels carry
+  # the MCP server (`docling_rs.mcp`) — so it takes the same resolved
+  # version and uploads only once that docling-rs is on PyPI. A separate
+  # PyPI project: its trusted publisher (this workflow, environment `pypi`)
+  # is configured once on pypi.org — docs/MCP_REGISTRIES.md.
+  mcp-launcher:
+    name: docling-rs-mcp launcher
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Resolve version and pin docling-rs
+        id: v
+        shell: bash
+        working-directory: crates/docling-py/mcp
+        run: |
+          v="${{ inputs.version }}"
+          if [ -z "$v" ] && [ -n "${{ inputs.tag }}" ]; then v="${{ inputs.tag }}"; v="${v#v}"; fi
+          if [ -z "$v" ]; then
+            v="$(grep -m1 '^version = ' ../../../Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          fi
+          sed -i -E "0,/^version = \".*\"/s//version = \"$v\"/" pyproject.toml
+          sed -i -E "s/\"docling-rs==[^\"]*\"/\"docling-rs==$v\"/" pyproject.toml
+          grep -q "\"docling-rs==$v\"" pyproject.toml
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Building docling-rs-mcp $v (pins docling-rs==$v)"
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Build sdist + wheel
+        run: |
+          python -m pip install build
+          python -m build crates/docling-py/mcp --outdir mcp-dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mcp-launcher
+          path: mcp-dist/*
+          if-no-files-found: error
+
+  publish-mcp-launcher:
+    name: publish docling-rs-mcp to PyPI
+    needs: [publish, mcp-launcher]
+    if: ${{ !cancelled() && needs.publish.result == 'success' && needs.mcp-launcher.result == 'success' }}
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/docling-rs-mcp
+    permissions:
+      id-token: write
+    steps:
+      - name: Download the launcher
+        uses: actions/download-artifact@v8
+        with:
+          name: mcp-launcher
+          path: dist
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          attestations: true
+          skip-existing: true
+
+  # The MCP catalogs list the launcher at this version (#669) — the official
+  # registry's server.json and Smithery's bundle — so their entries follow a
+  # release tag's PyPI publish, not the GitHub Release.
+  mcp-registry:
+    name: MCP catalogs
+    needs: [mcp-launcher, publish-mcp-launcher]
+    if: ${{ !cancelled() && needs.publish-mcp-launcher.result == 'success' && (startsWith(inputs.tag, 'v') || startsWith(github.ref, 'refs/tags/v')) }}
+    permissions:
+      contents: write # the bundle job attaches the .mcpb to the release
+      id-token: write
+    uses: ./.github/workflows/mcp-registry.yml
+    with:
+      version: ${{ needs.mcp-launcher.outputs.version }}
+    secrets:
+      SMITHERY_API_KEY: ${{ secrets.SMITHERY_API_KEY }}

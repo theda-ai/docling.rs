@@ -8,11 +8,15 @@ import type {
   ConvertOptions,
   ConvertInput,
   ConvertResult,
+  ArchiveItem,
   ChunkOptions,
   Chunk,
+  EmailAttachment,
+  EmailAttachmentOptions,
 } from './native'
 
 export type {
+  ArchiveItem,
   ConverterOptions,
   OutputOptions,
   ConvertOptions,
@@ -20,10 +24,22 @@ export type {
   ConvertResult,
   ChunkOptions,
   Chunk,
+  EmailAttachment,
+  EmailAttachmentOptions,
 }
 
 // Format helpers pass straight through from the native binding.
 export { supportedFormats, formatFromName } from './native'
+// Email attachment payloads of an .eml / .msg (#561): list them with their
+// bytes, then `convert({ name: att.name, data: att.data, format: att.format })`
+// the ones you want — `format` carries what the extension cannot (#564). The
+// `*Async` forms parse off the event loop.
+export {
+  emailAttachments,
+  emailAttachmentsFile,
+  emailAttachmentsAsync,
+  emailAttachmentsFileAsync,
+} from './native'
 
 /** Callback form used by the native streaming API (prefer {@link streamFileMarkdown}). */
 export type StreamCallback = (err: Error | null, chunk: string | undefined | null) => void
@@ -31,7 +47,7 @@ export type StreamCallback = (err: Error | null, chunk: string | undefined | nul
 /**
  * Convert a file on disk (format detected from the extension). Throws for
  * PDF/image/METS if deps aren't installed — except under `pipeline: 'vlm'`,
- * which loads no ONNX models and needs only pdfium (nothing for image input).
+ * which loads no ONNX models and needs nothing on disk.
  */
 export declare function convertFile(path: string, options?: ConvertOptions | null): ConvertResult
 /** Convert in-memory bytes. Throws for PDF/image/METS if deps aren't installed (see {@link convertFile}). */
@@ -40,6 +56,23 @@ export declare function convert(input: ConvertInput, options?: ConvertOptions | 
 export declare function convertFileAsync(path: string, options?: ConvertOptions | null): Promise<ConvertResult>
 /** Async (Promise) bytes conversion, off the event loop. Rejects for PDF/image/METS if deps aren't installed (see {@link convertFile}). */
 export declare function convertAsync(input: ConvertInput, options?: ConvertOptions | null): Promise<ConvertResult>
+
+/**
+ * Convert every document inside a ZIP archive on disk (#557): one
+ * {@link ArchiveItem} per entry in archive order — `converted` with its
+ * result, `skipped` with the reason (unsupported type, nested archive, unsafe
+ * path, over a `DOCLING_RS_ZIP_MAX_*` limit) or `failed` with the error. A
+ * broken document fails only its own item. Throws only when the file is not
+ * a readable ZIP archive. Not ML-guarded: a PDF entry without the models is
+ * that entry's `failed` item.
+ */
+export declare function convertArchiveFile(path: string, options?: ConvertOptions | null): Array<ArchiveItem>
+/** In-memory {@link convertArchiveFile}; `input.name` names the archive, `input.format` is ignored. */
+export declare function convertArchive(input: ConvertInput, options?: ConvertOptions | null): Array<ArchiveItem>
+/** Async (Promise) {@link convertArchiveFile}, off the event loop. */
+export declare function convertArchiveFileAsync(path: string, options?: ConvertOptions | null): Promise<Array<ArchiveItem>>
+/** Async (Promise) {@link convertArchive}, off the event loop. */
+export declare function convertArchiveAsync(input: ConvertInput, options?: ConvertOptions | null): Promise<Array<ArchiveItem>>
 
 /**
  * Chunk a file with docling's chunkers: convert it, then run the hierarchical
@@ -73,6 +106,11 @@ export declare class DocumentConverter {
   convertFileAsync(path: string, options?: OutputOptions | null): Promise<ConvertResult>
   convertAsync(input: ConvertInput, options?: OutputOptions | null): Promise<ConvertResult>
   convertFileStreaming(path: string, callback: StreamCallback, options?: OutputOptions | null): void
+  /** {@link convertArchiveFile} with this converter's config per entry. */
+  convertArchiveFile(path: string, options?: OutputOptions | null): Array<ArchiveItem>
+  convertArchive(input: ConvertInput, options?: OutputOptions | null): Array<ArchiveItem>
+  convertArchiveFileAsync(path: string, options?: OutputOptions | null): Promise<Array<ArchiveItem>>
+  convertArchiveAsync(input: ConvertInput, options?: OutputOptions | null): Promise<Array<ArchiveItem>>
 }
 
 /** Output options for {@link Pipeline.streamFileMarkdown} (streamable modes only). */
@@ -122,22 +160,22 @@ export declare class Pipeline {
 export interface DependencyStatus {
   /** Install home directory. */
   home: string
-  /** libpdfium present. */
-  pdfium: boolean
   /** Layout model (layout_heron.onnx) present. */
   layout: boolean
   /** OCR model + dictionary present. */
   ocr: boolean
   /** PP-OCR text detector (ocr_det.onnx) present — optional; without it OCR reads only inside layout regions (#429). */
   ocrDet: boolean
+  /** Text-line orientation classifier (ocr_textline_ori.onnx) present — optional; ocrTextlineOrientation's 0/180 check (#666). */
+  ocrTextlineOri: boolean
   /** TableFormer encoder/decoder/bbox present. */
   tableformer: boolean
   /** Hybrid-chunker tokenizer (.models/chunk/tokenizer.json) present. */
   chunkTokenizer: boolean
   /**
-   * True when the minimum for PDF (pdfium + layout) is present — that is, for
-   * the *standard* pipeline. `pipeline: 'vlm'` needs `pdfium` alone (and
-   * nothing at all for image input), so it can convert with `ready: false`.
+   * True when the minimum for PDF and image input (the layout model) is
+   * present — that is, for the *standard* pipeline. `pipeline: 'vlm'` needs
+   * nothing on disk, so it can convert with `ready: false`.
    */
   ready: boolean
   /** Human-readable list of the missing required assets. */

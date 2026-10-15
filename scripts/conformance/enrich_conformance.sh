@@ -15,9 +15,10 @@
 #   fails.
 # * picture_classification.pdf — the JSON picture items must carry docling's
 #   classification annotation + meta with the same class ranking. Confidences
-#   are compared to 2 decimal places: the crops are resized from the page
-#   render rather than re-rendered per region, so the model sees pixels that
-#   differ sub-pixel from docling's and third-decimal drift is expected.
+#   may differ by up to 0.01: the crops are resized from the page render
+#   rather than re-rendered per region, so the model sees pixels that differ
+#   sub-pixel from docling's and third-decimal drift is expected. (Not
+#   rounding to 2 places — 0.9926 vs docling's 0.9952 straddles 0.995.)
 #
 # Needs the enrichment models on disk (scripts/install/download_dependencies.sh
 # --enrich, or the local exports). CodeFormula runs an autoregressive VLM per
@@ -92,11 +93,14 @@ for i, (a, b) in enumerate(zip(rs.get("pictures", []), gt["pictures"])):
     pb = b["annotations"][0]["predicted_classes"]
     # Same ranking on the confident head of the distribution; the long tail of
     # ~1e-6 classes may reorder from sub-pixel crop differences.
-    ra = [(c["class_name"], round(c["confidence"], 2)) for c in pa[:3]]
-    rb = [(c["class_name"], round(c["confidence"], 2)) for c in pb[:3]]
-    if ra != rb:
+    ra = [(c["class_name"], round(c["confidence"], 3)) for c in pa[:3]]
+    rb = [(c["class_name"], round(c["confidence"], 3)) for c in pb[:3]]
+    if [c for c, _ in ra] != [c for c, _ in rb] or any(
+        abs(x - y) > 0.01 for (_, x), (_, y) in zip(ra, rb)
+    ):
         print(f"   picture {i}: top-3 differs\n    rs {ra}\n    gt {rb}")
         ok = False
+        continue
     ma = [p["class_name"] for p in a["meta"]["classification"]["predictions"][:3]]
     if ma != [c for c, _ in ra]:
         print(f"   picture {i}: meta/annotation ranking mismatch: {ma} vs {ra}")

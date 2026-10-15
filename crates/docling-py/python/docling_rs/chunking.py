@@ -46,7 +46,9 @@ working on it — these classes are the faster, dependency-free native path.
 
 from __future__ import annotations
 
+import html
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Iterator, List, Optional
 
@@ -75,6 +77,20 @@ class DocMeta:
     #: JSON-pointer refs of the document items the chunk was built from.
     doc_items: List[str] = field(default_factory=list)
 
+    def export_json_dict(self) -> dict:
+        """docling's ``DocMeta.export_json_dict()`` shape, with the items as
+        ``{"self_ref": ...}`` stubs (this class holds refs, not items) and
+        ``None`` fields left out. The LangChain loader resolves the refs into
+        docling-core's full ``DocMeta`` whenever a chunk has items."""
+        out: dict = {
+            "schema_name": "docling_core.transforms.chunker.DocMeta",
+            "version": "1.0.0",
+            "doc_items": [{"self_ref": ref} for ref in self.doc_items],
+        }
+        if self.headings is not None:
+            out["headings"] = list(self.headings)
+        return out
+
 
 @dataclass
 class DocChunk:
@@ -101,6 +117,155 @@ def _document_json(dl_doc: Any) -> str:
     )
 
 
+def _norm(text: str) -> str:
+    """Comparable form of an item text vs. its Markdown rendering: entities
+    decoded, escapes dropped, whitespace collapsed."""
+    return " ".join(html.unescape(text).replace("\\", "").split())
+
+
+_MD_LINK = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
+_MD_PREFIX = re.compile(r"^(#{1,6}(\s+|$)|[-*+](\s+\[[ xX]\])?(\s+|$)|\d+[.)](\s+|$))")
+
+
+def _plain(md: str) -> str:
+    """A Markdown item rendering reduced toward the item's plain text: link
+    targets, emphasis/code markers and a heading/list prefix dropped."""
+    text = _MD_LINK.sub(r"\1", md)
+    for marker in ("**", "~~", "`", "*"):
+        text = text.replace(marker, "")
+    return _MD_PREFIX.sub("", text).strip()
+
+
+class _RefMapper:
+    """Maps the engine's chunk items back to the caller's document refs.
+
+    The native chunker re-imports the document JSON and numbers items the way
+    the engine would *re-export* them — which drifts from the caller's
+    document whenever the import is not a perfect round trip (empty items are
+    dropped, HTML/DOCX exports come from docling's item tree, PDF layouts
+    regroup, inline runs share their paragraph's number). The items still
+    arrive in (nearly) reading order with their kind and Markdown text, so
+    each is matched against the caller's items walked in the same order
+    (``body`` tree; pictures and tables not descended): a table/picture to a
+    table/picture, a text to a text item it renders — exactly (``Section 2``
+    for ``[Section 2](#section-2)``, ``x`` for ``- x``, empty for ``- ``),
+    else by containment. Candidates are the items not yet taken in a window
+    from the earliest untaken item (bounded to ``WINDOW`` before the last
+    match) to ``WINDOW`` past the last match, earliest first — so an item
+    emitted out of tree order (a picture caption the engine places next to
+    its picture) neither strands the rest nor goes unmatched. An item the
+    engine repeats (docling repeats an oversized item across the chunks it is
+    split into) is recognised by its native ref and text and maps to the
+    same item again. An item that matches nothing is left out rather than
+    pointed at the wrong item."""
+
+    WINDOW = 64
+    NEAR = 16
+    MIN_CONTAINED = 4
+
+    def __init__(self, doc: dict):
+        index = {}
+        for key in ("texts", "tables", "pictures", "groups"):
+            for it in doc.get(key) or ():
+                index[it.get("self_ref")] = it
+        order = []
+        stack = [iter((doc.get("body") or {}).get("children") or ())]
+        while stack:
+            child = next(stack[-1], None)
+            if child is None:
+                stack.pop()
+                continue
+            ref = child.get("$ref") or child.get("cref")
+            it = index.get(ref)
+            if it is None:
+                continue
+            if ref.startswith("#/texts/"):
+                order.append((ref, "text", _norm(it.get("text") or "")))
+            elif ref.startswith("#/tables/"):
+                order.append((ref, "table", ""))
+                continue
+            elif ref.startswith("#/pictures/"):
+                order.append((ref, "picture", ""))
+                continue
+            stack.append(iter(it.get("children") or ()))
+        self.order = order
+        self.taken: set = set()
+        self.low = 0  # earliest untaken item
+        self.last = 0  # one past the latest match
+        self.seen: dict = {}
+
+    def _runs_after(self, hit: int, hi: int, used: set, text: str) -> List[int]:
+        """The text items following a containment match that the same
+        rendering also contains, in order — an inline paragraph the engine
+        reports as one item is a run of items in docling's document."""
+        first = self.order[hit][2]
+        pos = text.find(first) + len(first)
+        extra = []
+        j = hit + 1
+        while j < hi and j not in self.taken and j not in used and self.order[j][1] == "text":
+            t = self.order[j][2]
+            at = text.find(t, pos) if t else -1
+            if at < 0:
+                break
+            extra.append(j)
+            pos = at + len(t)
+            j += 1
+        return extra
+
+    def _near(self, lo: int, hi: int, used: set, kind: str):
+        """Untaken items of ``kind`` in ``[lo, hi)``, nearest-first: forward
+        from the last match (the natural next item), then backward (an item
+        the engine emitted out of tree order)."""
+        last = min(max(self.last, lo), hi)
+        for i in list(range(last, hi)) + list(range(last - 1, lo - 1, -1)):
+            if i not in self.taken and i not in used and self.order[i][1] == kind:
+                yield i
+
+    def _find(self, lo: int, hi: int, used: set, kind: str, text: str) -> Optional[int]:
+        if kind != "text":
+            return next(self._near(lo, hi, used, kind), None)
+        plain = _plain(text)
+        for i in self._near(lo, hi, used, kind):
+            if self.order[i][2] in (text, plain):
+                return i
+        # Containment only close to the last match, and only for texts long
+        # enough to mean something: "duck" far away, or ")" / "." anywhere,
+        # is contained in many renderings and would pull the mapping out of
+        # sync (short texts still match exactly above).
+        near_lo = max(lo, self.last - self.NEAR)
+        near_hi = min(hi, self.last + self.NEAR)
+        for i in self._near(near_lo, near_hi, used, kind):
+            if len(self.order[i][2]) >= self.MIN_CONTAINED and self.order[i][2] in text:
+                return i
+        return None
+
+    def remap(self, native_refs: List[str], kinds: List[str], texts: List[str]) -> List[str]:
+        lo = max(self.low, self.last - self.WINDOW)
+        hi = min(len(self.order), self.last + self.WINDOW + len(kinds))
+        used: set = set()
+        refs: List[str] = []
+        for native, kind, raw in zip(native_refs, kinds, texts):
+            text = _norm(raw)
+            key = (native, kind, text)
+            runs = self.seen.get(key)
+            if runs is None or any(h in used for h in runs):
+                runs = None
+                hit = self._find(lo, hi, used, kind, text)
+                if hit is not None:
+                    runs = [hit]
+                    if kind == "text" and self.order[hit][2] not in (text, _plain(text)):
+                        runs += self._runs_after(hit, hi, used, text)
+                    self.seen[key] = runs
+            for h in runs or ():
+                used.add(h)
+                self.taken.add(h)
+                refs.append(self.order[h][0])
+                self.last = max(self.last, h + 1)
+        while self.low in self.taken:
+            self.low += 1
+        return refs
+
+
 def _run(
     dl_doc: Any,
     chunker: str,
@@ -115,14 +280,17 @@ def _run(
     # chunks it, handing over one record at a time — chunks are consumed as
     # they are produced, never materialized as a whole. Abandoning the
     # iterator early cancels the background chunking.
-    stream = _chunk_document(
-        _document_json(dl_doc), chunker, tokenizer, size, merge_peers, overlap
-    )
+    doc_json = _document_json(dl_doc)
+    mapper = _RefMapper(json.loads(doc_json))
+    stream = _chunk_document(doc_json, chunker, tokenizer, size, merge_peers, overlap)
     for record in stream:
         r = json.loads(record)
+        doc_items = r["doc_items"]
+        if "doc_item_kinds" in r:
+            doc_items = mapper.remap(doc_items, r["doc_item_kinds"], r["doc_item_texts"])
         yield DocChunk(
             text=r["text"],
-            meta=DocMeta(headings=r["headings"], doc_items=r["doc_items"]),
+            meta=DocMeta(headings=r["headings"], doc_items=doc_items),
             _contextualized=r["contextualize"],
         )
 

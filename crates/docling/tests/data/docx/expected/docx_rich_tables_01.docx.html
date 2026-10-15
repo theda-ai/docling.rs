@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8"/>
+<title>docx_rich_tables_01</title>
+<meta name="generator" content="Docling HTML Serializer"/>
+<style>
+    html {
+        background-color: #f5f5f5;
+        font-family: Arial, sans-serif;
+        line-height: 1.6;
+    }
+    body {
+        max-width: 800px;
+        margin: 0 auto;
+        padding: 2rem;
+        background-color: white;
+        box-shadow: 0 0 10px rgba(0,0,0,0.1);
+    }
+    h1, h2, h3, h4, h5, h6 {
+        color: #333;
+        margin-top: 1.5em;
+        margin-bottom: 0.5em;
+    }
+    h1 {
+        font-size: 2em;
+        border-bottom: 1px solid #eee;
+        padding-bottom: 0.3em;
+    }
+    table {
+        border-collapse: collapse;
+        margin: 1em 0;
+        width: 100%;
+    }
+    th, td {
+        border: 1px solid #ddd;
+        padding: 8px;
+        text-align: left;
+    }
+    th {
+        background-color: #f2f2f2;
+        font-weight: bold;
+    }
+    figure {
+        margin: 1.5em 0;
+        text-align: center;
+    }
+    figcaption {
+        color: #666;
+        font-style: italic;
+        margin-top: 0.5em;
+    }
+    img {
+        max-width: 100%;
+        height: auto;
+    }
+    pre {
+        background-color: #f6f8fa;
+        border-radius: 3px;
+        padding: 1em;
+        overflow: auto;
+    }
+    code {
+        font-family: monospace;
+        background-color: #f6f8fa;
+        padding: 0.2em 0.4em;
+        border-radius: 3px;
+    }
+    pre code {
+        background-color: transparent;
+        padding: 0;
+    }
+    .formula {
+        text-align: center;
+        padding: 0.5em;
+        margin: 1em 0;
+        background-color: #f9f9f9;
+    }
+    .formula-not-decoded {
+        text-align: center;
+        padding: 0.5em;
+        margin: 1em 0;
+        background: repeating-linear-gradient(
+            45deg,
+            #f0f0f0,
+            #f0f0f0 10px,
+            #f9f9f9 10px,
+            #f9f9f9 20px
+        );
+    }
+    .page-break {
+        page-break-after: always;
+        border-top: 1px dashed #ccc;
+        margin: 2em 0;
+    }
+    .key-value-region {
+        background-color: #f9f9f9;
+        padding: 1em;
+        border-radius: 4px;
+        margin: 1em 0;
+    }
+    .key-value-region dt {
+        font-weight: bold;
+    }
+    .key-value-region dd {
+        margin-left: 1em;
+        margin-bottom: 0.5em;
+    }
+    .form-container {
+        border: 1px solid #ddd;
+        padding: 1em;
+        border-radius: 4px;
+        margin: 1em 0;
+    }
+    .form-item {
+        margin-bottom: 0.5em;
+    }
+    .image-classification {
+        font-size: 0.9em;
+        color: #666;
+        margin-top: 0.5em;
+    }
+    details.docling-meta {
+        margin: 0.5em 0;
+        font-size: 0.9em;
+        text-align: left;
+    }
+    figure details.docling-meta {
+        text-align: left;
+    }
+    details.docling-meta > summary {
+        cursor: pointer;
+        color: #555;
+        font-style: italic;
+        padding: 2px 6px;
+    }
+    .docling-meta-field {
+        background-color: #f0f0f0;
+        border-left: 3px solid #ccc;
+        padding: 6px 10px;
+        margin: 4px 0 4px 1em;
+        border-radius: 3px;
+        text-align: left;
+    }
+    .docling-meta-field-label {
+        font-weight: bold;
+        color: #444;
+    }
+    pre.docling-meta-code {
+        background-color: #1e1e1e;
+        color: #d4d4d4;
+        border-radius: 4px;
+        padding: 10px 12px;
+        margin: 6px 0;
+        overflow-x: auto;
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+        font-size: 0.85em;
+        line-height: 1.45;
+        white-space: pre;
+        tab-size: 4;
+    }
+    pre.docling-meta-code code {
+        background: transparent;
+        border: none;
+        padding: 0;
+        color: inherit;
+        font-family: inherit;
+        font-size: inherit;
+        display: block;
+        white-space: pre;
+    }
+</style>
+</head>
+<body>
+<div class='page'>
+<strong><p>Changes to the DOCLANG Core Spec</p></strong>
+<p>Last Updated: 2026-06-18</p>
+<p></p>
+<p>This document identifies the edits needed for a PAS submission to ISO via ISO/IEC JTC/1.</p>
+<p>The transformation of this technical draft for ISO compliance involves two phases:</p>
+<ul>
+<li>
+<span class='inline-group'><strong>Phase 1</strong> (Macro-Level Structural Realignment) fixes the document's main layout. It forces the strict standard clause order, removes forbidden company and author names, cuts out critiques of competing formats, and changes all casual requirement language or uppercase tokens into standard lowercase ISO verbal forms (shall, should, may).</span>
+</li>
+<li>
+<span class='inline-group'><strong>Phase 2</strong> (Micro-Level Editorial Optimization) cleans up the small details required by the ISO House Style. This fixes layout bugs like ha nging paragraphs, adds spaces to large numbers (e.g., 65 535), writes out printable web links for physical paper copies, uses proper math subscript formatting, and limits all typography to standard fonts so it passes the final publishing system.</span>
+</li>
+</ul>
+<p></p>
+<strong><p>Phase 1</p></strong>
+<table><tbody><tr><th><strong><p>Feature</p></strong></th><th><strong><p>Action Needed</p></strong></th><th><strong><p>Comment/Links</p></strong></th></tr><tr><td>Document Clause Ordering</td><td><p>Reorganize into the mandatory sequence:</p>
+<p>• Foreword (Mandatory, unnumbered)</p>
+<p>• Introduction (Optional, unnumbered)</p>
+<p>• 1 Scope (Mandatory, Clause 1)</p>
+<p>• 2 Normative references (Mandatory, Clause 2)</p>
+<p>• 3 Terms and definitions (Mandatory, Clause 3)</p>
+<p>• 4 Symbols and abbreviated terms (Mandatory, Clause 4)</p>
+<p>• 5 Conformance (Mandatory, Clause 5)</p>
+<p>• 6 Technical Clauses...</p>
+<p>• Annex A (normative)</p>
+<p>• Annex B/C (informative)</p>
+<p>• Bibliography (Mandatory, absolute end)</p>
+<p></p></td><td>The current draft improperly mixes introductory narrative, design principles, and examples before standard layout clauses are established. See ISO/IEC Directives, Part 2, Clause 6.</td></tr><tr><td>Author &amp; Corporate Profiles</td><td>Completely remove the table listing individual names and company affiliations.</td><td>Personal names, corporate branding, logos, and affiliations are prohibited in the normative body of an ISO publication. See ISO/IEC Directives, Part 2, Clauses 4 and 12.5.2.</td></tr><tr><td>Foreword Boilerplate</td><td>Replace the original foreword with the mandatory ISO/IEC JTC 1 PAS foreword text and retain only a neutral statement identifying the originating workshop.</td><td>ISO forewords follow prescribed wording and structure. See ISO/IEC Directives, Part 2, Clause 12.</td></tr><tr><td>Market / Design Motivation</td><td>Remove the Motivation clause and all comparisons criticizing Markdown, HTML, LaTeX, PageXML, ALTO XML, hOCR, or similar technologies.</td><td>ISO standards shall remain technologically neutral and avoid comparative or competitive claims. See ISO/IEC Directives, Part 2, Clause 4.</td></tr><tr><td>Evolutionary Versioning Prose</td><td>Remove historical development narratives, beta-version discussions, and Version 0.x compatibility explanations.</td><td>ISO standards describe current requirements, not product-development history. See ISO/IEC Directives, Part 2, Clauses 11 and 12.</td></tr><tr><td>Clause Header Casing</td><td>Convert all clause and subclause headings to sentence case.</td><td>Title-case headings are not permitted by ISO house style. See ISO/IEC Directives, Part 2, Clause 22.2.</td></tr><tr><td>Self-References</td><td>Replace all occurrences of “this specification”, “this standard”, and “this format” with “this document”.</td><td>ISO publications refer to themselves exclusively as “this document”. See ISO/IEC Directives, Part 2, Clause 10.6.</td></tr><tr><td>Scope Clause Compliance</td><td>Rewrite Clause 1 to describe the subject matter only and remove normative statements, implementation obligations, and references to conformance requirements.</td><td>The Scope clause shall define the extent and field of application of the document and shall not contain requirements. See ISO/IEC Directives, Part 2, Clause 14.</td></tr><tr><td>Normative References Clause</td><td>Create Clause 2 immediately after Scope. If no references are required, insert: “There are no normative references in this document.”</td><td>Clause 2 is mandatory. See ISO/IEC Directives, Part 2, Clause 15.</td></tr><tr><td>External Dependency Classification</td><td>Review references to XML, XSD, Unicode, URI specifications, and RFCs, classifying each as normative (Clause 2) or informative (Bibliography).</td><td>Any referenced document required to implement this document shall appear in Clause 2. See ISO/IEC Directives, Part 2, Clause 15.</td></tr><tr><td>Terms and Definitions Clause</td><td>Convert “Terminology” into “Terms and definitions” and format all entries according to ISO terminology conventions.</td><td>Definitions shall follow the prescribed ISO structure. See ISO/IEC Directives, Part 2, Clause 16.</td></tr><tr><td>Entry Notes in Definitions</td><td>Convert embedded explanatory remarks into formal “Note X to entry:” format.</td><td>Informal notes embedded in definitions are not permitted. See ISO/IEC Directives, Part 2, Clause 16.5.9.</td></tr><tr><td>Terminological Source Attribution</td><td>Add formal [SOURCE: ...] citations to imported definitions.</td><td>Borrowed definitions require source attribution. See ISO/IEC Directives, Part 2, Clause 16.5.10.</td></tr><tr><td>Terminology Consistency Audit</td><td>Establish a single preferred term for each concept and remove synonyms throughout the document.</td><td>ISO drafting follows a one-concept–one-term principle. See ISO/IEC Directives, Part 2, Clause 16.</td></tr><tr><td>Symbols and Abbreviated Terms Clause</td><td>Create Clause 4 or merge abbreviations into Clause 3.</td><td>Acronyms such as OTSL, XML, VLM, RAG, PII, GDPR, and XSD require centralized treatment. See ISO/IEC Directives, Part 2, Clause 17.</td></tr><tr><td>Conformance Definition</td><td>Create Clause 5 Conformance defining the implementation classes eligible to claim compliance.</td><td>Requirements cannot exist without identifying the responsible implementation target. See ISO/IEC Directives, Part 2, Clause 33.</td></tr><tr><td>Conformance Classes</td><td>Define separate conformance classes where applicable (e.g., document producers, validators, parsers, processors, renderers).</td><td>Distinct implementation categories may require different obligations and test criteria. See ISO/IEC Directives, Part 2, Clause 33.</td></tr><tr><td>Requirement Traceability</td><td>Ensure every “shall” statement identifies a responsible subject and can be objectively tested.</td><td>Requirements must be measurable and verifiable. See ISO/IEC Directives, Part 2, Clause 33.</td></tr><tr><td>RFC Verbal Compliance</td><td>Replace RFC 2119 uppercase keywords (MUST, SHOULD, MAY) with ISO verbal forms (shall, should, may).</td><td>ISO does not recognize RFC keyword conventions. See ISO/IEC Directives, Part 2, Clause 7.</td></tr><tr><td>Introduction Compliance</td><td>Remove all requirements, permissions, recommendations, and implementation rules from the Introduction.</td><td>The Introduction is informative only. See ISO/IEC Directives, Part 2, Clause 13.</td></tr><tr><td>Informative Annex Compliance</td><td>Remove normative language from all informative annexes.</td><td>Informative annexes shall not contain requirements. See ISO/IEC Directives, Part 2, Clause 20.2.</td></tr><tr><td>Annex Naming</td><td>Rename Appendix A/B/C to Annex A (normative), Annex B (informative), and Annex C (informative).</td><td>ISO does not use the term “Appendix”. See ISO/IEC Directives, Part 2, Clause 20.</td></tr><tr><td>Annex Reference Audit</td><td>Ensure Annexes A, B, and C are explicitly referenced from the body text.</td><td>Unreferenced annexes are commonly flagged during editorial review. See ISO/IEC Directives, Part 2, Clause 20.</td></tr></tbody></table>
+<p></p>
+<strong><p>Phase 2</p></strong>
+<table><tbody><tr><th><strong><p>Feature</p></strong></th><th><strong><p>Action Needed</p></strong></th><th><strong><p>Comment/Links</p></strong></th></tr><tr><td>Cross-Reference Normalization</td><td>Replace Markdown anchors and informal references with ISO clause references.</td><td>References should use forms such as “see 7.3.2” or “see Annex A”. See ISO/IEC Directives, Part 2, Clause 10.</td></tr><tr><td>Hanging Paragraph Subclauses</td><td>Insert “General” subclauses beneath major clauses before introducing subordinate subclauses.</td><td>Prevents hanging paragraphs and ambiguous clause structures. See ISO/IEC Directives, Part 2, Clause 22.3.3.</td></tr><tr><td>Orphan Subclause Remediation</td><td>Ensure any clause containing a subclause .1 also contains a .2 or merge the subdivision back into the parent clause.</td><td>ISO numbering rules prohibit single-child subdivisions. See ISO/IEC Directives, Part 2, Clause 22.3.2.</td></tr><tr><td>XML Tag Typography</td><td>Apply consistent literal formatting to element names, attributes, markup fragments, and grammar symbols.</td><td>Distinguishes identifiers from prose and reduces ambiguity. See ISO/IEC Directives, Part 2, Clauses 9 and 24.</td></tr><tr><td>Formal Language Notation</td><td>Introduce a dedicated clause describing any normative grammar notation, schema language, or syntax conventions.</td><td>Formal languages should be specified using recognized notation rather than examples alone. See ISO/IEC Directives, Part 2, Clause 9.2.</td></tr><tr><td>Attribute Value Enumerations</td><td>Consolidate controlled vocabularies and attribute values into structured tables or formal rules.</td><td>Improves implementability, validation, and conformance testing. See ISO/IEC Directives, Part 2, Clause 5.6 &amp; Clause 29.</td></tr><tr><td>Number Formatting</td><td>Replace comma-separated thousands with ISO spacing conventions (e.g., 65 535).</td><td>See ISO/IEC Directives, Part 2, Clause 9.1.</td></tr><tr><td>Printable URI / URL Strings</td><td>Display explicit URI strings for externally referenced resources.</td><td>Documents must remain usable when printed. See ISO/IEC Directives, Part 2, Clause 10.3.</td></tr><tr><td>Bi-directional Reference Auditing</td><td>Verify that all normative references are cited normatively and all bibliography entries are cited informatively.</td><td>Orphan references are not permitted. See ISO/IEC Directives, Part 2, Clauses 10.1 and 15.1.</td></tr><tr><td>Font and Style Normalization</td><td>Remove non-standard formatting, decorative boxes, custom colors, and visual styling.</td><td>ISO publishing systems normalize typography and layout automatically. See ISO/IEC Directives, Part 2, Clause 1.</td></tr><tr><td>Informative Code / Example Marking</td><td>Label all examples explicitly as EXAMPLE.</td><td>Examples must be clearly distinguished from requirements. See ISO/IEC Directives, Part 2, Clause 25.</td></tr><tr><td>Example Separation</td><td>Audit explanatory text surrounding examples to ensure examples cannot be interpreted as normative requirements.</td><td>Examples are informative only. See ISO/IEC Directives, Part 2, Clause 25.</td></tr><tr><td>Tabular Formats</td><td>Convert pipe-delimited text tables into proper table structures.</td><td>Tables shall be structurally defined. See ISO/IEC Directives, Part 2, Clause 29.</td></tr><tr><td>Non-Normative Implementation Narrative</td><td>Move implementation guidance and authoring-process commentary into notes or informative annexes.</td><td>Standards define technical outcomes, not internal author workflows. See ISO/IEC Directives, Part 2, Clause 24.</td></tr><tr><td>Mermaid Diagram Transmutation</td><td>Convert Mermaid source code into static figures.</td><td>Text-based diagram source code is completely unsuitable for ISO publication systems. See ISO/IEC Directives, Part 2, Clause 28.6.4.</td></tr><tr><td>Graphic Text Normalization</td><td>Standardize figure typography and remove branding from graphics.</td><td>Figures shall be neutral, completely clear, legible, and publication-ready. See ISO/IEC Directives, Part 2, Clause 28.5.2.</td></tr><tr><td>Bibliography Construction</td><td>Relocate all informative references into a final unnumbered Bibliography.</td><td>See ISO/IEC Directives, Part 2, Clause 21.</td></tr><tr><td>Asset Caption Formatting</td><td>Convert captions to ISO figure/table caption style and sentence case.</td><td>See ISO/IEC Directives, Part 2, Clause 28.2 &amp; Clause 29.2.</td></tr><tr><td>Commercial Tools Footnotes</td><td>Add non-endorsement wording for references to trademarked products or technologies.</td><td>See ISO/IEC Directives, Part 2, Clause 31.</td></tr><tr><td>Mathematical Interval &amp; Unit Formatting</td><td>Convert interval notation and enforce spacing between values and units.</td><td>See ISO/IEC Directives, Part 2, Clauses 9.1 and 9.4.1.</td></tr><tr><td>Percentage Symbol Clean-up</td><td>Replace % in prose with “per cent”.</td><td>The symbol % is restricted entirely to tabular matrices and literal code blocks. See ISO/IEC Directives, Part 2, Clause 9.4.1 &amp; Annex B.</td></tr><tr><td>Schema Placeholder Optimization</td><td>Remove placeholder values, ellipses, and drafting artifacts from examples.</td><td>Draft remnants are flagged as incomplete specification leaks by automated ingestion systems. See ISO/IEC Directives, Part 2, Clause 4.1.</td></tr><tr><td>Subscript Coordinate Notation</td><td>Convert snake_case mathematical variables into proper mathematical notation with subscripts.</td><td>See ISO/IEC Directives, Part 2, Clause 9.3.1.</td></tr></tbody></table>
+<p></p>
+</div>
+</body>
+</html>

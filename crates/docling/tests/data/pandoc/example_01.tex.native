@@ -1,0 +1,107 @@
+[ Header
+    1 ( "" , [] , [] ) [ Str "Sample" , Space , Str "Document" ]
+, Para [ Str "Test" , Space , Str "Author" ]
+, Header 2 ( "" , [] , [] ) [ Str "Introduction" ]
+, Para
+    [ Str "This"
+    , Space
+    , Str "is"
+    , Space
+    , Str "the"
+    , Space
+    , Str "first"
+    , Space
+    , Str "paragraph"
+    , Space
+    , Str "of"
+    , Space
+    , Str "the"
+    , Space
+    , Str "introduction."
+    ]
+, Header 2 ( "" , [] , [] ) [ Str "Background" ]
+, Para
+    [ Str "Some"
+    , Space
+    , Str "background"
+    , Space
+    , Str "information"
+    , Space
+    , Str "here"
+    , Space
+    , Str "with"
+    , Space
+    , Str "bold"
+    , Space
+    , Str "and"
+    , Space
+    , Str "italic"
+    , Space
+    , Str "text."
+    ]
+, BulletList
+    [ [ Plain
+          [ Str "First"
+          , Space
+          , Str "item"
+          , Space
+          , Str "in"
+          , Space
+          , Str "unordered"
+          , Space
+          , Str "list"
+          ]
+      ]
+    , [ Plain
+          [ Str "Second"
+          , Space
+          , Str "item"
+          , Space
+          , Str "in"
+          , Space
+          , Str "unordered"
+          , Space
+          , Str "list"
+          ]
+      ]
+    ]
+, BulletList
+    [ [ Plain
+          [ Str "First"
+          , Space
+          , Str "item"
+          , Space
+          , Str "in"
+          , Space
+          , Str "ordered"
+          , Space
+          , Str "list"
+          ]
+      ]
+    , [ Plain
+          [ Str "Second"
+          , Space
+          , Str "item"
+          , Space
+          , Str "in"
+          , Space
+          , Str "ordered"
+          , Space
+          , Str "list"
+          ]
+      ]
+    ]
+, Header
+    3 ( "" , [] , [] ) [ Str "Nested" , Space , Str "Section" ]
+, Para
+    [ Str "A"
+    , Space
+    , Str "subsection"
+    , Space
+    , Str "with"
+    , Space
+    , Str "more"
+    , Space
+    , Str "content."
+    ]
+]

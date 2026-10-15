@@ -83,7 +83,9 @@ async fn predict_structure(
             break;
         }
     }
-    if book.n == 0 {
+    // A runaway row (tf_core::BboxBook::runaway) is rejected like native:
+    // the region takes the geometric fallback.
+    if book.n == 0 || book.runaway() {
         return Ok(Vec::new());
     }
 

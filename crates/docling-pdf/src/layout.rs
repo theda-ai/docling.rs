@@ -59,7 +59,8 @@ pub struct Region {
 #[cfg(feature = "ocr-prep")]
 #[derive(Clone, Copy)]
 pub enum LayoutSrc<'a> {
-    /// The scale-1.0 page image (`PdfPage::image_layout`), docling-exact.
+    /// The scale-1.0 page image (`PdfPage::image_layout`), exact against
+    /// docling's pypdfium2 backend (#478).
     PageImage(&'a image::RgbImage),
     /// Any other page bitmap — legacy stretch.
     Raw(&'a image::RgbImage),
@@ -166,10 +167,10 @@ impl LayoutModel {
                  scripts/install/download_dependencies.sh from a docling.rs \
                  checkout (https://github.com/docling-project/docling.rs), or \
                  set DOCLING_LAYOUT_ONNX. A digital PDF's embedded text layer \
-                 converts without models in no-OCR mode (CLI: --no-ocr)"
+                 converts without models in text-layer-only mode (CLI: --text-layer-only)"
             ));
         }
-        let mut builder = Session::builder()
+        let mut builder = docling_onnx::session_builder()
             .map_err(|e| format!("layout: builder: {e}"))?
             // Let inference use the available cores (ort otherwise defaults low);
             // a large PDF runs this model once per page.
@@ -264,8 +265,9 @@ impl LayoutModel {
                 if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                     eprintln!(
                         "docling-pdf: layout model rejected a {}-page batch ({e}); \
-                         falling back to per-page inference — re-export with \
-                         scripts/install/export_layout.py for batched layout",
+                         falling back to per-page inference (same output, lower \
+                         throughput) — re-export with scripts/install/export_layout.py \
+                         for batched layout, or set DOCLING_RS_PDF_LAYOUT_BATCH=1",
                         pages.len()
                     );
                 }
@@ -302,7 +304,7 @@ impl LayoutModel {
         }
         // Resize each page to 640×640 (RT-DETR ignores aspect ratio), rescale to
         // [0,1], lay out as NCHW. The kernel depends on the source (see
-        // [`LayoutSrc`]): the docling-exact page image goes through Pillow's
+        // [`LayoutSrc`]): the pypdfium2-exact page image goes through Pillow's
         // BILINEAR (the RT-DETR processor's kernel, byte-for-byte), raw
         // bitmaps keep the legacy Triangle stretch.
         let n = (SIDE * SIDE) as usize;
