@@ -1151,7 +1151,9 @@ pub fn promote_captioned_table_pictures(regions: &mut [Region], cells: &[TextCel
             let p = &regions[i];
             p.label == "picture"
                 && p.score >= crate::layout::label_threshold("picture")
-                && regions.iter().any(|t| t.label == "table" && iou(p, t) > 0.8)
+                && regions
+                    .iter()
+                    .any(|t| t.label == "table" && iou(p, t) > 0.8)
                 && regions.iter().any(|c| {
                     c.label != "picture"
                         && c.label != "table"
@@ -1173,7 +1175,9 @@ pub fn promote_captioned_table_pictures(regions: &mut [Region], cells: &[TextCel
 /// number.
 fn is_table_caption(text: &str) -> bool {
     let mut words = text.split_whitespace();
-    words.next().is_some_and(|w| w.eq_ignore_ascii_case("table"))
+    words
+        .next()
+        .is_some_and(|w| w.eq_ignore_ascii_case("table"))
         && words
             .next()
             .is_some_and(|n| n.chars().next().is_some_and(|c| c.is_ascii_digit()))
@@ -4386,6 +4390,7 @@ mod tests {
             vec![("picture", 10.0), ("table", 0.0), ("text", 5.0)]
         );
     }
+    use super::promote_captioned_table_pictures;
     use super::{
         code_region_text, float_running_head, merge_continuations, resolve_link_anchors,
         StreamAssembler,
@@ -5221,7 +5226,13 @@ mod tests {
     /// over the same box, under the caption "Table 2. Pinning information".
     #[test]
     fn a_picture_captioned_as_a_table_with_a_table_proposal_becomes_a_table() {
-        let cells = vec![cell("Table 2. Pinning information", 50.0, 119.0, 170.0, 128.0)];
+        let cells = vec![cell(
+            "Table 2. Pinning information",
+            50.0,
+            119.0,
+            170.0,
+            128.0,
+        )];
         let mut regions = vec![
             region("picture", 0.736, 49.0, 127.0, 546.0, 231.0),
             region("section_header", 0.663, 50.0, 119.0, 170.0, 128.0),
@@ -5245,7 +5256,13 @@ mod tests {
         promote_captioned_table_pictures(&mut regions, &figure);
         assert_eq!(regions[0].label, "picture");
 
-        let table = vec![cell("Table 2. Pinning information", 50.0, 119.0, 170.0, 128.0)];
+        let table = vec![cell(
+            "Table 2. Pinning information",
+            50.0,
+            119.0,
+            170.0,
+            128.0,
+        )];
         let mut regions = vec![
             region("picture", 0.736, 49.0, 127.0, 546.0, 231.0),
             region("caption", 0.6, 50.0, 119.0, 170.0, 128.0),
