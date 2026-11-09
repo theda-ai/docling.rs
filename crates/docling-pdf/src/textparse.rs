@@ -2767,6 +2767,27 @@ pub(crate) fn glyph_name_to_char(name: &[u8]) -> Option<char> {
         "congruent" => '\u{2245}',
         "dotmath" => '\u{22C5}',
         "asteriskmath" => '\u{2217}',
+        // The spacing diacritics and the punctuation of the classic
+        // Distiller/Acrobat `/Differences` block (`Lslash /lslash /minus
+        // /fraction /breve /caron /dotlessi /dotaccent /hungarumlaut /ogonek
+        // /ring /fi /fl` at codes 19-31), which `AGL_LATIN` (letters only) does
+        // not hold. Unresolved, `ring` — the accent such a font draws for the
+        // degree in `µV/˚C` — was dropped while its advance still took space,
+        // so the unit read `µV/ C`.
+        "breve" => '\u{02D8}',
+        "caron" => '\u{02C7}',
+        "circumflex" => '\u{02C6}',
+        "dotaccent" => '\u{02D9}',
+        "hungarumlaut" => '\u{02DD}',
+        "ogonek" => '\u{02DB}',
+        "ring" => '\u{02DA}',
+        "tilde" => '\u{02DC}',
+        "dagger" => '\u{2020}',
+        "daggerdbl" => '\u{2021}',
+        "guilsinglleft" => '\u{2039}',
+        "guilsinglright" => '\u{203A}',
+        "perthousand" => '\u{2030}',
+        "lozenge" => '\u{25CA}',
         _ => {
             if let Ok(i) = AGL_LATIN.binary_search_by_key(&s, |(n, _)| n) {
                 return Some(AGL_LATIN[i].1);
@@ -3946,5 +3967,135 @@ mod vestigial_layer {
             "Do not distribute",
         ])];
         assert!(!super::text_layer_is_vestigial(&one_pager));
+    }
+}
+
+/// A `/Differences` array can name a glyph directly by its Adobe Glyph List
+/// name -- `ring`, `breve`, `caron`, an accented Latin letter -- regardless of
+/// the font's *base* encoding. `glyph_name_to_char()` only covered a small
+/// hand-picked subset of the AGL (ASCII, Greek, math operators and, later, the
+/// Latin letters of `AGL_LATIN` -- but not the spacing diacritics); any name outside that subset resolved to `None` and the
+/// glyph was silently dropped from the text while its advance still consumed
+/// layout space. These tests cover undefined *names* in a `/Differences`
+/// override, independent of base encoding.
+///
+/// The motivating case: a WinAnsiEncoding-based Type1 font whose
+/// `/Differences` array is exactly the classic Distiller/Acrobat subsetting
+/// block `19/Lslash/lslash/minus/fraction/breve/caron/dotlessi/dotaccent
+/// /hungarumlaut/ogonek/ring/fi/fl` (codes 19-31) -- a real vendor datasheet's
+/// "Average TC of Input" row prints `µV/˚C` (micro sign, V, slash, ring above,
+/// C) using code 29 (`ring`) for the degree-like accent; docling read it as
+/// `µV/ C`, poppler's `pdftotext` as `µV/˚C`.
+#[cfg(test)]
+mod differences_glyph_names {
+    /// A one-page PDF: a Type1 font with `/BaseEncoding /WinAnsiEncoding` plus
+    /// the real Distiller `/Differences` block (codes 19-31), and a single
+    /// `Tj` string of raw (unescaped) codes.
+    fn pdf_with_differences_string(raw_string_bytes: &[u8]) -> Vec<u8> {
+        let fontdict = b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica\
+            /Encoding<</Type/Encoding/BaseEncoding/WinAnsiEncoding\
+            /Differences[19/Lslash/lslash/minus/fraction/breve/caron\
+            /dotlessi/dotaccent/hungarumlaut/ogonek/ring/fi/fl]>>>>"
+            .to_vec();
+        let mut content = b"BT /F1 12 Tf 72 700 Td (".to_vec();
+        content.extend_from_slice(raw_string_bytes);
+        content.extend_from_slice(b") Tj ET\n");
+        let stream = format!("<</Length {}>>stream\n", content.len()).into_bytes();
+        let objs: Vec<Vec<u8>> = vec![
+            b"<</Type/Catalog/Pages 2 0 R>>".to_vec(),
+            b"<</Type/Pages/Kids[3 0 R]/Count 1>>".to_vec(),
+            b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 595 842]/Contents 4 0 R\
+               /Resources<</Font<</F1 5 0 R>>>>>>"
+                .to_vec(),
+            [stream.as_slice(), content.as_slice(), b"endstream"].concat(),
+            fontdict,
+        ];
+        let mut out = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, body) in objs.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend_from_slice(format!("{} 0 obj", i + 1).as_bytes());
+            out.extend_from_slice(body);
+            out.extend_from_slice(b"endobj\n");
+        }
+        let xref_at = out.len();
+        out.extend_from_slice(format!("xref\n0 {}\n", objs.len() + 1).as_bytes());
+        out.extend_from_slice(b"0000000000 65535 f \n");
+        for off in &offsets {
+            out.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(
+            format!("trailer<</Size {}/Root 1 0 R>>\n", objs.len() + 1).as_bytes(),
+        );
+        out.extend_from_slice(format!("startxref\n{xref_at}\n%%EOF\n").as_bytes());
+        out
+    }
+
+    fn decoded_text(pdf: &[u8]) -> String {
+        super::pdf_textlines(pdf)
+            .into_iter()
+            .flat_map(|(_, _, cells)| cells)
+            .map(|c| c.text)
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    /// Code 29, named `ring` in the `/Differences` array, must decode to
+    /// U+02DA RING ABOVE, not vanish.
+    #[test]
+    fn ring_glyph_name_is_not_dropped() {
+        let pdf = pdf_with_differences_string(&[29]);
+        let text = decoded_text(&pdf);
+        assert_eq!(
+            text, "\u{02DA}",
+            "code 29 (/ring) must decode, got {text:?}"
+        );
+    }
+
+    /// Code 23, named `breve`, must decode to U+02D8 BREVE.
+    #[test]
+    fn breve_glyph_name_is_not_dropped() {
+        let pdf = pdf_with_differences_string(&[23]);
+        let text = decoded_text(&pdf);
+        assert_eq!(
+            text, "\u{02D8}",
+            "code 23 (/breve) must decode, got {text:?}"
+        );
+    }
+
+    /// Code 24, named `caron`, must decode to U+02C7 CARON.
+    #[test]
+    fn caron_glyph_name_is_not_dropped() {
+        let pdf = pdf_with_differences_string(&[24]);
+        let text = decoded_text(&pdf);
+        assert_eq!(
+            text, "\u{02C7}",
+            "code 24 (/caron) must decode, got {text:?}"
+        );
+    }
+
+    /// The rest of the block (`Lslash lslash dotlessi dotaccent hungarumlaut
+    /// ogonek`) must resolve too, not just the three names the motivating bug
+    /// report named.
+    #[test]
+    fn rest_of_distiller_block_is_not_dropped() {
+        let pdf = pdf_with_differences_string(&[19, 20, 25, 26, 27, 28]);
+        let text = decoded_text(&pdf);
+        assert_eq!(
+            text, "\u{0141}\u{0142}\u{0131}\u{02D9}\u{02DD}\u{02DB}",
+            "got {text:?}"
+        );
+    }
+
+    /// The real reproducer: a WinAnsiEncoding font whose text run is micro
+    /// sign (native WinAnsi 0xB5), `V`, `/`, code 29 (`/ring`), `C` -- must
+    /// decode to `µV/˚C` whole, not collapse to `µV/ C` with the ring glyph
+    /// silently eaten.
+    #[test]
+    fn microvolts_per_degree_c_survives_whole_via_differences_name() {
+        let raw: Vec<u8> = vec![0xB5, b'V', b'/', 29, b'C'];
+        let pdf = pdf_with_differences_string(&raw);
+        let text = decoded_text(&pdf);
+        assert_eq!(text, "\u{00B5}V/\u{02DA}C", "got {text:?}");
     }
 }
